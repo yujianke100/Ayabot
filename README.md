@@ -59,7 +59,9 @@
 
 ## systemd 守护进程（Linux 长期后台运行）
 
-在 `/etc/systemd/system/bili-live-bot.service` 创建：
+python3 -m venv .venv构建环境，source .venv/bin/activate启动，然后安装依赖。
+
+在 `/etc/systemd/system/bili-live-bot.service` 创建（按实际路径修改 `User` 和 `WorkingDirectory`）：
 
 ```ini
 [Unit]
@@ -68,9 +70,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/opt/bilibili-live-robot
-ExecStart=/opt/bilibili-live-robot/.venv/bin/python -m app.main
+User=root
+WorkingDirectory=/root/bilibili-live-robot
+ExecStart=/root/bilibili-live-robot/.venv/bin/python -m app.main
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
