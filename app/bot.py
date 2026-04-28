@@ -235,13 +235,8 @@ class LiveRobot:
         gift_name = gift["gift_name"]
         gift_num = gift["gift_num"]
 
+        # Record to DB regardless of cooldown — always persist stats
         now = time.time()
-        last = self._last_thanks_ts.get(uid, 0.0)
-        if now - last < self.config.cooldown.thanks_user_seconds:
-            return
-
-        self._last_thanks_ts[uid] = now
-
         blind = _extract_blindbox_profit(gift["raw"])
         if not blind["is_blind_box"]:
             self.logger.debug(
@@ -270,6 +265,13 @@ class LiveRobot:
             raw_json=json.dumps(gift["raw"], ensure_ascii=False),
         )
         self.store.record_gift_event(event_row)
+
+        # Cooldown only gates the thank-you message, not recording
+        last = self._last_thanks_ts.get(uid, 0.0)
+        if now - last < self.config.cooldown.thanks_user_seconds:
+            return
+
+        self._last_thanks_ts[uid] = now
 
         thanks = (
             self._thanks_template.replace("{uname}", uname)
@@ -636,6 +638,11 @@ def _parse_command(text: str) -> Optional[tuple[str, str]]:
     if compact.startswith("#盲盒统计：") or compact.startswith("#盲盒统计:"):
         prefix = "#盲盒统计：" if compact.startswith("#盲盒统计：") else "#盲盒统计:"
         return "blindbox_me", compact[len(prefix):]
+
+    if compact in ("#欢迎：开", "#欢迎:开"):
+        return "welcome_on", ""
+    if compact in ("#欢迎：关", "#欢迎:关"):
+        return "welcome_off", ""
 
     if s == "#欢迎 开":
         return "welcome_on", ""
