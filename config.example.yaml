@@ -1,0 +1,56 @@
+room_display_id: 123456
+anchor_uid: 1000000
+
+credential:
+  sessdata: ""
+  bili_jct: ""
+  buvid3: ""
+  dedeuserid: ""
+
+features:
+  welcome_enabled: true
+  welcome_template: "Welcome {uname}"
+  thanks_enabled: true
+  thanks_template: "感谢 {uname} 送出的 {gift_name} x{gift_num}"
+  blindbox_enabled: true
+  allow_admin_as_anchor: false
+  guard_thanks_enabled: true
+  guard_thanks_template_captain: "Thanks {uname} for buying Captain x{months}"
+  guard_thanks_template_commander: "Thanks {uname} for buying Commander x{months}"
+  guard_thanks_template_governor: "Thanks {uname} for buying Governor x{months}"
+  guard_thanks_template_default: "Thanks {uname} for guard support ({guard_type}) x{months}"
+  connected_message: "机器人已上线～"
+  connected_message_enabled: true
+  keyword_reply:
+    enabled: false
+    cooldown: 30
+    rules:
+      - keywords: ["价格", "多少钱", "怎么买"]
+        reply: "价格请私信主播～"
+        match_mode: "contains"
+      - keywords: ["群", "QQ群", "粉丝群"]
+        reply: "粉丝群：123456789"
+      - keywords: ["点歌"]
+        reply: "暂不支持点歌哦"
+
+cooldown:
+  welcome_user_seconds: 600
+  thanks_user_seconds: 10
+
+rate_limit:
+  send_interval_seconds: 1.2
+  retry_count: 2
+
+runtime:
+  poll_interval_seconds: 20
+  timezone: "Asia/Shanghai"
+  log_level: "INFO"
+
+storage:
+  sqlite_path: "data/bot.db"
+
+auth:
+  credential_store_path: "data/credential.json"
+  auto_login: true
+  qr_poll_seconds: 1.0
+  refresh_interval_seconds: 3600

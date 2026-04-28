@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+config.yaml
+.env
+*.log
+data/*.db
+data/credential.json
+config.yaml
