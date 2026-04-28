@@ -56,3 +56,45 @@
 可用占位符：`{uname}`、`{gift_name}`、`{gift_num}`。
 
 示例：`@{uname} 感谢你送出的 {gift_name} x{gift_num}！`
+
+## systemd 守护进程（Linux 长期后台运行）
+
+在 `/etc/systemd/system/bili-live-bot.service` 创建：
+
+```ini
+[Unit]
+Description=Bilibili Live Robot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/bilibili-live-robot
+ExecStart=/opt/bilibili-live-robot/.venv/bin/python -m app.main
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启用并启动：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable bili-live-bot
+sudo systemctl start bili-live-bot
+```
+
+查看日志：
+
+```bash
+sudo journalctl -u bili-live-bot -f
+```
+
+**注意事项**：
+
+1. 确保 `WorkingDirectory` 路径下的 `config.yaml` 和凭据文件已就位。
+2. 使用 `Restart=always`，进程退出后自动拉起。
+3. 日志统一走 stdout，交给 journald 管理。`-f` 参数实时跟踪。
