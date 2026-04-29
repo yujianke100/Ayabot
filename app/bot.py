@@ -102,6 +102,8 @@ class LiveRobot:
 
         self._danmaku.on("SEND_GIFT")(self._on_gift)
         self._danmaku.on("COMBO_SEND")(self._on_gift)
+        self._danmaku.on("UNIVERSAL_EVENT_GIFT")(self._on_gift)
+        self._danmaku.on("UNIVERSAL_EVENT_GIFT_V2")(self._on_gift)
         self._danmaku.on("SPECIAL_GIFT")(self._on_special_gift)
         self._danmaku.on("GUARD_BUY")(self._on_guard_buy)
 
@@ -234,6 +236,12 @@ class LiveRobot:
         uname = gift["uname"]
         gift_name = gift["gift_name"]
         gift_num = gift["gift_num"]
+
+        self.logger.debug(
+            "gift event: type=%s uid=%s gift_name=%s num=%s raw_keys=%s",
+            gift["event_type"], uid, gift_name, gift_num,
+            list(gift["raw"].keys()),
+        )
 
         # Record to DB regardless of cooldown — always persist stats
         now = time.time()
@@ -416,7 +424,8 @@ class LiveRobot:
                        "ROOM_REAL_TIME_MESSAGE_UPDATE", "NOTICE_MSG",
                        "LIVE", "PREPARING", "ENTRY_EFFECT", "ROOM_CHANGE",
                        "COMBO_RESOURCE", "COMBO_SEND", "ANIMATION",
-                       "SPECIAL_GIFT", "VERIFICATION_SUCCESSFUL")
+                       "SPECIAL_GIFT", "VERIFICATION_SUCCESSFUL",
+                       "UNIVERSAL_EVENT_GIFT", "UNIVERSAL_EVENT_GIFT_V2")
         if event_type in noisy_exact:
             return
         self.logger.debug("unhandled event: type=%s", event_type)
@@ -483,6 +492,9 @@ def _extract_enter_uid_uname(event: dict[str, Any]) -> tuple[int, str]:
 def _extract_gift_payload(event: dict[str, Any]) -> Optional[dict[str, Any]]:
     data = event.get("data", {})
     payload = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(payload, dict):
+        # Try flat structure (some event types put gift data at data root)
+        payload = data if isinstance(data, dict) else None
     if not isinstance(payload, dict):
         return None
 
