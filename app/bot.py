@@ -289,9 +289,9 @@ class LiveRobot:
 
         if self.config.features.blindbox_enabled and is_blind:
             if profit >= 0:
-                thanks += f"盲盒收益+{profit}电池"
+                thanks += f"收益+{profit}电池"
             else:
-                thanks += f"盲盒收益{profit}电池"
+                thanks += f"收益{profit}电池"
 
         await self._enqueue_message(text=thanks, reply_uid=uid)
 
