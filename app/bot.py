@@ -106,6 +106,8 @@ class LiveRobot:
         self._danmaku.on("UNIVERSAL_EVENT_GIFT_V2")(self._on_gift)
         self._danmaku.on("SPECIAL_GIFT")(self._on_special_gift)
         self._danmaku.on("GUARD_BUY")(self._on_guard_buy)
+        self._danmaku.on("USER_TOAST_MSG")(self._on_guard_buy)
+        self._danmaku.on("USER_TOAST_MSG_V2")(self._on_guard_buy)
 
         self._danmaku.on("ROOM_ADMINS")(self._on_room_admins)
         self._danmaku.on("DANMU_MSG")(self._on_danmaku)
@@ -302,11 +304,13 @@ class LiveRobot:
         )
 
     async def _on_guard_buy(self, event: dict[str, Any]) -> None:
+        event_type = event.get("type", "?")
         if not self.config.features.guard_thanks_enabled:
             return
 
         guard = _extract_guard_buy_payload(event)
         if guard is None:
+            self.logger.debug("guard_buy parse failed: type=%s data=%s", event_type, event.get("data"))
             return
 
         uid = guard["uid"]
@@ -425,7 +429,8 @@ class LiveRobot:
                        "LIVE", "PREPARING", "ENTRY_EFFECT", "ROOM_CHANGE",
                        "COMBO_RESOURCE", "COMBO_SEND", "ANIMATION",
                        "SPECIAL_GIFT", "VERIFICATION_SUCCESSFUL",
-                       "UNIVERSAL_EVENT_GIFT", "UNIVERSAL_EVENT_GIFT_V2")
+                       "UNIVERSAL_EVENT_GIFT", "UNIVERSAL_EVENT_GIFT_V2",
+                       "GUARD_BUY", "USER_TOAST_MSG", "USER_TOAST_MSG_V2")
         if event_type in noisy_exact:
             return
         self.logger.debug("unhandled event: type=%s", event_type)
@@ -520,6 +525,8 @@ def _extract_gift_payload(event: dict[str, Any]) -> Optional[dict[str, Any]]:
 def _extract_guard_buy_payload(event: dict[str, Any]) -> Optional[dict[str, Any]]:
     data = event.get("data", {})
     payload = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(payload, dict):
+        payload = data if isinstance(data, dict) else None
     if not isinstance(payload, dict):
         return None
 
