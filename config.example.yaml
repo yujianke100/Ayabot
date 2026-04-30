@@ -11,7 +11,7 @@ features:
   welcome_enabled: true
   welcome_template: "Welcome {uname}"
   thanks_enabled: true
-  thanks_template: "感谢 {uname} 送出的 {gift_name} x{gift_num}"
+  thanks_template: "感谢 {uname} 的 {gift_name} x{gift_num}"
   blindbox_enabled: true
   allow_admin_as_anchor: false
   guard_thanks_enabled: true
