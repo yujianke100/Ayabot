@@ -377,7 +377,7 @@ class LiveRobot:
                     await self._enqueue_message(text=f"未找到{arg}的盲盒记录", reply_uid=uid)
                     return
                 _uid, blind_count, cost_total, actual_total, profit_total = result
-                text_out = f"{month_label} {arg} 盲盒共{blind_count}个，支出{cost_total}电池，收益{profit_total}电池"
+                text_out = f"{month_label}{arg}盲盒{blind_count}个，支出{cost_total}，收益{profit_total}"
             else:
                 row = self.store.get_user_monthly_blindbox(month=month_key, uid=uid)
                 if row is None:
@@ -386,7 +386,7 @@ class LiveRobot:
                     await self._enqueue_message(text=text_out, reply_uid=uid)
                     return
                 blind_count, cost_total, actual_total, profit_total = row
-                text_out = f"{month_label} 盲盒共{blind_count}个，支出{cost_total}电池，收益{profit_total}电池"
+                text_out = f"{month_label}盲盒{blind_count}个，支出{cost_total}，收益{profit_total}"
             await self._enqueue_message(text=text_out, reply_uid=uid)
             return
 
