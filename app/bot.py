@@ -348,6 +348,14 @@ class LiveRobot:
 
         uid, text, moderator_hint = parsed
         self.logger.debug("danmaku received: uid=%s text=%s", uid, text)
+
+        # Anchor exclusive reply
+        aer = self.config.features.anchor_exclusive_reply
+        if uid == self.config.anchor_uid and text.strip() == aer.trigger_keyword:
+            self.logger.debug("anchor exclusive reply triggered: uid=%s text=%s", uid, text)
+            await self._enqueue_message(text=aer.reply_template, reply_uid=uid)
+            return
+
         command = _parse_command(text)
         if command is None:
             self.logger.debug("danmaku is not command: uid=%s text=%s", uid, text)

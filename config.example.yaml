@@ -21,6 +21,9 @@ features:
   guard_thanks_template_default: "Thanks {uname} for guard support ({guard_type}) x{months}"
   connected_message: "机器人已上线～"
   connected_message_enabled: true
+  anchor_exclusive_reply:
+    trigger_keyword: "文文"
+    reply_template: "在的喵，找文文有什么事吗？"
   keyword_reply:
     enabled: false
     cooldown: 30

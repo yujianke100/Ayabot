@@ -16,6 +16,12 @@ class CredentialConfig:
 
 
 @dataclass(slots=True)
+class AnchorExclusiveReplyConfig:
+    trigger_keyword: str
+    reply_template: str
+
+
+@dataclass(slots=True)
 class FeatureConfig:
     welcome_enabled: bool
     welcome_template: str
@@ -28,6 +34,7 @@ class FeatureConfig:
     guard_thanks_template_commander: str
     guard_thanks_template_governor: str
     guard_thanks_template_default: str
+    anchor_exclusive_reply: AnchorExclusiveReplyConfig
     keyword_reply: KeywordReplyConfig
     connected_message: str
     connected_message_enabled: bool
@@ -161,6 +168,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
                     "Thanks {uname} for guard support ({guard_type}) x{months}",
                 )
             ),
+            anchor_exclusive_reply=_parse_anchor_reply(features.get("anchor_exclusive_reply", {})),
             keyword_reply=_parse_keyword_reply(features.get("keyword_reply", {})),
             connected_message=str(features.get("connected_message", "")),
             connected_message_enabled=bool(features.get("connected_message_enabled", True)),
@@ -187,6 +195,15 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             qr_poll_seconds=float(auth.get("qr_poll_seconds", 1.0)),
             refresh_interval_seconds=int(auth.get("refresh_interval_seconds", 3600)),
         ),
+    )
+
+
+def _parse_anchor_reply(raw: Any) -> AnchorExclusiveReplyConfig:
+    if not isinstance(raw, dict):
+        return AnchorExclusiveReplyConfig(trigger_keyword="文文", reply_template="在的喵")
+    return AnchorExclusiveReplyConfig(
+        trigger_keyword=str(raw.get("trigger_keyword", "文文")),
+        reply_template=str(raw.get("reply_template", "在的喵")),
     )
 
 
