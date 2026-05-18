@@ -16,9 +16,10 @@ class CredentialConfig:
 
 
 @dataclass(slots=True)
-class AnchorExclusiveReplyConfig:
+class AnchorExclusiveRule:
     trigger_keyword: str
     reply_template: str
+    is_regex: bool = False
 
 
 @dataclass(slots=True)
@@ -34,7 +35,7 @@ class FeatureConfig:
     guard_thanks_template_commander: str
     guard_thanks_template_governor: str
     guard_thanks_template_default: str
-    anchor_exclusive_reply: AnchorExclusiveReplyConfig
+    anchor_exclusive_reply: list[AnchorExclusiveRule]
     keyword_reply: KeywordReplyConfig
     connected_message: str
     connected_message_enabled: bool
@@ -198,13 +199,20 @@ def load_config(path: str = "config.yaml") -> AppConfig:
     )
 
 
-def _parse_anchor_reply(raw: Any) -> AnchorExclusiveReplyConfig:
-    if not isinstance(raw, dict):
-        return AnchorExclusiveReplyConfig(trigger_keyword="文文", reply_template="在的喵")
-    return AnchorExclusiveReplyConfig(
-        trigger_keyword=str(raw.get("trigger_keyword", "文文")),
-        reply_template=str(raw.get("reply_template", "在的喵")),
-    )
+def _parse_anchor_reply(raw: Any) -> list[AnchorExclusiveRule]:
+    if not isinstance(raw, list):
+        return []
+    
+    rules: list[AnchorExclusiveRule] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        rules.append(AnchorExclusiveRule(
+            trigger_keyword=str(item.get("trigger_keyword", "")),
+            reply_template=str(item.get("reply_template", "")),
+            is_regex=bool(item.get("is_regex", False)),
+        ))
+    return rules
 
 
 def _parse_keyword_reply(raw: Any) -> KeywordReplyConfig:

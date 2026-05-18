@@ -22,8 +22,11 @@ features:
   connected_message: "机器人已上线～"
   connected_message_enabled: true
   anchor_exclusive_reply:
-    trigger_keyword: "文文"
-    reply_template: "在的喵，找文文有什么事吗？"
+    - trigger_keyword: "^文文"
+      reply_template: "在的喵，找文文有什么事吗？"
+      is_regex: true
+    - trigger_keyword: "下班"
+      reply_template: "主播辛苦了喵！"
   keyword_reply:
     enabled: false
     cooldown: 30
