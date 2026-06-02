@@ -402,7 +402,7 @@ class LiveRobot:
                 if uid == self.config.anchor_uid or self._has_control_permission(uid, moderator_hint):
                     total = self.store.get_monthly_total_blindbox(month=month_key)
                     blind_count, cost_total, actual_total, profit_total = total
-                    text_out = f"{month_label}全站盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
+                    text_out = f"{month_label}本直播间盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
                 else:
                     row = self.store.get_user_monthly_blindbox(month=month_key, uid=uid)
                     if row is None:
