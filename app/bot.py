@@ -348,7 +348,7 @@ class LiveRobot:
             return
 
         uid, text, moderator_hint = parsed
-        self.logger.debug("danmaku received: uid=%s text=%s", uid, text)
+        self.logger.debug("danmaku received: uid=%s text=%s (anchor_uid=%s)", uid, text, self.config.anchor_uid)
 
         # Anchor exclusive reply
         if uid == self.config.anchor_uid:
@@ -386,6 +386,7 @@ class LiveRobot:
         name, arg = command
         self.logger.debug("command parsed: uid=%s name=%s arg=%s", uid, name, arg)
         if name == "blindbox_me":
+            self.logger.info("blindbox stats requested: uid=%s arg=%s", uid, arg)
             now = datetime.now()
             month_key = now.strftime("%Y-%m")
             month_label = f"{now.month}月"
@@ -395,16 +396,22 @@ class LiveRobot:
                     await self._enqueue_message(text=f"未找到{arg}的盲盒记录", reply_uid=uid)
                     return
                 _uid, blind_count, cost_total, actual_total, profit_total = result
-                text_out = f"{month_label}{arg}盲盒{blind_count}个，支出{cost_total}，收益{profit_total}"
+                text_out = f"{month_label}{arg}盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
             else:
-                row = self.store.get_user_monthly_blindbox(month=month_key, uid=uid)
-                if row is None:
-                    gift_event_count, _ = self.store.get_user_monthly_gift_activity(month=month_key, uid=uid)
-                    text_out = f"{month_label} 暂无盲盒记录" if gift_event_count > 0 else f"{month_label} 无送礼记录"
-                    await self._enqueue_message(text=text_out, reply_uid=uid)
-                    return
-                blind_count, cost_total, actual_total, profit_total = row
-                text_out = f"{month_label}盲盒{blind_count}个，支出{cost_total}，收益{profit_total}"
+                # If anchor or admin, show total stats of the room
+                if uid == self.config.anchor_uid or self._has_control_permission(uid, moderator_hint):
+                    total = self.store.get_monthly_total_blindbox(month=month_key)
+                    blind_count, cost_total, actual_total, profit_total = total
+                    text_out = f"{month_label}全站盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
+                else:
+                    row = self.store.get_user_monthly_blindbox(month=month_key, uid=uid)
+                    if row is None:
+                        gift_event_count, _ = self.store.get_user_monthly_gift_activity(month=month_key, uid=uid)
+                        text_out = f"{month_label} 暂无盲盒记录" if gift_event_count > 0 else f"{month_label} 无送礼记录"
+                        await self._enqueue_message(text=text_out, reply_uid=uid)
+                        return
+                    blind_count, cost_total, actual_total, profit_total = row
+                    text_out = f"{month_label}盲盒{blind_count}个，支出{cost_total}，收益{profit_total}"
             await self._enqueue_message(text=text_out, reply_uid=uid)
             return
 
@@ -668,30 +675,44 @@ def _parse_danmaku_user_and_text(event: dict[str, Any]) -> Optional[tuple[int, s
 
 def _parse_command(text: str) -> Optional[tuple[str, str]]:
     s = text.strip()
-    compact = "".join(s.split())
+    # Normalize full-width '#' and spaces
+    if s.startswith("＃"):
+        s = "#" + s[1:]
+    
+    # Create a normalized compact version for simple commands
+    compact = "".join(s.split()).replace("：", ":")
 
+    # Command: #盲盒统计 / #盲盒我的
     if compact in ("#盲盒统计", "#盲盒我的"):
         return "blindbox_me", ""
-    if compact.startswith("#盲盒统计：") or compact.startswith("#盲盒统计:"):
-        prefix = "#盲盒统计：" if compact.startswith("#盲盒统计：") else "#盲盒统计:"
-        return "blindbox_me", compact[len(prefix):]
+    
+    # Command: #盲盒统计:名字 or #盲盒统计 名字
+    if compact.startswith("#盲盒统计:"):
+        return "blindbox_me", compact[len("#盲盒统计:"):]
+    
+    # Fallback for "#盲盒统计 名字" where compact would be "#盲盒统计名字"
+    if s.startswith("#盲盒统计 ") or s.startswith("＃盲盒统计 "):
+        return "blindbox_me", s[len("#盲盒统计 "):].strip()
 
-    if compact in ("#欢迎：开", "#欢迎:开"):
+    if compact in ("#欢迎:开", "＃欢迎:开"):
         return "welcome_on", ""
-    if compact in ("#欢迎：关", "#欢迎:关"):
+    if compact in ("#欢迎:关", "＃欢迎:关"):
         return "welcome_off", ""
 
-    if s == "#欢迎 开":
+    # Flexible matching for commands with spaces
+    if s == "#欢迎 开" or compact == "#欢迎开":
         return "welcome_on", ""
-    if s == "#欢迎 关":
+    if s == "#欢迎 关" or compact == "#欢迎关":
         return "welcome_off", ""
-    if s.startswith("#欢迎 词 "):
-        return "welcome_text", s[len("#欢迎 词 ") :].strip()
+    
+    if s.startswith("#欢迎 词 ") or s.startswith("#欢迎词 "):
+        prefix = "#欢迎 词 " if s.startswith("#欢迎 词 ") else "#欢迎词 "
+        return "welcome_text", s[len(prefix) :].strip()
 
     # Backward compatibility for old English commands
-    if s == "#welcome on":
+    if s == "#welcome on" or compact == "#welcomeon":
         return "welcome_on", ""
-    if s == "#welcome off":
+    if s == "#welcome off" or compact == "#welcomeoff":
         return "welcome_off", ""
     if s.startswith("#welcome text "):
         return "welcome_text", s[len("#welcome text ") :].strip()

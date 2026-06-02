@@ -190,5 +190,18 @@ class StatsStore:
         ).fetchall()
         return [(str(r[0]), int(r[1]), int(r[2]), int(r[3]), int(r[4])) for r in rows]
 
+    def get_monthly_total_blindbox(self, month: str) -> tuple[int, int, int, int]:
+        row = self._conn.execute(
+            """
+            SELECT SUM(blind_box_count), SUM(cost_total), SUM(actual_total), SUM(profit_total)
+            FROM monthly_blindbox_stats
+            WHERE month = ?
+            """,
+            (month,),
+        ).fetchone()
+        if not row or row[0] is None:
+            return 0, 0, 0, 0
+        return int(row[0]), int(row[1]), int(row[2]), int(row[3])
+
     def close(self) -> None:
         self._conn.close()
