@@ -279,7 +279,8 @@ async def index():
 @app.get("/api/ranking")
 async def api_ranking(start: str, end: str):
     try:
-        s_ts, e_ts = _parse_date(start), _parse_date(end)
+        s_start, s_end = _parse_date(start)
+        e_start, e_end = _parse_date(end)
         conn = _get_db()
         rows = conn.execute(
             """
@@ -292,7 +293,7 @@ async def api_ranking(start: str, end: str):
             ORDER BY total_val DESC
             LIMIT 20
             """,
-            (s_ts[0], e_ts[0]),
+            (s_start, e_start),
         ).fetchall()
         return [dict(r) for r in rows]
     except Exception as exc:
@@ -303,11 +304,11 @@ async def api_ranking(start: str, end: str):
 @app.get("/api/user_gifts")
 async def api_user_gifts(uid: int, date: str):
     try:
-        s, e = _parse_date(date)
+        day_start, day_end = _parse_date(date)
         conn = _get_db()
         rows = conn.execute(
             "SELECT * FROM gift_events WHERE uid = ? AND ts >= ? AND ts < ? ORDER BY ts ASC",
-            (uid, s[0], e[0]),
+            (uid, day_start, day_end),
         ).fetchall()
 
         results = []
