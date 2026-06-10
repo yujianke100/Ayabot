@@ -88,6 +88,17 @@ class AuthConfig:
 
 
 @dataclass(slots=True)
+class WebUIConfig:
+    enabled: bool
+    host: str
+    port: int
+    username: str
+    password: str
+    session_timeout: int
+    title: str
+
+
+@dataclass(slots=True)
 class AppConfig:
     room_display_id: int
     anchor_uid: int
@@ -98,6 +109,7 @@ class AppConfig:
     runtime: RuntimeConfig
     storage: StorageConfig
     auth: AuthConfig
+    web_ui: WebUIConfig
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -122,6 +134,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
     runtime = raw.get("runtime", {})
     storage = raw.get("storage", {})
     auth = raw.get("auth", {})
+    web_ui = raw.get("web_ui", {})
 
     return AppConfig(
         room_display_id=int(raw["room_display_id"]),
@@ -195,6 +208,15 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             auto_login=bool(auth.get("auto_login", True)),
             qr_poll_seconds=float(auth.get("qr_poll_seconds", 1.0)),
             refresh_interval_seconds=int(auth.get("refresh_interval_seconds", 3600)),
+        ),
+        web_ui=WebUIConfig(
+            enabled=bool(web_ui.get("enabled", True)),
+            host=str(web_ui.get("host", "0.0.0.0")),
+            port=int(web_ui.get("port", 8000)),
+            username=str(web_ui.get("username", "admin")),
+            password=str(web_ui.get("password", "admin")),
+            session_timeout=int(web_ui.get("session_timeout", 3600)),
+            title=str(web_ui.get("title", "BILIBILI-LIVE-ROBOT")),
         ),
     )
 

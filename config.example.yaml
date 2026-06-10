@@ -60,3 +60,11 @@ auth:
   auto_login: true
   qr_poll_seconds: 1.0
   refresh_interval_seconds: 3600
+
+web_ui:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8000
+  username: "wenwen"
+  password: "31415926"
+  session_timeout: 3600

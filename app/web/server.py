@@ -2,7 +2,7 @@
 BiliRobot WebUI — 送礼统计 & 精美导出
 
 Features:
-- 登录认证 (wenwen / 31415926)
+- 登录认证（config.yaml 可配置账号密码）
 - 送礼排行 (礼物/盲盒/全部)
 - 精美导出：多列布局、时间显示、类型筛选
 - 手动清理旧数据
@@ -32,20 +32,42 @@ from bilibili_api import live
 
 logger = logging.getLogger("webui")
 
-# ══════════════════════════════════════════════════════════════════
-#  Config
-# ══════════════════════════════════════════════════════════════════
+# 全局配置，由 init_app() 设置
+AUTH_USER = "admin"
+AUTH_PASS = "admin"
+_SESSION_TIMEOUT = 3600
+_HTTP_HOST = "0.0.0.0"
+_HTTP_PORT = 8000
+_DB_PATH = "data/bot.db"
 
-_CONFIG_PATH = Path("config.yaml")
-if _CONFIG_PATH.exists():
-    _raw = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    _storage_cfg = _raw.get("storage", {})
-    _DB_PATH = str(_storage_cfg.get("sqlite_path", "data/bot.db"))
+
+def init_app(config: Any = None) -> None:
+    """从 AppConfig 初始化 WebUI 配置."""
+    global AUTH_USER, AUTH_PASS, _SESSION_TIMEOUT, _HTTP_HOST, _HTTP_PORT, _DB_PATH
+    if config is None:
+        _fallback_read_config()
+        return
+    AUTH_USER = config.web_ui.username
+    AUTH_PASS = config.web_ui.password
+    _SESSION_TIMEOUT = config.web_ui.session_timeout
+    _HTTP_HOST = config.web_ui.host
+    _HTTP_PORT = config.web_ui.port
+    _DB_PATH = config.storage.sqlite_path
     if not os.path.isabs(_DB_PATH):
-        _DB_PATH = str(_CONFIG_PATH.parent / _DB_PATH)
-else:
-    _DB_PATH = "data/bot.db"
-logger.info("webui using db: %s", os.path.abspath(_DB_PATH))
+        _DB_PATH = str(Path("config.yaml").parent / _DB_PATH)
+    logger.info("webui configured: host=%s port=%s db=%s", _HTTP_HOST, _HTTP_PORT, os.path.abspath(_DB_PATH))
+
+
+def _fallback_read_config() -> None:
+    global _DB_PATH
+    _cfg_path = Path("config.yaml")
+    if _cfg_path.exists():
+        _raw = yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
+        _DB_PATH = str(_raw.get("storage", {}).get("sqlite_path", "data/bot.db"))
+        if not os.path.isabs(_DB_PATH):
+            _DB_PATH = str(_cfg_path.parent / _DB_PATH)
+    logger.info("webui using db (fallback): %s", os.path.abspath(_DB_PATH))
+
 
 app = FastAPI(title="BiliRobot Manager")
 
@@ -53,10 +75,7 @@ app = FastAPI(title="BiliRobot Manager")
 #  Auth
 # ══════════════════════════════════════════════════════════════════
 
-AUTH_USER = "wenwen"
-AUTH_PASS = "31415926"
 _SESSIONS: dict[str, float] = {}  # token -> expiry (unix ts)
-_SESSION_TIMEOUT = 3600  # 1 hour
 _RATE_LIMIT: dict[str, list[float]] = {}  # ip -> [timestamps]
 
 

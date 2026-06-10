@@ -8,7 +8,7 @@ import uvicorn
 from .auth import AuthManager
 from .bot import LiveRobot
 from .config import load_config
-from .web.server import app as fastapi_app
+from .web.server import app as fastapi_app, init_app, _HTTP_HOST, _HTTP_PORT
 
 
 def _setup_logging(level: str) -> None:
@@ -20,7 +20,7 @@ def _setup_logging(level: str) -> None:
 
 async def _run_web() -> None:
     """Run FastAPI web UI as an asyncio task alongside the bot."""
-    cfg = uvicorn.Config(fastapi_app, host="0.0.0.0", port=8000, log_level="info")
+    cfg = uvicorn.Config(fastapi_app, host=_HTTP_HOST, port=_HTTP_PORT, log_level="info")
     server = uvicorn.Server(cfg)
     await server.serve()
 
@@ -28,6 +28,8 @@ async def _run_web() -> None:
 async def _run() -> None:
     config = load_config("config.yaml")
     _setup_logging(config.runtime.log_level)
+
+    init_app(config)
 
     auth = AuthManager(config)
     credential = await auth.prepare_credential()
