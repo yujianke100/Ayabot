@@ -560,10 +560,55 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <!-- ══════ 精美导出 ══════ -->
 <div v-if="tab==='export'" class="flex flex-col items-center">
     <div class="bg-white p-4 rounded-xl shadow-sm w-full max-w-2xl mb-4 flex flex-wrap gap-2 items-end">
-        <label class="text-xs text-gray-500 flex-[2]">UID<input type="number" v-model.number="eUid" class="border p-2 rounded w-full text-sm mt-1"></label>
-        <label class="text-xs text-gray-500 flex-[2]">日期<input type="date" v-model="eDate" class="border p-2 rounded w-full text-sm mt-1"></label>
+        <label class="text-xs text-gray-500 flex-[2]">UID<input type="number" v-model.number="eUid" class="border p-2 rounded w-full text-sm mt-1" @input="onUidInput"></label>
+        <label class="text-xs text-gray-500 flex-[2]">
+            日期
+            <div class="relative">
+                <input type="text" readonly :value="eDate" placeholder="点击选择日期"
+                       class="border p-2 rounded w-full text-sm mt-1 cursor-pointer bg-white"
+                       @click="showCalendar = !showCalendar">
+                <!-- 自定义日历面板 -->
+                <div v-if="showCalendar" @click.stop class="absolute top-full left-0 mt-1 bg-white border rounded-xl shadow-lg z-50 p-3 w-[300px]">
+                    <div class="flex justify-between items-center mb-2">
+                        <button @click="calMonth--" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&lt;</button>
+                        <span class="text-sm font-bold">{{ calYear }}年{{ calMonth+1 }}月</span>
+                        <button @click="calMonth++" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&gt;</button>
+                    </div>
+                    <div class="grid grid-cols-7 gap-1 text-center text-xs mb-1">
+                        <div class="text-gray-400 font-medium">日</div>
+                        <div class="text-gray-400 font-medium">一</div>
+                        <div class="text-gray-400 font-medium">二</div>
+                        <div class="text-gray-400 font-medium">三</div>
+                        <div class="text-gray-400 font-medium">四</div>
+                        <div class="text-gray-400 font-medium">五</div>
+                        <div class="text-gray-400 font-medium">六</div>
+                    </div>
+                    <div class="grid grid-cols-7 gap-1">
+                        <template v-for="(day,i) in calDays" :key="i">
+                            <div v-if="!day" class="h-8"></div>
+                            <button v-else
+                                    :disabled="!day.hasData"
+                                    @click="pickDate(day.ymd)"
+                                    class="h-8 rounded text-xs transition"
+                                    :class="day.hasData
+                                        ? (day.ymd === eDate ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-700 hover:bg-blue-200 cursor-pointer')
+                                        : 'text-gray-300 cursor-not-allowed'">
+                                {{ day.d }}
+                            </button>
+                        </template>
+                    </div>
+                    <div class="text-[10px] text-gray-400 mt-2 text-center">蓝色 = 有数据，灰色 = 无数据</div>
+                </div>
+            </div>
+        </label>
         <label class="text-xs text-gray-500 w-20">每列行数
             <input type="number" v-model.number="ePerCol" min="1" max="50" class="border p-2 rounded w-full text-sm mt-1">
+        </label>
+        <label class="text-xs text-gray-500 w-24">展示宽度
+            <div class="flex items-center gap-1 mt-1">
+                <input type="range" v-model.number="eWidth" min="320" max="960" step="20" class="flex-1">
+                <span class="text-sm font-mono w-10 text-right">{{ eWidth }}px</span>
+            </div>
         </label>
         <select v-model="eType" class="border p-2 rounded text-sm h-[38px]">
             <option value="all">全部</option>
@@ -574,21 +619,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </div>
     <div v-if="errExport" class="text-red-500 text-sm mb-2">{{ errExport }}</div>
 
-    <!-- 有数据的日期列表 -->
-    <div v-if="exportDates.length && !exportList.length" class="w-full max-w-2xl mb-4">
-        <div class="bg-white p-4 rounded-xl shadow-sm">
-            <div class="text-sm font-semibold text-gray-600 mb-2">有送礼记录的日期：</div>
-            <div class="flex flex-wrap gap-2">
-                <button v-for="d in exportDates" :key="d" @click="eDate = d; loadExport()"
-                        class="bg-blue-100 hover:bg-blue-200 text-blue-700 px-3 py-1 rounded text-sm transition">
-                    {{ d }}
-                </button>
-            </div>
-        </div>
-    </div>
-
     <!-- 精美数据展示区 -->
-    <div id="capture" v-if="exportList.length" class="w-full max-w-2xl">
+    <div id="capture" v-if="exportList.length" class="w-full" :style="{ maxWidth: eWidth + 'px' }">
         <div class="text-center text-gray-400 text-xs mb-3">
             <span class="font-semibold">{{ eName }}</span> ·
             {{ eDate }} · 礼物投喂明细
@@ -668,9 +700,31 @@ createApp({
         const eDate = ref(new Date().toISOString().slice(0,10));
         const eType = ref('all');
         const ePerCol = ref(6);
+        const eWidth = ref(640);
         const exportList = ref([]);
         const exportDates = ref([]);
         const errExport = ref('');
+
+        // 日历状态
+        const showCalendar = ref(false);
+        const calYear = ref(new Date().getFullYear());
+        const calMonth = ref(new Date().getMonth());
+        const exportDatesSet = ref(new Set());
+
+        // 日历天数计算
+        const calDays = Vue.computed(() => {
+            const year = calYear.value;
+            const month = calMonth.value;
+            const firstDay = new Date(year, month, 1).getDay();
+            const daysInMonth = new Date(year, month + 1, 0).getDate();
+            const cells = [];
+            for (let i = 0; i < firstDay; i++) cells.push(null);
+            for (let d = 1; d <= daysInMonth; d++) {
+                const ymd = `${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+                cells.push({ d, ymd, hasData: exportDatesSet.value.has(ymd) });
+            }
+            return cells;
+        });
 
         // 手动分列计算
         const exportCols = Vue.computed(() => {
@@ -777,8 +831,25 @@ createApp({
             try {
                 const res = await fetch(`/api/user_dates?uid=${eUid.value}`);
                 if (!res.ok) return;
-                exportDates.value = await res.json();
+                const arr = await res.json();
+                exportDates.value = arr;
+                exportDatesSet.value = new Set(arr);
+                // 如果有数据日期，默认选第一个
+                if (arr.length && !exportList.value.length) {
+                    // 不自动切换，让用户自己选
+                }
             } catch(e) { /* ignore */ }
+        }
+        function onUidInput() {
+            showCalendar.value = false;
+            exportList.value = [];
+            errExport.value = '';
+            loadUserDates();
+        }
+        function pickDate(ymd) {
+            eDate.value = ymd;
+            showCalendar.value = false;
+            loadExport();
         }
         async function loadExport() {
             errExport.value = '';
@@ -799,6 +870,7 @@ createApp({
             eUid.value = uid;
             eName.value = uname || '';
             tab.value = 'export';
+            showCalendar.value = false;
             exportDates.value = [];
             exportList.value = [];
             errExport.value = '';
@@ -823,7 +895,10 @@ createApp({
 
         return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
                 tab, rStart, rEnd, rType, ranking, errRanking, loadRanking,
-                eUid, eName, eDate, eType, ePerCol, exportList, exportDates, exportCols, errExport, loadExport, gotoExport, loadUserDates, proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
+                eUid, eName, eDate, eType, ePerCol, eWidth, exportList, exportDates, exportCols, errExport,
+                loadExport, gotoExport, loadUserDates, onUidInput, pickDate,
+                showCalendar, calYear, calMonth, calDays, exportDatesSet,
+                proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete};
     }
 }).mount('#app');
