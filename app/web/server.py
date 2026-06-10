@@ -283,10 +283,18 @@ async def api_user_gifts(uid: int, date: str, gift_type: str = "all"):
             item = dict(r)
             raw = json.loads(item.pop("raw_json", "{}")) if isinstance(item.get("raw_json"), str) else {}
 
-            item["avatar"] = raw.get("face") or raw.get("data", {}).get("face") or ""
-            item["guard_level"] = _safe_int(
-                raw.get("guard_level") or raw.get("data", {}).get("guard_level", 0)
-            )
+            # 头像：SEND_GIFT 在顶层 face，COMBO_SEND 在 sender_uinfo.base.face
+            face = raw.get("face") or raw.get("data", {}).get("face") or ""
+            if not face:
+                face = raw.get("sender_uinfo", {}).get("base", {}).get("face", "")
+            item["avatar"] = face
+
+            # 大航海等级：SEND_GIFT 在顶层 guard_level，COMBO_SEND 没有此字段
+            # 从 sender_uinfo 或 medal_info 尝试获取
+            guard = raw.get("guard_level") or raw.get("data", {}).get("guard_level", 0)
+            if not guard:
+                guard = raw.get("medal_info", {}).get("guard_level", 0)
+            item["guard_level"] = _safe_int(guard)
 
             gift_id = _safe_int(raw.get("giftId") or raw.get("gift_id") or 0)
             gift_name = raw.get("giftName") or raw.get("gift_name") or item.get("gift_name", "")
@@ -404,7 +412,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>文文 BiliRobot 管理后台</title>
+<title>文文喵~</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
@@ -470,7 +478,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     max-width: none !important;
 }
 
-/* ── 多列布局（水平可滚动）── */
+/* ── 多列布局（水平可滚动，居中）── */
 .capture-grid {
     display: flex;
     gap: 16px;
@@ -479,6 +487,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
 .capture-col {
     min-width: 0;
     flex-shrink: 0;
+}
+.capture-inner {
+    display: inline-block;
+    margin: 0 auto;
+    text-align: left;
+}
+#capture {
+    text-align: center;
 }
 
 .gift-icon {
@@ -526,7 +542,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <!-- ══════ 主界面 ══════ -->
 <div v-if="loggedIn">
 <header class="mb-6 flex justify-between items-center bg-white p-4 rounded-xl shadow-sm">
-    <h1 class="text-xl font-bold text-blue-600">🎯 BiliRobot 管理后台</h1>
+    <h1 class="text-xl font-bold text-blue-600">🎯 文文喵~</h1>
     <div class="flex items-center gap-4 text-sm">
         <button @click="tab='ranking'" :class="tab==='ranking'?'text-blue-600 font-bold border-b-2 border-blue-600':''">送礼排行</button>
         <button @click="tab='export'"  :class="tab==='export' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">精美导出</button>
@@ -634,8 +650,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </div>
     <div v-if="errExport" class="text-red-500 text-sm mb-2">{{ errExport }}</div>
 
-    <!-- 精美数据展示区（水平可滚动） -->
+    <!-- 精美数据展示区（水平可滚动，居中） -->
     <div id="capture" v-if="exportList.length" class="w-full overflow-x-auto">
+        <div class="capture-inner">
         <div class="text-center text-gray-400 text-xs mb-3">
             <span class="font-semibold">{{ eName }}</span> ·
             {{ eDate }} · 礼物投喂明细
@@ -674,6 +691,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             </div>
         </div>
     </div>
+</div>
     <div v-else-if="!errExport" class="text-gray-400 mt-20">输入 UID 和日期后点击"生成"</div>
 </div>
 
