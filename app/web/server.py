@@ -374,42 +374,41 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
-/* ── 礼物卡片 ── */
+/* ── 礼物卡片（html2canvas 兼容）── */
 .bili-card {
     border-radius: 12px;
-    padding: 10px 14px;
+    padding: 8px 14px;
     display: flex;
     align-items: center;
     gap: 12px;
     color: #fff;
     font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
-    box-shadow: 0 3px 10px rgba(0,0,0,0.12);
+    box-shadow: 0 3px 10px rgba(0,0,0,0.15);
     margin-bottom: 8px;
     position: relative;
-    overflow: hidden;
-    break-inside: avoid;
+    contain: layout style;
+}
+/* 用伪元素实现圆角裁剪，避免 overflow:hidden 在 html2canvas 中出错 */
+.bili-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 12px;
+    pointer-events: none;
+    z-index: 0;
 }
 .bili-card > * { position: relative; z-index: 1; }
 
-/* 多列容器 — 每 6 行换列 */
-.capture-columns {
-    column-count: 2;
-    column-gap: 16px;
-    column-fill: balance;
-}
-@media (max-width: 640px) {
-    .capture-columns { column-count: 1; }
-}
-
-/* ── 身份底色（更沉稳，白字清晰）── */
-.bg-default { background: linear-gradient(135deg, #4b5563 0%, #374151 100%); }
-.bg-captain { background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); }
-.bg-commander { background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%); }
-.bg-governor { background: linear-gradient(135deg, #d97706 0%, #b45309 100%); }
+/* ── 身份底色（柔和深色渐变）── */
+.bg-default { background: linear-gradient(135deg, #374151 0%, #1f2937 100%); }
+.bg-captain { background: linear-gradient(135deg, #1e40af 0%, #1e3a8a 100%); }
+.bg-commander { background: linear-gradient(135deg, #5b21b6 0%, #4c1d95 100%); }
+.bg-governor { background: linear-gradient(135deg, #92400e 0%, #78350f 100%); }
 
 .avatar-wrap {
     position: relative;
-    width: 52px; height: 52px;
+    width: 52px;
+    height: 52px;
     flex-shrink: 0;
     display: flex;
     align-items: center;
@@ -452,20 +451,22 @@ INDEX_HTML = r"""<!DOCTYPE html>
     border-radius: 6px;
 }
 .gift-value {
-    background: rgba(255,255,255,0.25);
+    background: rgba(255,255,255,0.2);
     border-radius: 8px;
     padding: 1px 8px;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
     white-space: nowrap;
-    display: inline-flex;
-    align-items: center;
-    line-height: 1.4;
+    display: inline-block;
+    line-height: 1.5;
+    vertical-align: middle;
 }
 .gift-time {
-    font-size: 9px;
-    color: rgba(255,255,255,0.7);
+    font-size: 10px;
+    color: rgba(255,255,255,0.65);
     white-space: nowrap;
+    display: inline-block;
+    vertical-align: middle;
 }
 </style>
 </head>
