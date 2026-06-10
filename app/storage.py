@@ -31,7 +31,6 @@ class StatsStore:
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.execute("PRAGMA synchronous=NORMAL;")
         self._create_tables()
-        self._cleanup_old_months()
 
     def _create_tables(self) -> None:
         self._conn.executescript(
@@ -69,6 +68,18 @@ class StatsStore:
                 cost_total INTEGER NOT NULL,
                 actual_total INTEGER NOT NULL,
                 profit_total INTEGER NOT NULL,
+                last_ts INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(month, uid)
+            );
+
+            CREATE TABLE IF NOT EXISTS monthly_gift_stats (
+                month TEXT NOT NULL,
+                uid INTEGER NOT NULL,
+                uname TEXT NOT NULL,
+                gift_count INTEGER NOT NULL DEFAULT 0,
+                gift_num_total INTEGER NOT NULL DEFAULT 0,
+                value_total INTEGER NOT NULL DEFAULT 0,
+                last_ts INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(month, uid)
             );
 
@@ -82,13 +93,6 @@ class StatsStore:
             """
         )
         self._conn.commit()
-
-    def _cleanup_old_months(self) -> None:
-        current_month = datetime.now().strftime("%Y-%m")
-        deleted_gifts = self._conn.execute("DELETE FROM gift_events WHERE month < ?", (current_month,)).rowcount
-        deleted_stats = self._conn.execute("DELETE FROM monthly_blindbox_stats WHERE month < ?", (current_month,)).rowcount
-        if deleted_gifts > 0 or deleted_stats > 0:
-            self._conn.commit()
 
     @staticmethod
     def month_of_ts(ts: int) -> str:
@@ -123,14 +127,15 @@ class StatsStore:
                 """
                 INSERT INTO monthly_blindbox_stats (
                     month, uid, uname, blind_box_count,
-                    cost_total, actual_total, profit_total
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    cost_total, actual_total, profit_total, last_ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(month, uid) DO UPDATE SET
                     uname=excluded.uname,
                     blind_box_count=monthly_blindbox_stats.blind_box_count + excluded.blind_box_count,
                     cost_total=monthly_blindbox_stats.cost_total + excluded.cost_total,
                     actual_total=monthly_blindbox_stats.actual_total + excluded.actual_total,
-                    profit_total=monthly_blindbox_stats.profit_total + excluded.profit_total
+                    profit_total=monthly_blindbox_stats.profit_total + excluded.profit_total,
+                    last_ts=MAX(monthly_blindbox_stats.last_ts, excluded.last_ts)
                 """,
                 (
                     event.month,
@@ -140,8 +145,33 @@ class StatsStore:
                     event.blind_box_cost,
                     event.actual_value,
                     event.profit_value,
+                    event.ts,
                 ),
             )
+
+        # Also update monthly gift stats (both regular and blindbox gifts)
+        self._conn.execute(
+            """
+            INSERT INTO monthly_gift_stats (
+                month, uid, uname, gift_count, gift_num_total, value_total, last_ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(month, uid) DO UPDATE SET
+                uname=excluded.uname,
+                gift_count=monthly_gift_stats.gift_count + 1,
+                gift_num_total=monthly_gift_stats.gift_num_total + excluded.gift_num_total,
+                value_total=monthly_gift_stats.value_total + excluded.value_total,
+                last_ts=MAX(monthly_gift_stats.last_ts, excluded.last_ts)
+            """,
+            (
+                event.month,
+                event.uid,
+                event.uname,
+                1,
+                event.gift_num,
+                event.actual_value,
+                event.ts,
+            ),
+        )
 
         self._conn.commit()
 
@@ -260,3 +290,32 @@ class StatsStore:
 
     def close(self) -> None:
         self._conn.close()
+
+    def delete_events_before(self, before_ts: int) -> dict[str, int]:
+        """删除指定时间戳之前的所有数据，返回删除条数."""
+        deleted_gift = self._conn.execute(
+            "DELETE FROM gift_events WHERE ts < ?", (before_ts,)
+        ).rowcount
+        
+        # 同时清理对应的月度汇总（重新计算）
+        # 简单做法：如果该月已无数据则删除汇总行
+        # 获取被删除事件涉及的月份
+        affected_months = self._conn.execute(
+            "SELECT DISTINCT month FROM gift_events WHERE ts >= ?",
+            (before_ts,),
+        ).fetchall()
+        
+        deleted_blind = self._conn.execute(
+            "DELETE FROM monthly_blindbox_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)"
+        ).rowcount
+        
+        deleted_gift_stats = self._conn.execute(
+            "DELETE FROM monthly_gift_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)"
+        ).rowcount
+        
+        self._conn.commit()
+        return {
+            "deleted_gift_events": deleted_gift,
+            "deleted_blindbox_stats": deleted_blind,
+            "deleted_gift_stats": deleted_gift_stats,
+        }
