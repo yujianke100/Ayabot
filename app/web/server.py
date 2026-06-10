@@ -1,3 +1,12 @@
+"""Web UI for BiliRobot — 送礼统计 & 精美导出
+
+Features:
+- 日期范围送礼排行 + Chart.js 柱状图
+- 精美导出：仿B站送礼卡片，支持 PNG 导出
+- 礼物图标缓存（从 gift.shuvi.moe 获取）
+- 图片代理解决 html2canvas CORS 问题
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -17,13 +26,15 @@ import uvicorn
 
 logger = logging.getLogger("webui")
 
-# ── 加载 config.yaml 获得正确的 DB 路径 ──────────────────────────
+# ══════════════════════════════════════════════════════════════════
+#  Config
+# ══════════════════════════════════════════════════════════════════
+
 _CONFIG_PATH = Path("config.yaml")
 if _CONFIG_PATH.exists():
     _raw = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
     _storage_cfg = _raw.get("storage", {})
     _DB_PATH = str(_storage_cfg.get("sqlite_path", "data/bot.db"))
-    # 若为相对路径则相对于项目根目录
     if not os.path.isabs(_DB_PATH):
         _DB_PATH = str(_CONFIG_PATH.parent / _DB_PATH)
 else:
@@ -32,8 +43,56 @@ logger.info("webui using db: %s", os.path.abspath(_DB_PATH))
 
 app = FastAPI(title="BiliRobot Manager")
 
+# ── 礼物图标缓存 ─────────────────────────────────────────────────
+_GIFT_ICON_CACHE: dict[int, str] = {}
+_GIFT_CACHE_LOCK = asyncio.Lock()
 
-# ── helpers ──────────────────────────────────────────────────────
+
+async def _build_gift_cache() -> None:
+    """从 gift.shuvi.moe 拉取全量礼物数据，缓存 giftId → img_basic URL."""
+    global _GIFT_ICON_CACHE
+    sources = [
+        "https://gift.shuvi.moe/gifts.json",
+        "https://gift.shuvi.moe/api/gifts",
+    ]
+    for url in sources:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+            break
+        except Exception:
+            continue
+    else:
+        logger.warning("failed to fetch gift data from all sources")
+        return
+
+    cache: dict[int, str] = {}
+    for entry in data if isinstance(data, list) else data.get("gift", []):
+        gid = _safe_int(entry.get("id"))
+        if gid <= 0:
+            continue
+        # img_basic 是最佳图标; 没有则回退到 img_dynamic
+        icon = entry.get("img_basic") or entry.get("img_dynamic") or ""
+        if icon:
+            cache[gid] = icon
+
+    _GIFT_ICON_CACHE = cache
+    logger.info("gift icon cache built: %d entries", len(cache))
+
+
+def _get_gift_icon(gift_id: int) -> str:
+    if gift_id in _GIFT_ICON_CACHE:
+        return _GIFT_ICON_CACHE[gift_id]
+    return ""  # fallback 交给前端
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Helpers
+# ══════════════════════════════════════════════════════════════════
+
 def _get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -41,7 +100,6 @@ def _get_db() -> sqlite3.Connection:
 
 
 def _parse_date(d: str) -> tuple[int, int]:
-    """return (start_ts, end_ts_exclusive)"""
     dt = datetime.datetime.strptime(d, "%Y-%m-%d")
     start = int(dt.timestamp())
     end = int((dt + datetime.timedelta(days=1)).timestamp())
@@ -64,256 +122,23 @@ def _safe_int(val: Any) -> int:
         return 0
 
 
-# ── static HTML ─────────────────────────────────────────────────
-INDEX_HTML = r"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BiliRobot 管理后台</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-<style>
-.bili-card {
-    border-radius: 12px;
-    padding: 12px 16px;
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    color: #fff;
-    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
-    box-shadow: 0 4px 14px rgba(0,0,0,0.15);
-    margin-bottom: 10px;
-    position: relative;
-    overflow: hidden;
-}
-.bili-card > * { position: relative; z-index: 1; }
-.bg-v1  { background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%); }
-.bg-v2  { background: linear-gradient(135deg, #a1c4fd 0%, #c2e9fb 100%); }
-.bg-v3  { background: linear-gradient(135deg, #f6d365 0%, #fda085 100%); }
-.bg-v4  { background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%); }
-.bg-v5  { background: linear-gradient(135deg, #d4fc79 0%, #96e6a1 100%); }
-.bg-v6  { background: linear-gradient(135deg, #84fab0 0%, #8fd3f4 100%); }
-.bg-v7  { background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); }
-.bg-v8  { background: linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%); }
-.bg-v9  { background: linear-gradient(135deg, #fccb90 0%, #d57eeb 100%); }
-.bg-v10 { background: linear-gradient(135deg, #e2b0ff 0%, #ffb6c1 100%); }
-.avatar-wrap { position: relative; width: 52px; height: 52px; flex-shrink: 0; }
-.avatar-wrap img.face {
-    width: 44px; height: 44px; border-radius: 50%;
-    border: 2px solid rgba(255,255,255,0.9);
-    position: absolute; top: 4px; left: 4px; object-fit: cover;
-}
-.avatar-wrap img.frame {
-    position: absolute; width: 52px; height: 52px;
-    top: 0; left: 0; pointer-events: none;
-}
-.gift-icon { width: 40px; height: 40px; flex-shrink: 0; object-fit: contain; }
-.gift-value {
-    background: rgba(255,255,255,0.25);
-    border-radius: 10px;
-    padding: 2px 10px;
-    font-size: 11px;
-    font-weight: 600;
-    white-space: nowrap;
-}
-</style>
-</head>
-<body class="bg-gray-100 p-4">
-<div id="app" class="max-w-6xl mx-auto">
-
-<header class="mb-6 flex justify-between items-center bg-white p-4 rounded-xl shadow-sm">
-    <h1 class="text-xl font-bold text-blue-600">🎯 BiliRobot 管理后台</h1>
-    <div class="space-x-3 text-sm">
-        <button @click="tab='ranking'" :class="tab==='ranking'?'text-blue-600 font-bold border-b-2 border-blue-600':''">送礼排行</button>
-        <button @click="tab='export'"  :class="tab==='export' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">精美导出</button>
-    </div>
-</header>
-
-<!-- 送礼排行 -->
-<div v-if="tab==='ranking'" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-    <div class="bg-white p-4 rounded-xl shadow-sm">
-        <div class="flex flex-wrap gap-2 mb-4">
-            <input type="date" v-model="rStart" class="border p-2 rounded text-sm flex-1 min-w-0">
-            <input type="date" v-model="rEnd"   class="border p-2 rounded text-sm flex-1 min-w-0">
-            <button @click="loadRanking" class="bg-blue-500 hover:bg-blue-600 text-white px-5 py-2 rounded text-sm">查询</button>
-        </div>
-        <div v-if="errRanking" class="text-red-500 text-sm mb-2">{{ errRanking }}</div>
-        <table class="w-full text-sm" v-if="ranking.length">
-            <thead><tr class="bg-gray-50"><th class="p-2 text-left">#</th><th class="p-2 text-left">用户</th><th class="p-2 text-right">送礼价值</th><th class="p-2 text-right">利润</th></tr></thead>
-            <tbody>
-                <tr v-for="(u,i) in ranking" :key="u.uid"
-                    class="border-t hover:bg-blue-50 cursor-pointer transition"
-                    @click="gotoExport(u.uid)">
-                    <td class="p-2">{{ i+1 }}</td>
-                    <td class="p-2">{{ u.uname }}</td>
-                    <td class="p-2 text-right">{{ u.total_val.toFixed(2) }}</td>
-                    <td class="p-2 text-right" :class="u.total_profit>=0?'text-red-500':'text-green-500'">{{ u.total_profit.toFixed(2) }}</td>
-                </tr>
-            </tbody>
-        </table>
-        <div v-else-if="!errRanking" class="text-gray-400 text-center py-8">暂无数据</div>
-    </div>
-    <div class="bg-white p-4 rounded-xl shadow-sm flex flex-col">
-        <canvas id="chartRank" class="flex-1 min-h-0"></canvas>
-    </div>
-</div>
-
-<!-- 精美导出 -->
-<div v-if="tab==='export'" class="flex flex-col items-center">
-    <div class="bg-white p-4 rounded-xl shadow-sm w-full max-w-lg mb-4 flex flex-wrap gap-2 items-end">
-        <label class="text-xs text-gray-500 flex-1">用户UID<input type="number" v-model.number="eUid" class="border p-2 rounded w-full text-sm mt-1"></label>
-        <label class="text-xs text-gray-500 flex-1">日期<input type="date" v-model="eDate" class="border p-2 rounded w-full text-sm mt-1"></label>
-        <button @click="loadExport" class="bg-green-500 hover:bg-green-600 text-white px-5 py-2 rounded text-sm h-[38px]">生成</button>
-        <button @click="downloadImage" v-if="exportList.length" class="bg-purple-500 hover:bg-purple-600 text-white px-5 py-2 rounded text-sm h-[38px]">📥 导出 PNG</button>
-    </div>
-    <div v-if="errExport" class="text-red-500 text-sm mb-2">{{ errExport }}</div>
-
-    <!-- 精美截图区 -->
-    <div id="capture" v-if="exportList.length" class="w-full max-w-md">
-        <div class="text-center text-gray-400 text-xs mb-2">{{ eDate }} · 礼物投喂明细</div>
-        <div v-for="(item,idx) in exportList" :key="item.id"
-             class="bili-card"
-             :class="'bg-v' + ((idx % 10) + 1)">
-            <div class="avatar-wrap">
-                <img :src="proxyImg(item.avatar)" class="face"
-                     @error="$event.target.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 44 44%22><rect width=%2244%22 height=%2244%22 fill=%22%23ccc%22 rx=%2222%22/></svg>'">
-                <img v-if="item.guard_level === 3" :src="proxyImg('https://i0.hdslb.com/bfs/live/782b2cf6d82a89fad7ea12f635dac6b4b19f53b0.png')" class="frame" title="舰长">
-                <img v-else-if="item.guard_level === 2" :src="proxyImg('https://i0.hdslb.com/bfs/live/882b2cf6d82a89fad7ea12f635dac6b4b19f53b0.png')" class="frame" title="提督">
-                <img v-else-if="item.guard_level === 1" :src="proxyImg('https://i0.hdslb.com/bfs/live/962b2cf6d82a89fad7ea12f635dac6b4b19f53b0.png')" class="frame" title="总督">
-            </div>
-            <div class="flex-1 min-w-0">
-                <div class="font-bold text-sm truncate">{{ item.uname }}</div>
-                <div class="flex items-center gap-2 mt-0.5">
-                    <span class="text-xs text-white/80">投喂了 {{ item.gift_name }} × {{ item.gift_num }}</span>
-                    <span class="gift-value" v-if="item.price">¥{{ (item.price / 1000).toFixed(1) }}</span>
-                </div>
-            </div>
-            <img :src="proxyImg(item.gift_icon)" class="gift-icon"
-                 @error="$event.target.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 40 40%22><rect width=%2240%22 height=%2240%22 fill=%22%23eee%22 rx=%228%22/></svg>'">
-        </div>
-    </div>
-    <div v-else-if="!errExport" class="text-gray-400 mt-20">输入 UID 和日期后点击"生成"</div>
-</div>
-
-</div>
-
-<script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
-<script>
-const {createApp, ref, nextTick} = Vue;
-createApp({
-    setup() {
-        const tab = ref('ranking');
-        const rStart = ref(new Date().toISOString().slice(0,10));
-        const rEnd   = ref(new Date().toISOString().slice(0,10));
-        const ranking = ref([]);
-        const errRanking = ref('');
-        const eUid = ref(0);
-        const eDate = ref(new Date().toISOString().slice(0,10));
-        const exportList = ref([]);
-        const errExport = ref('');
-        let chartInst = null;
-
-        // ── 图片代理：所有外链经过同源代理解决 CORS ──
-        function proxyImg(url) {
-            if (!url) return '';
-            if (url.startsWith('data:') || url.startsWith('blob:')) return url;
-            // 如果是同源（/api/xxx）则不代理
-            if (url.startsWith('/')) return url;
-            return '/api/proxy_image?url=' + encodeURIComponent(url);
-        }
-
-        async function loadRanking() {
-            errRanking.value = '';
-            ranking.value = [];
-            try {
-                const res = await fetch(`/api/ranking?start=${rStart.value}&end=${rEnd.value}`);
-                if (!res.ok) {
-                    const txt = await res.text();
-                    throw new Error(txt.slice(0,80));
-                }
-                ranking.value = await res.json();
-            } catch(e) { errRanking.value = '加载失败: ' + e.message; }
-            await nextTick();
-            updateChart();
-        }
-        function updateChart() {
-            const canvas = document.getElementById('chartRank');
-            if (!canvas) return;
-            if (chartInst) chartInst.destroy();
-            if (!ranking.value.length) return;
-            chartInst = new Chart(canvas, {
-                type: 'bar',
-                data: {
-                    labels: ranking.value.map(u=>u.uname),
-                    datasets: [{
-                        label: '送礼价值',
-                        data: ranking.value.map(u=>u.total_val),
-                        backgroundColor: 'rgba(59,130,246,0.6)',
-                        borderRadius: 4
-                    }]
-                },
-                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
-            });
-        }
-        async function loadExport() {
-            errExport.value = '';
-            exportList.value = [];
-            if (!eUid.value || !eDate.value) { errExport.value = '请填写 UID 和日期'; return; }
-            try {
-                const res = await fetch(`/api/user_gifts?uid=${eUid.value}&date=${eDate.value}`);
-                if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
-                exportList.value = await res.json();
-                if (!exportList.value.length) errExport.value = '该用户当天无送礼记录';
-                // 等待图片加载完成后再允许导出
-                await nextTick();
-                await new Promise(r => setTimeout(r, 800));
-            } catch(e) { errExport.value = '加载失败: ' + e.message; }
-        }
-        function gotoExport(uid) { eUid.value = uid; tab.value = 'export'; loadExport(); }
-        function downloadImage() {
-            const el = document.getElementById('capture');
-            if (!el) return;
-            errExport.value = '正在生成图片...';
-            html2canvas(el, {
-                scale: 2,
-                useCORS: true,
-                allowTaint: true,
-                backgroundColor: '#ffffff',
-                logging: false
-            }).then(canvas => {
-                const a = document.createElement('a');
-                a.download = `gift_${eUid.value}_${eDate.value}.png`;
-                a.href = canvas.toDataURL('image/png');
-                a.click();
-                errExport.value = '';
-            }).catch(e => { errExport.value = '导出失败: ' + e.message; });
-        }
-        return {tab, rStart, rEnd, ranking, errRanking, eUid, eDate, exportList, errExport,
-                loadRanking, loadExport, gotoExport, downloadImage, proxyImg};
-    }
-}).mount('#app');
-</script>
-</body>
-</html>
-"""
-
-
 # ══════════════════════════════════════════════════════════════════
 #  API
 # ══════════════════════════════════════════════════════════════════
 
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    return INDEX_HTML
+@app.on_event("startup")
+async def _startup():
+    try:
+        await _build_gift_cache()
+    except Exception:
+        logger.exception("gift cache init failed")
 
 
 @app.get("/api/ranking")
 async def api_ranking(start: str, end: str):
     try:
-        s_start, s_end = _parse_date(start)
-        e_start, e_end = _parse_date(end)
+        s_start, _ = _parse_date(start)
+        e_start, _ = _parse_date(end)
         conn = _get_db()
         rows = conn.execute(
             """
@@ -349,31 +174,24 @@ async def api_user_gifts(uid: int, date: str):
             item = dict(r)
             raw = _safe_json(item.pop("raw_json", "{}"))
 
-            # ── 头像（B 站 payload 的 face 字段）──
-            avatar = raw.get("face") or raw.get("data", {}).get("face") or ""
-            if avatar and not avatar.startswith("/"):
-                item["avatar"] = avatar
-            else:
-                item["avatar"] = ""
+            # 头像
+            item["avatar"] = raw.get("face") or raw.get("data", {}).get("face") or ""
 
-            # ── 大航海等级 ──
-            item["guard_level"] = _safe_int(raw.get("guard_level") or
-                                             raw.get("data", {}).get("guard_level", 0))
+            # 大航海等级 (3=舰长, 2=提督, 1=总督)
+            item["guard_level"] = _safe_int(
+                raw.get("guard_level") or raw.get("data", {}).get("guard_level", 0)
+            )
 
-            # ── 礼物 ID + 图标 ──
-            gift_id = _safe_int(raw.get("giftId") or raw.get("gift_id") or 1)
-            item["gift_id"] = gift_id
-            # 优先用 payload 自带的 giftIcon，否则拼 URL
-            gift_icon = raw.get("giftIcon") or raw.get("gift_icon") or ""
-            if gift_icon and (gift_icon.startswith("http://") or gift_icon.startswith("https://")):
-                item["gift_icon"] = gift_icon
-            else:
-                item["gift_icon"] = (f"https://s1.hdslb.com/bfs/static/blive/blfe-live-room"
-                                     f"/static/img/gift/{gift_id}.png")
+            # 礼物图标 — 优先从缓存取
+            gift_id = _safe_int(raw.get("giftId") or raw.get("gift_id") or 0)
+            cached_icon = _get_gift_icon(gift_id) if gift_id else ""
+            item["gift_icon"] = cached_icon
 
-            # ── 单礼物价格（B 站单位：电池/金瓜子）──
-            price = _safe_int(raw.get("price") or raw.get("total_coin") or 0)
-            item["price"] = price
+            # 礼物名称
+            item["gift_name"] = raw.get("giftName") or raw.get("gift_name") or item.get("gift_name", "")
+
+            # 单礼物价格（单位：电池/金瓜子）
+            item["price"] = _safe_int(raw.get("price") or raw.get("total_coin") or 0)
 
             results.append(item)
         return results
@@ -382,24 +200,307 @@ async def api_user_gifts(uid: int, date: str):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
-# ══════════════════════════════════════════════════════════════════
-#  图片代理 — 解决 html2canvas 跨域问题
-# ══════════════════════════════════════════════════════════════════
-
 @app.get("/api/proxy_image")
 async def api_proxy_image(url: str):
-    """Fetch external image and return with CORS headers so html2canvas can render it."""
+    """Fetch external image and return with CORS headers for html2canvas."""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 body = await resp.read()
                 ct = resp.content_type or "image/png"
-                return Response(content=body, media_type=ct,
-                                headers={"Access-Control-Allow-Origin": "*",
-                                         "Cache-Control": "public, max-age=86400"})
+                return Response(
+                    content=body,
+                    media_type=ct,
+                    headers={
+                        "Access-Control-Allow-Origin": "*",
+                        "Cache-Control": "public, max-age=86400",
+                    },
+                )
     except Exception as exc:
         logger.warning("proxy_image failed for %s: %s", url, exc)
-        return Response(status_code=302, headers={"Location": url})
+        # 回退：返回一个 1x1 透明 PNG
+        return Response(
+            content=(
+                b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00"
+                b"\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx"
+                b"\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND"
+                b"\xaeB`\x82"
+            ),
+            media_type="image/png",
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Static HTML  (inline for single-binary deployment)
+# ══════════════════════════════════════════════════════════════════
+
+INDEX_HTML = r"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BiliRobot 管理后台</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+/* ── 仿 B 站礼物卡片 ── */
+.bili-card {
+    border-radius: 12px;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    color: #fff;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.15);
+    margin-bottom: 10px;
+    position: relative;
+    overflow: hidden;
+}
+.bili-card > * { position: relative; z-index: 1; }
+.bg-v1  { background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%); }
+.bg-v2  { background: linear-gradient(135deg, #a1c4fd 0%, #c2e9fb 100%); }
+.bg-v3  { background: linear-gradient(135deg, #f6d365 0%, #fda085 100%); }
+.bg-v4  { background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%); }
+.bg-v5  { background: linear-gradient(135deg, #d4fc79 0%, #96e6a1 100%); }
+.bg-v6  { background: linear-gradient(135deg, #84fab0 0%, #8fd3f4 100%); }
+.bg-v7  { background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); }
+.bg-v8  { background: linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%); }
+.bg-v9  { background: linear-gradient(135deg, #fccb90 0%, #d57eeb 100%); }
+.bg-v10 { background: linear-gradient(135deg, #e2b0ff 0%, #ffb6c1 100%); }
+
+/* ── 头像 + 大航海框（纯CSS，无需外部图片） ── */
+.avatar-wrap {
+    position: relative;
+    width: 52px; height: 52px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.avatar-wrap img.face {
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.9);
+    object-fit: cover;
+    display: block;
+}
+/* 大航海身份 — 用边框颜色区分 */
+.avatar-wrap.guard-captain { background: #6ab7ff; }  /* 舰长 · 蓝 */
+.avatar-wrap.guard-commander { background: linear-gradient(135deg, #a78bfa, #7c3aed); } /* 提督 · 紫 */
+.avatar-wrap.guard-governor { background: linear-gradient(135deg, #fbbf24, #f59e0b); }   /* 总督 · 金 */
+.avatar-wrap.guard-none { background: transparent; }
+
+.gift-icon {
+    width: 40px; height: 40px;
+    flex-shrink: 0;
+    object-fit: contain;
+    border-radius: 8px;
+}
+.gift-value {
+    background: rgba(255,255,255,0.25);
+    border-radius: 10px;
+    padding: 2px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.guard-badge {
+    font-size: 9px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 8px;
+    margin-left: 4px;
+    vertical-align: middle;
+}
+.guard-badge.gb-3 { background: #3b82f6; color: #fff; }  /* 舰长 */
+.guard-badge.gb-2 { background: #7c3aed; color: #fff; }  /* 提督 */
+.guard-badge.gb-1 { background: #f59e0b; color: #fff; }  /* 总督 */
+</style>
+</head>
+<body class="bg-gray-100 p-4">
+<div id="app" class="max-w-6xl mx-auto">
+
+<header class="mb-6 flex justify-between items-center bg-white p-4 rounded-xl shadow-sm">
+    <h1 class="text-xl font-bold text-blue-600">🎯 BiliRobot 管理后台</h1>
+    <div class="space-x-3 text-sm">
+        <button @click="tab='ranking'" :class="tab==='ranking'?'text-blue-600 font-bold border-b-2 border-blue-600':''">送礼排行</button>
+        <button @click="tab='export'"  :class="tab==='export' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">精美导出</button>
+    </div>
+</header>
+
+<!-- ══════ 送礼排行 ══════ -->
+<div v-if="tab==='ranking'" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <div class="bg-white p-4 rounded-xl shadow-sm">
+        <div class="flex flex-wrap gap-2 mb-4">
+            <input type="date" v-model="rStart" class="border p-2 rounded text-sm flex-1 min-w-0">
+            <input type="date" v-model="rEnd"   class="border p-2 rounded text-sm flex-1 min-w-0">
+            <button @click="loadRanking" class="bg-blue-500 hover:bg-blue-600 text-white px-5 py-2 rounded text-sm">查询</button>
+        </div>
+        <div v-if="errRanking" class="text-red-500 text-sm mb-2">{{ errRanking }}</div>
+        <table class="w-full text-sm" v-if="ranking.length">
+            <thead><tr class="bg-gray-50"><th class="p-2 text-left">#</th><th class="p-2 text-left">用户</th><th class="p-2 text-right">送礼价值</th><th class="p-2 text-right">利润</th></tr></thead>
+            <tbody>
+                <tr v-for="(u,i) in ranking" :key="u.uid"
+                    class="border-t hover:bg-blue-50 cursor-pointer transition"
+                    @click="gotoExport(u.uid)">
+                    <td class="p-2">{{ i+1 }}</td>
+                    <td class="p-2">{{ u.uname }}</td>
+                    <td class="p-2 text-right">{{ Number(u.total_val).toFixed(2) }}</td>
+                    <td class="p-2 text-right" :class="Number(u.total_profit)>=0?'text-red-500':'text-green-500'">{{ Number(u.total_profit).toFixed(2) }}</td>
+                </tr>
+            </tbody>
+        </table>
+        <div v-else-if="!errRanking" class="text-gray-400 text-center py-8">暂无数据</div>
+    </div>
+    <div class="bg-white p-4 rounded-xl shadow-sm flex flex-col min-h-[300px]">
+        <canvas id="chartRank" class="flex-1 min-h-0"></canvas>
+    </div>
+</div>
+
+<!-- ══════ 精美导出 ══════ -->
+<div v-if="tab==='export'" class="flex flex-col items-center">
+    <div class="bg-white p-4 rounded-xl shadow-sm w-full max-w-lg mb-4 flex flex-wrap gap-2 items-end">
+        <label class="text-xs text-gray-500 flex-1">用户UID<input type="number" v-model.number="eUid" class="border p-2 rounded w-full text-sm mt-1"></label>
+        <label class="text-xs text-gray-500 flex-1">日期<input type="date" v-model="eDate" class="border p-2 rounded w-full text-sm mt-1"></label>
+        <button @click="loadExport" class="bg-green-500 hover:bg-green-600 text-white px-5 py-2 rounded text-sm h-[38px]">生成</button>
+        <button @click="downloadImage" v-if="exportList.length" class="bg-purple-500 hover:bg-purple-600 text-white px-5 py-2 rounded text-sm h-[38px]">📥 导出 PNG</button>
+    </div>
+    <div v-if="errExport" class="text-red-500 text-sm mb-2">{{ errExport }}</div>
+
+    <!-- 精美截图区 -->
+    <div id="capture" v-if="exportList.length" class="w-full max-w-md">
+        <div class="text-center text-gray-400 text-xs mb-2">{{ eDate }} · 礼物投喂明细</div>
+        <div v-for="(item,idx) in exportList" :key="item.id"
+             class="bili-card"
+             :class="'bg-v' + ((idx % 10) + 1)">
+            <div class="avatar-wrap"
+                 :class="item.guard_level === 3 ? 'guard-captain' : item.guard_level === 2 ? 'guard-commander' : item.guard_level === 1 ? 'guard-governor' : 'guard-none'">
+                <img :src="proxyImg(item.avatar)" class="face"
+                     @error="$event.target.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 44 44%22><rect width=%2244%22 height=%2244%22 fill=%22%23ccc%22 rx=%2222%22/></svg>'">
+            </div>
+            <div class="flex-1 min-w-0">
+                <div class="font-bold text-sm truncate">
+                    {{ item.uname }}
+                    <span v-if="item.guard_level === 3" class="guard-badge gb-3">舰长</span>
+                    <span v-else-if="item.guard_level === 2" class="guard-badge gb-2">提督</span>
+                    <span v-else-if="item.guard_level === 1" class="guard-badge gb-1">总督</span>
+                </div>
+                <div class="flex items-center gap-2 mt-0.5">
+                    <span class="text-xs text-white/80">投喂了 {{ item.gift_name }} × {{ item.gift_num }}</span>
+                    <span class="gift-value" v-if="item.price">¥{{ (item.price / 1000).toFixed(1) }}</span>
+                </div>
+            </div>
+            <img :src="proxyImg(item.gift_icon)" class="gift-icon"
+                 @error="$event.target.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 40 40%22><rect width=%2240%22 height=%2240%22 fill=%22%23eee%22 rx=%228%22/></svg>'">
+        </div>
+    </div>
+    <div v-else-if="!errExport" class="text-gray-400 mt-20">输入 UID 和日期后点击"生成"</div>
+</div>
+
+</div>
+
+<script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
+<script>
+const {createApp, ref, nextTick} = Vue;
+createApp({
+    setup() {
+        const tab = ref('ranking');
+        const rStart = ref(new Date().toISOString().slice(0,10));
+        const rEnd   = ref(new Date().toISOString().slice(0,10));
+        const ranking = ref([]);
+        const errRanking = ref('');
+        const eUid = ref(0);
+        const eDate = ref(new Date().toISOString().slice(0,10));
+        const exportList = ref([]);
+        const errExport = ref('');
+        let chartInst = null;
+
+        function proxyImg(url) {
+            if (!url) return '';
+            if (url.startsWith('data:') || url.startsWith('blob:')) return url;
+            if (url.startsWith('/')) return url;
+            return '/api/proxy_image?url=' + encodeURIComponent(url);
+        }
+
+        async function loadRanking() {
+            errRanking.value = '';
+            ranking.value = [];
+            try {
+                const res = await fetch(`/api/ranking?start=${rStart.value}&end=${rEnd.value}`);
+                if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
+                ranking.value = await res.json();
+            } catch(e) { errRanking.value = '加载失败: ' + e.message; }
+            await nextTick();
+            updateChart();
+        }
+        function updateChart() {
+            const canvas = document.getElementById('chartRank');
+            if (!canvas) return;
+            if (chartInst) chartInst.destroy();
+            if (!ranking.value.length) return;
+            chartInst = new Chart(canvas, {
+                type: 'bar',
+                data: {
+                    labels: ranking.value.map(u=>u.uname),
+                    datasets: [{
+                        label: '送礼价值',
+                        data: ranking.value.map(u=>Number(u.total_val)),
+                        backgroundColor: 'rgba(59,130,246,0.6)',
+                        borderRadius: 4
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+            });
+        }
+        async function loadExport() {
+            errExport.value = '';
+            exportList.value = [];
+            if (!eUid.value || !eDate.value) { errExport.value = '请填写 UID 和日期'; return; }
+            try {
+                const res = await fetch(`/api/user_gifts?uid=${eUid.value}&date=${eDate.value}`);
+                if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
+                exportList.value = await res.json();
+                if (!exportList.value.length) errExport.value = '该用户当天无送礼记录';
+                await nextTick();
+                await new Promise(r => setTimeout(r, 1000));
+            } catch(e) { errExport.value = '加载失败: ' + e.message; }
+        }
+        function gotoExport(uid) { eUid.value = uid; tab.value = 'export'; loadExport(); }
+        function downloadImage() {
+            const el = document.getElementById('capture');
+            if (!el) return;
+            errExport.value = '正在生成图片...';
+            html2canvas(el, {
+                scale: 2,
+                useCORS: true,
+                allowTaint: true,
+                backgroundColor: '#ffffff',
+                logging: false
+            }).then(canvas => {
+                const a = document.createElement('a');
+                a.download = `gift_${eUid.value}_${eDate.value}.png`;
+                a.href = canvas.toDataURL('image/png');
+                a.click();
+                errExport.value = '';
+            }).catch(e => { errExport.value = '导出失败: ' + e.message; });
+        }
+        return {tab, rStart, rEnd, ranking, errRanking, eUid, eDate, exportList, errExport,
+                loadRanking, loadExport, gotoExport, downloadImage, proxyImg};
+    }
+}).mount('#app');
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    return INDEX_HTML
 
 
 if __name__ == "__main__":
