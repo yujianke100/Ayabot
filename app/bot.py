@@ -5,6 +5,7 @@ import re
 from contextlib import suppress
 import json
 import logging
+import random
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -415,6 +416,29 @@ class LiveRobot:
             await self._enqueue_message(text=text_out, reply_uid=uid)
             return
 
+        if name == "checkin":
+            parsed = _parse_danmaku_user_and_text(event)
+            uname = parsed[1] if parsed else "用户"
+            days, rank = self.store.user_checkin(uid, uname)
+            msg = f"感谢{uname}签到！连续签到{days}天，目前排名第{rank}。继续坚持喵~"
+            await self._enqueue_message(text=msg, reply_uid=uid)
+            return
+
+        if name == "fortune":
+            fortunes = [
+                ("大吉", ["今天运气爆棚，做什么都顺风顺水！", "主播都被你的欧气惊到了！"]),
+                ("中吉", ["运势不错，是个适合发财的好日子。", "心情舒畅，会有好事发生哦。"]),
+                ("小吉", ["平稳的一天，适合静下心来干大事。", "顺其自然，好运自会到来。"]),
+                ("末吉", ["虽然平淡，但健康平安就是最大的福气。", "不要急躁，慢慢来总会好的。"]),
+                ("凶", ["今天适合低调行事，多看看直播转转运。", "别灰心，下次抽签一定是上签！"]),
+                ("大凶", ["生活总有低谷，吃顿好的安慰一下自己吧。", "多发几条弹幕，霉运都会跑掉的。"]),
+            ]
+            f_type, jokes = random.choice(fortunes)
+            joke = random.choice(jokes)
+            msg = f"抽签结果：【{f_type}】！{joke}"
+            await self._enqueue_message(text=msg, reply_uid=uid)
+            return
+
         if not self._has_control_permission(uid, moderator_hint):
             self.logger.debug(
                 "command permission denied: uid=%s name=%s moderator_hint=%s",
@@ -444,8 +468,18 @@ class LiveRobot:
 
     async def _on_all_events(self, event: dict[str, Any]) -> None:
         event_type = event.get("type", "?")
+        
+        # Handle PK Battle Start
+        if event_type == "PK_BATTLE_SETTLE_USER": # Note: Some events are not prefixed with PK_BATTLE_ in old versions but nemo2011 uses generic labels
+            pass 
+
+        if event_type == "PK_BATTLE_START":
+            self.logger.info("PK battle started, processing stats...")
+            await self._handle_pk_start(event)
+            return
+
         # Suppress high-frequency / known events to reduce log noise
-        noisy_prefixes = ("PK_BATTLE", "SUPER_CHAT", "HOT_RANK_", "ONLINE_RANK_",
+        noisy_prefixes = ("SUPER_CHAT", "HOT_RANK_", "ONLINE_RANK_",
                           "LIKE_INFO_V3_", "POPULARITY_")
         if event_type.startswith(noisy_prefixes):
             return
@@ -459,6 +493,23 @@ class LiveRobot:
         if event_type in noisy_exact:
             return
         self.logger.debug("unhandled event: type=%s", event_type)
+
+    async def _handle_pk_start(self, event: dict[str, Any]) -> None:
+        try:
+            data = event.get("data", {})
+            # room_id is self, init_info.room_id is opponent
+            init_info = data.get("init_info", {})
+            
+            opp_name = init_info.get("anchor_name", "对面主播")
+            opp_guard = init_info.get("guard_count", 0)
+            opp_online = init_info.get("online_count", 0)
+            
+            msg = f"⚔️ PK开始！对面：{opp_name}\n"
+            msg += f"📊 对方舰长：{opp_guard} | 在线：{opp_online}"
+            
+            await self._enqueue_message(text=msg, reply_uid=None)
+        except Exception as exc:
+            self.logger.error("Error processing PK_BATTLE_START: %s", exc)
 
     async def _on_connected(self, event: dict[str, Any]) -> None:
         await self._enqueue_message(text=self.config.features.connected_message, reply_uid=None)
@@ -681,6 +732,14 @@ def _parse_command(text: str) -> Optional[tuple[str, str]]:
     
     # Create a normalized compact version for simple commands
     compact = "".join(s.split()).replace("：", ":")
+
+    # Command: #签到
+    if compact == "#签到":
+        return "checkin", ""
+
+    # Command: #抽签
+    if compact == "#抽签":
+        return "fortune", ""
 
     # Command: #盲盒统计 / #盲盒我的
     if compact in ("#盲盒统计", "#盲盒我的"):

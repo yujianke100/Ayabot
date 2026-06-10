@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from multiprocessing import Process
+import uvicorn
 
 from .auth import AuthManager
 from .bot import LiveRobot
 from .config import load_config
-
+from .web.server import app as fastapi_app
 
 def _setup_logging(level: str) -> None:
     logging.basicConfig(
@@ -14,6 +16,9 @@ def _setup_logging(level: str) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+def run_web_ui() -> None:
+    # 辅助进程运行 Web 管理界面
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=8000, log_level="error")
 
 async def _run() -> None:
     config = load_config("config.yaml")
@@ -31,8 +36,17 @@ async def _run() -> None:
 
 
 def main() -> None:
-    asyncio.run(_run())
-
+    # 启动 Web UI 进程
+    web_process = Process(target=run_web_ui, daemon=True)
+    web_process.start()
+    
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if web_process.is_alive():
+            web_process.terminate()
 
 if __name__ == "__main__":
     main()

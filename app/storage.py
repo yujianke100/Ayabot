@@ -71,6 +71,14 @@ class StatsStore:
                 profit_total INTEGER NOT NULL,
                 PRIMARY KEY(month, uid)
             );
+
+            CREATE TABLE IF NOT EXISTS user_checkin (
+                uid INTEGER PRIMARY KEY,
+                uname TEXT NOT NULL,
+                last_checkin_date TEXT NOT NULL,
+                continuous_days INTEGER NOT NULL DEFAULT 1,
+                total_days INTEGER NOT NULL DEFAULT 1
+            );
             """
         )
         self._conn.commit()
@@ -202,6 +210,53 @@ class StatsStore:
         if not row or row[0] is None:
             return 0, 0, 0, 0
         return int(row[0]), int(row[1]), int(row[2]), int(row[3])
+
+    def user_checkin(self, uid: int, uname: str) -> tuple[int, int]:
+        """ 返回 (连续签到天数, 连续天数排名) """
+        today = datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.now().fromtimestamp(time.time() - 86400)).strftime("%Y-%m-%d")
+
+        # 获取当前签到状态
+        row = self._conn.execute(
+            "SELECT last_checkin_date, continuous_days FROM user_checkin WHERE uid = ?", (uid,)
+        ).fetchone()
+
+        if row:
+            last_date, continuous = row[0], row[1]
+            if last_date == today:
+                # 今天已经签到过了，直接返回当前数据
+                pass
+            elif last_date == yesterday:
+                # 昨天签到过，连续天数+1
+                continuous += 1
+                self._conn.execute(
+                    "UPDATE user_checkin SET last_checkin_date = ?, continuous_days = ?, total_days = total_days + 1, uname = ? WHERE uid = ?",
+                    (today, continuous, uname, uid),
+                )
+            else:
+                # 断签了，重置为1
+                continuous = 1
+                self._conn.execute(
+                    "UPDATE user_checkin SET last_checkin_date = ?, continuous_days = ?, total_days = total_days + 1, uname = ? WHERE uid = ?",
+                    (today, continuous, uname, uid),
+                )
+        else:
+            # 第一次签到
+            continuous = 1
+            self._conn.execute(
+                "INSERT INTO user_checkin (uid, uname, last_checkin_date, continuous_days, total_days) VALUES (?, ?, ?, 1, 1)",
+                (uid, uname, today),
+            )
+        
+        self._conn.commit()
+
+        # 计算排名
+        rank_row = self._conn.execute(
+            "SELECT COUNT(1) FROM user_checkin WHERE continuous_days > ?", (continuous,)
+        ).fetchone()
+        rank = (rank_row[0] if rank_row else 0) + 1
+
+        return continuous, rank
 
     def close(self) -> None:
         self._conn.close()
