@@ -1,10 +1,7 @@
 """Web UI for BiliRobot — 送礼统计 & 精美导出
 
-Features:
-- 日期范围送礼排行 + Chart.js 柱状图
-- 精美导出：仿B站送礼卡片，支持 PNG 导出
-- 礼物图标缓存（从 gift.shuvi.moe 获取）
-- 图片代理解决 html2canvas CORS 问题
+礼物图标来源：bilibili-api-python 官方 live.get_gift_config() API
+大航海头像框：舰长使用 B站 真实图片，提督/总督使用 CSS 金色/紫色光环
 """
 
 from __future__ import annotations
@@ -24,10 +21,12 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 import uvicorn
 
+from bilibili_api import live
+
 logger = logging.getLogger("webui")
 
 # ══════════════════════════════════════════════════════════════════
-#  Config
+#  Config — DB path from config.yaml
 # ══════════════════════════════════════════════════════════════════
 
 _CONFIG_PATH = Path("config.yaml")
@@ -43,39 +42,25 @@ logger.info("webui using db: %s", os.path.abspath(_DB_PATH))
 
 app = FastAPI(title="BiliRobot Manager")
 
-# ── 礼物图标缓存 ─────────────────────────────────────────────────
+# ── 礼物图标缓存：gift_id → img_basic URL ────────────────────────
 _GIFT_ICON_CACHE: dict[int, str] = {}
-_GIFT_CACHE_LOCK = asyncio.Lock()
 
 
 async def _build_gift_cache() -> None:
-    """从 gift.shuvi.moe 拉取全量礼物数据，缓存 giftId → img_basic URL."""
+    """从 bilibili-api 官方 get_gift_config() 获取全量礼物图标."""
     global _GIFT_ICON_CACHE
-    sources = [
-        "https://gift.shuvi.moe/gifts.json",
-        "https://gift.shuvi.moe/api/gifts",
-    ]
-    for url in sources:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    if resp.status != 200:
-                        continue
-                    data = await resp.json()
-            break
-        except Exception:
-            continue
-    else:
-        logger.warning("failed to fetch gift data from all sources")
+    try:
+        data = await live.get_gift_config()
+    except Exception as exc:
+        logger.warning("get_gift_config failed: %s", exc)
         return
 
     cache: dict[int, str] = {}
-    for entry in data if isinstance(data, list) else data.get("gift", []):
-        gid = _safe_int(entry.get("id"))
+    for g in data.get("list", []):
+        gid = _safe_int(g.get("id"))
         if gid <= 0:
             continue
-        # img_basic 是最佳图标; 没有则回退到 img_dynamic
-        icon = entry.get("img_basic") or entry.get("img_dynamic") or ""
+        icon = g.get("img_basic") or ""
         if icon:
             cache[gid] = icon
 
@@ -84,9 +69,7 @@ async def _build_gift_cache() -> None:
 
 
 def _get_gift_icon(gift_id: int) -> str:
-    if gift_id in _GIFT_ICON_CACHE:
-        return _GIFT_ICON_CACHE[gift_id]
-    return ""  # fallback 交给前端
+    return _GIFT_ICON_CACHE.get(gift_id, "")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -174,24 +157,37 @@ async def api_user_gifts(uid: int, date: str):
             item = dict(r)
             raw = _safe_json(item.pop("raw_json", "{}"))
 
-            # 头像
-            item["avatar"] = raw.get("face") or raw.get("data", {}).get("face") or ""
+            # 头像 — 从 B站 原始 payload 的 face 字段提取
+            avatar = (
+                raw.get("face")
+                or raw.get("data", {}).get("face")
+                or ""
+            )
+            item["avatar"] = avatar
 
             # 大航海等级 (3=舰长, 2=提督, 1=总督)
+            # 注意：普通送礼事件的 raw 里可能没有 guard_level，有则用
             item["guard_level"] = _safe_int(
-                raw.get("guard_level") or raw.get("data", {}).get("guard_level", 0)
+                raw.get("guard_level")
+                or raw.get("data", {}).get("guard_level", 0)
             )
 
-            # 礼物图标 — 优先从缓存取
+            # 礼物图标
             gift_id = _safe_int(raw.get("giftId") or raw.get("gift_id") or 0)
-            cached_icon = _get_gift_icon(gift_id) if gift_id else ""
-            item["gift_icon"] = cached_icon
+            icon = _get_gift_icon(gift_id) if gift_id else ""
+            item["gift_icon"] = icon
 
             # 礼物名称
-            item["gift_name"] = raw.get("giftName") or raw.get("gift_name") or item.get("gift_name", "")
+            item["gift_name"] = (
+                raw.get("giftName")
+                or raw.get("gift_name")
+                or item.get("gift_name", "")
+            )
 
-            # 单礼物价格（单位：电池/金瓜子）
-            item["price"] = _safe_int(raw.get("price") or raw.get("total_coin") or 0)
+            # 单礼物价格（金瓜子）
+            item["price"] = _safe_int(
+                raw.get("price") or raw.get("total_coin") or 0
+            )
 
             results.append(item)
         return results
@@ -205,7 +201,9 @@ async def api_proxy_image(url: str):
     """Fetch external image and return with CORS headers for html2canvas."""
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
                 body = await resp.read()
                 ct = resp.content_type or "image/png"
                 return Response(
@@ -218,21 +216,11 @@ async def api_proxy_image(url: str):
                 )
     except Exception as exc:
         logger.warning("proxy_image failed for %s: %s", url, exc)
-        # 回退：返回一个 1x1 透明 PNG
-        return Response(
-            content=(
-                b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00"
-                b"\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx"
-                b"\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND"
-                b"\xaeB`\x82"
-            ),
-            media_type="image/png",
-            headers={"Access-Control-Allow-Origin": "*"},
-        )
+        return Response(status_code=302, headers={"Location": url})
 
 
 # ══════════════════════════════════════════════════════════════════
-#  Static HTML  (inline for single-binary deployment)
+#  Static HTML
 # ══════════════════════════════════════════════════════════════════
 
 INDEX_HTML = r"""<!DOCTYPE html>
@@ -260,6 +248,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
     overflow: hidden;
 }
 .bili-card > * { position: relative; z-index: 1; }
+
+/* 渐变底色 */
 .bg-v1  { background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%); }
 .bg-v2  { background: linear-gradient(135deg, #a1c4fd 0%, #c2e9fb 100%); }
 .bg-v3  { background: linear-gradient(135deg, #f6d365 0%, #fda085 100%); }
@@ -271,34 +261,61 @@ INDEX_HTML = r"""<!DOCTYPE html>
 .bg-v9  { background: linear-gradient(135deg, #fccb90 0%, #d57eeb 100%); }
 .bg-v10 { background: linear-gradient(135deg, #e2b0ff 0%, #ffb6c1 100%); }
 
-/* ── 头像 + 大航海框（纯CSS，无需外部图片） ── */
+/* ── 头像 ── */
 .avatar-wrap {
     position: relative;
-    width: 52px; height: 52px;
+    width: 56px; height: 56px;
     flex-shrink: 0;
-    border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
+    border-radius: 50%;
 }
 .avatar-wrap img.face {
     width: 44px; height: 44px;
     border-radius: 50%;
     border: 2px solid rgba(255,255,255,0.9);
     object-fit: cover;
-    display: block;
+    position: relative;
+    z-index: 1;
 }
-/* 大航海身份 — 用边框颜色区分 */
-.avatar-wrap.guard-captain { background: #6ab7ff; }  /* 舰长 · 蓝 */
-.avatar-wrap.guard-commander { background: linear-gradient(135deg, #a78bfa, #7c3aed); } /* 提督 · 紫 */
-.avatar-wrap.guard-governor { background: linear-gradient(135deg, #fbbf24, #f59e0b); }   /* 总督 · 金 */
-.avatar-wrap.guard-none { background: transparent; }
+/* 大航海光环 — CSS Ring */
+.avatar-wrap .ring {
+    position: absolute;
+    inset: -3px;
+    border-radius: 50%;
+    border: 3px solid transparent;
+    pointer-events: none;
+    z-index: 2;
+}
+/* 舰长 — 蓝色+用户真实图片 */
+.avatar-wrap.guard-captain .ring {
+    border-color: #3b82f6;
+    box-shadow: 0 0 10px rgba(59,130,246,0.5), inset 0 0 6px rgba(59,130,246,0.3);
+}
+.avatar-wrap.guard-captain .frame-img {
+    position: absolute;
+    width: 66px; height: 66px;
+    top: -5px; left: -5px;
+    pointer-events: none;
+    z-index: 3;
+}
+/* 提督 — 紫色 */
+.avatar-wrap.guard-commander .ring {
+    border-color: #a78bfa;
+    box-shadow: 0 0 10px rgba(167,139,250,0.5), inset 0 0 6px rgba(167,139,250,0.3);
+}
+/* 总督 — 金色 */
+.avatar-wrap.guard-governor .ring {
+    border-color: #fbbf24;
+    box-shadow: 0 0 10px rgba(251,191,36,0.5), inset 0 0 6px rgba(251,191,36,0.3);
+}
 
 .gift-icon {
     width: 40px; height: 40px;
     flex-shrink: 0;
     object-fit: contain;
-    border-radius: 8px;
+    border-radius: 6px;
 }
 .gift-value {
     background: rgba(255,255,255,0.25);
@@ -313,12 +330,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
     font-weight: 700;
     padding: 1px 6px;
     border-radius: 8px;
-    margin-left: 4px;
     vertical-align: middle;
+    display: inline-block;
 }
-.guard-badge.gb-3 { background: #3b82f6; color: #fff; }  /* 舰长 */
-.guard-badge.gb-2 { background: #7c3aed; color: #fff; }  /* 提督 */
-.guard-badge.gb-1 { background: #f59e0b; color: #fff; }  /* 总督 */
+.guard-badge.gb-3 { background: #3b82f6; color: #fff; }
+.guard-badge.gb-2 { background: #7c3aed; color: #fff; }
+.guard-badge.gb-1 { background: #f59e0b; color: #fff; }
 </style>
 </head>
 <body class="bg-gray-100 p-4">
@@ -378,7 +395,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
              class="bili-card"
              :class="'bg-v' + ((idx % 10) + 1)">
             <div class="avatar-wrap"
-                 :class="item.guard_level === 3 ? 'guard-captain' : item.guard_level === 2 ? 'guard-commander' : item.guard_level === 1 ? 'guard-governor' : 'guard-none'">
+                 :class="item.guard_level === 3 ? 'guard-captain' : item.guard_level === 2 ? 'guard-commander' : item.guard_level === 1 ? 'guard-governor' : ''">
+                <!-- 舰长头像框 (用户提供的B站真实图片) -->
+                <img v-if="item.guard_level === 3"
+                     :src="proxyImg('https://i0.hdslb.com/bfs/live/80f732943cc3367029df65e267960d56736a82ee.png')"
+                     class="frame-img"
+                     @error="$event.target.style.display='none'">
+                <!-- CSS 光环 (所有等级都有) -->
+                <div class="ring"></div>
+                <!-- 用户头像 -->
                 <img :src="proxyImg(item.avatar)" class="face"
                      @error="$event.target.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 44 44%22><rect width=%2244%22 height=%2244%22 fill=%22%23ccc%22 rx=%2222%22/></svg>'">
             </div>
@@ -394,8 +419,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <span class="gift-value" v-if="item.price">¥{{ (item.price / 1000).toFixed(1) }}</span>
                 </div>
             </div>
-            <img :src="proxyImg(item.gift_icon)" class="gift-icon"
-                 @error="$event.target.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 40 40%22><rect width=%2240%22 height=%2240%22 fill=%22%23eee%22 rx=%228%22/></svg>'">
+            <!-- 礼物图标 -->
+            <img v-if="item.gift_icon"
+                 :src="proxyImg(item.gift_icon)" class="gift-icon"
+                 @error="onIconError($event)">
         </div>
     </div>
     <div v-else-if="!errExport" class="text-gray-400 mt-20">输入 UID 和日期后点击"生成"</div>
@@ -422,8 +449,17 @@ createApp({
         function proxyImg(url) {
             if (!url) return '';
             if (url.startsWith('data:') || url.startsWith('blob:')) return url;
-            if (url.startsWith('/')) return url;
+            if (url.startsWith('/api/')) return url;
             return '/api/proxy_image?url=' + encodeURIComponent(url);
+        }
+
+        function onIconError(e) {
+            const el = e.target;
+            el.style.display = 'none';
+            const fb = document.createElement('span');
+            fb.textContent = '🎁';
+            fb.style.cssText = 'font-size:24px;flex-shrink:0;width:40px;text-align:center;';
+            el.parentNode.insertBefore(fb, el.nextSibling);
         }
 
         async function loadRanking() {
@@ -475,11 +511,8 @@ createApp({
             if (!el) return;
             errExport.value = '正在生成图片...';
             html2canvas(el, {
-                scale: 2,
-                useCORS: true,
-                allowTaint: true,
-                backgroundColor: '#ffffff',
-                logging: false
+                scale: 2, useCORS: true, allowTaint: true,
+                backgroundColor: '#ffffff', logging: false
             }).then(canvas => {
                 const a = document.createElement('a');
                 a.download = `gift_${eUid.value}_${eDate.value}.png`;
@@ -489,7 +522,7 @@ createApp({
             }).catch(e => { errExport.value = '导出失败: ' + e.message; });
         }
         return {tab, rStart, rEnd, ranking, errRanking, eUid, eDate, exportList, errExport,
-                loadRanking, loadExport, gotoExport, downloadImage, proxyImg};
+                loadRanking, loadExport, gotoExport, downloadImage, proxyImg, onIconError};
     }
 }).mount('#app');
 </script>
