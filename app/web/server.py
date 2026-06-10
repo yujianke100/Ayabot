@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
@@ -8,9 +9,10 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 import yaml
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 import uvicorn
 
 logger = logging.getLogger("webui")
@@ -108,6 +110,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
     top: 0; left: 0; pointer-events: none;
 }
 .gift-icon { width: 40px; height: 40px; flex-shrink: 0; object-fit: contain; }
+.gift-value {
+    background: rgba(255,255,255,0.25);
+    border-radius: 10px;
+    padding: 2px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
 </style>
 </head>
 <body class="bg-gray-100 p-4">
@@ -167,16 +177,21 @@ INDEX_HTML = r"""<!DOCTYPE html>
              class="bili-card"
              :class="'bg-v' + ((idx % 10) + 1)">
             <div class="avatar-wrap">
-                <img :src="item.avatar || 'https://static.hdslb.com/images/akari.jpg'" class="face" @error="$event.target.src='https://static.hdslb.com/images/akari.jpg'">
-                <img v-if="item.guard_level === 3" src="https://i0.hdslb.com/bfs/live/782b2cf6d82a89fad7ea12f635dac6b4b19f53b0.png" class="frame" title="舰长">
-                <img v-else-if="item.guard_level === 2" src="https://i0.hdslb.com/bfs/live/882b2cf6d82a89fad7ea12f635dac6b4b19f53b0.png" class="frame" title="提督">
-                <img v-else-if="item.guard_level === 1" src="https://i0.hdslb.com/bfs/live/962b2cf6d82a89fad7ea12f635dac6b4b19f53b0.png" class="frame" title="总督">
+                <img :src="proxyImg(item.avatar)" class="face"
+                     @error="$event.target.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 44 44%22><rect width=%2244%22 height=%2244%22 fill=%22%23ccc%22 rx=%2222%22/></svg>'">
+                <img v-if="item.guard_level === 3" :src="proxyImg('https://i0.hdslb.com/bfs/live/782b2cf6d82a89fad7ea12f635dac6b4b19f53b0.png')" class="frame" title="舰长">
+                <img v-else-if="item.guard_level === 2" :src="proxyImg('https://i0.hdslb.com/bfs/live/882b2cf6d82a89fad7ea12f635dac6b4b19f53b0.png')" class="frame" title="提督">
+                <img v-else-if="item.guard_level === 1" :src="proxyImg('https://i0.hdslb.com/bfs/live/962b2cf6d82a89fad7ea12f635dac6b4b19f53b0.png')" class="frame" title="总督">
             </div>
             <div class="flex-1 min-w-0">
                 <div class="font-bold text-sm truncate">{{ item.uname }}</div>
-                <div class="text-xs text-white/80 mt-0.5">投喂了 {{ item.gift_name }} × {{ item.gift_num }}</div>
+                <div class="flex items-center gap-2 mt-0.5">
+                    <span class="text-xs text-white/80">投喂了 {{ item.gift_name }} × {{ item.gift_num }}</span>
+                    <span class="gift-value" v-if="item.price">¥{{ (item.price / 1000).toFixed(1) }}</span>
+                </div>
             </div>
-            <img :src="item.gift_icon || 'https://s1.hdslb.com/bfs/static/blive/blfe-live-room/static/img/gift/1.png'" class="gift-icon" @error="$event.target.src='https://s1.hdslb.com/bfs/static/blive/blfe-live-room/static/img/gift/1.png'">
+            <img :src="proxyImg(item.gift_icon)" class="gift-icon"
+                 @error="$event.target.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 40 40%22><rect width=%2240%22 height=%2240%22 fill=%22%23eee%22 rx=%228%22/></svg>'">
         </div>
     </div>
     <div v-else-if="!errExport" class="text-gray-400 mt-20">输入 UID 和日期后点击"生成"</div>
@@ -199,6 +214,15 @@ createApp({
         const exportList = ref([]);
         const errExport = ref('');
         let chartInst = null;
+
+        // ── 图片代理：所有外链经过同源代理解决 CORS ──
+        function proxyImg(url) {
+            if (!url) return '';
+            if (url.startsWith('data:') || url.startsWith('blob:')) return url;
+            // 如果是同源（/api/xxx）则不代理
+            if (url.startsWith('/')) return url;
+            return '/api/proxy_image?url=' + encodeURIComponent(url);
+        }
 
         async function loadRanking() {
             errRanking.value = '';
@@ -242,23 +266,32 @@ createApp({
                 if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
                 exportList.value = await res.json();
                 if (!exportList.value.length) errExport.value = '该用户当天无送礼记录';
+                // 等待图片加载完成后再允许导出
+                await nextTick();
+                await new Promise(r => setTimeout(r, 800));
             } catch(e) { errExport.value = '加载失败: ' + e.message; }
         }
         function gotoExport(uid) { eUid.value = uid; tab.value = 'export'; loadExport(); }
         function downloadImage() {
             const el = document.getElementById('capture');
             if (!el) return;
-            html2canvas(el, { scale: 2, useCORS: true, allowTaint: false, backgroundColor: '#ffffff' })
-                .then(canvas => {
-                    const a = document.createElement('a');
-                    a.download = `gift_${eUid.value}_${eDate.value}.png`;
-                    a.href = canvas.toDataURL('image/png');
-                    a.click();
-                })
-                .catch(e => { errExport.value = '导出失败: ' + e.message; });
+            errExport.value = '正在生成图片...';
+            html2canvas(el, {
+                scale: 2,
+                useCORS: true,
+                allowTaint: true,
+                backgroundColor: '#ffffff',
+                logging: false
+            }).then(canvas => {
+                const a = document.createElement('a');
+                a.download = `gift_${eUid.value}_${eDate.value}.png`;
+                a.href = canvas.toDataURL('image/png');
+                a.click();
+                errExport.value = '';
+            }).catch(e => { errExport.value = '导出失败: ' + e.message; });
         }
         return {tab, rStart, rEnd, ranking, errRanking, eUid, eDate, exportList, errExport,
-                loadRanking, loadExport, gotoExport, downloadImage};
+                loadRanking, loadExport, gotoExport, downloadImage, proxyImg};
     }
 }).mount('#app');
 </script>
@@ -315,15 +348,58 @@ async def api_user_gifts(uid: int, date: str):
         for r in rows:
             item = dict(r)
             raw = _safe_json(item.pop("raw_json", "{}"))
-            item["avatar"] = raw.get("face") or None
-            item["guard_level"] = _safe_int(raw.get("guard_level"))
-            gift_id = _safe_int(raw.get("gift_id") or raw.get("giftId") or 1)
-            item["gift_icon"] = f"https://s1.hdslb.com/bfs/static/blive/blfe-live-room/static/img/gift/{gift_id}.png"
+
+            # ── 头像（B 站 payload 的 face 字段）──
+            avatar = raw.get("face") or raw.get("data", {}).get("face") or ""
+            if avatar and not avatar.startswith("/"):
+                item["avatar"] = avatar
+            else:
+                item["avatar"] = ""
+
+            # ── 大航海等级 ──
+            item["guard_level"] = _safe_int(raw.get("guard_level") or
+                                             raw.get("data", {}).get("guard_level", 0))
+
+            # ── 礼物 ID + 图标 ──
+            gift_id = _safe_int(raw.get("giftId") or raw.get("gift_id") or 1)
+            item["gift_id"] = gift_id
+            # 优先用 payload 自带的 giftIcon，否则拼 URL
+            gift_icon = raw.get("giftIcon") or raw.get("gift_icon") or ""
+            if gift_icon and (gift_icon.startswith("http://") or gift_icon.startswith("https://")):
+                item["gift_icon"] = gift_icon
+            else:
+                item["gift_icon"] = (f"https://s1.hdslb.com/bfs/static/blive/blfe-live-room"
+                                     f"/static/img/gift/{gift_id}.png")
+
+            # ── 单礼物价格（B 站单位：电池/金瓜子）──
+            price = _safe_int(raw.get("price") or raw.get("total_coin") or 0)
+            item["price"] = price
+
             results.append(item)
         return results
     except Exception as exc:
         logger.exception("user_gifts api failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  图片代理 — 解决 html2canvas 跨域问题
+# ══════════════════════════════════════════════════════════════════
+
+@app.get("/api/proxy_image")
+async def api_proxy_image(url: str):
+    """Fetch external image and return with CORS headers so html2canvas can render it."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                body = await resp.read()
+                ct = resp.content_type or "image/png"
+                return Response(content=body, media_type=ct,
+                                headers={"Access-Control-Allow-Origin": "*",
+                                         "Cache-Control": "public, max-age=86400"})
+    except Exception as exc:
+        logger.warning("proxy_image failed for %s: %s", url, exc)
+        return Response(status_code=302, headers={"Location": url})
 
 
 if __name__ == "__main__":
