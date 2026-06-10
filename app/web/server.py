@@ -401,20 +401,19 @@ INDEX_HTML = r"""<!DOCTYPE html>
     .capture-columns { column-count: 1; }
 }
 
-.bg-v1  { background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%); }
-.bg-v2  { background: linear-gradient(135deg, #a1c4fd 0%, #c2e9fb 100%); }
-.bg-v3  { background: linear-gradient(135deg, #f6d365 0%, #fda085 100%); }
-.bg-v4  { background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%); }
-.bg-v5  { background: linear-gradient(135deg, #d4fc79 0%, #96e6a1 100%); }
-.bg-v6  { background: linear-gradient(135deg, #84fab0 0%, #8fd3f4 100%); }
-.bg-v7  { background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); }
-.bg-v8  { background: linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%); }
-.bg-v9  { background: linear-gradient(135deg, #fccb90 0%, #d57eeb 100%); }
-.bg-v10 { background: linear-gradient(135deg, #e2b0ff 0%, #ffb6c1 100%); }
+/* ── 身份底色（更沉稳，白字清晰）── */
+.bg-default { background: linear-gradient(135deg, #4b5563 0%, #374151 100%); }
+.bg-captain { background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); }
+.bg-commander { background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%); }
+.bg-governor { background: linear-gradient(135deg, #d97706 0%, #b45309 100%); }
 
 .avatar-wrap {
-    width: 44px; height: 44px;
+    position: relative;
+    width: 52px; height: 52px;
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 .avatar-wrap img.face {
     width: 44px; height: 44px;
@@ -423,6 +422,27 @@ INDEX_HTML = r"""<!DOCTYPE html>
     object-fit: cover;
     display: block;
     max-width: none !important;
+    position: relative;
+    z-index: 1;
+}
+.avatar-wrap img.frame-img {
+    position: absolute;
+    width: 60px; height: 60px;
+    top: -4px; left: -4px;
+    pointer-events: none;
+    z-index: 2;
+    max-width: none !important;
+}
+
+/* ── 多列布局（html2canvas 兼容）── */
+.capture-grid {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+}
+.capture-col {
+    flex: 1;
+    min-width: 0;
 }
 
 .gift-icon {
@@ -438,6 +458,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
     font-size: 10px;
     font-weight: 600;
     white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    line-height: 1.4;
 }
 .gift-time {
     font-size: 9px;
@@ -493,7 +516,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <tbody>
                 <tr v-for="(u,i) in ranking" :key="u.uid"
                     class="border-t hover:bg-blue-50 cursor-pointer transition"
-                    @click="gotoExport(u.uid)">
+                    @click="gotoExport(u.uid, u.uname)">
                     <td class="p-2">{{ i+1 }}</td>
                     <td class="p-2">{{ u.uname }}</td>
                     <td class="p-2 text-right">{{ Number(u.total_val).toFixed(2) }}</td>
@@ -511,8 +534,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <!-- ══════ 精美导出 ══════ -->
 <div v-if="tab==='export'" class="flex flex-col items-center">
     <div class="bg-white p-4 rounded-xl shadow-sm w-full max-w-2xl mb-4 flex flex-wrap gap-2 items-end">
-        <label class="text-xs text-gray-500 flex-1">UID<input type="number" v-model.number="eUid" class="border p-2 rounded w-full text-sm mt-1"></label>
-        <label class="text-xs text-gray-500 flex-1">日期<input type="date" v-model="eDate" class="border p-2 rounded w-full text-sm mt-1"></label>
+        <label class="text-xs text-gray-500 flex-[2]">UID<input type="number" v-model.number="eUid" class="border p-2 rounded w-full text-sm mt-1"></label>
+        <label class="text-xs text-gray-500 flex-[2]">日期<input type="date" v-model="eDate" class="border p-2 rounded w-full text-sm mt-1"></label>
+        <label class="text-xs text-gray-500 w-20">每列行数
+            <input type="number" v-model.number="ePerCol" min="1" max="50" class="border p-2 rounded w-full text-sm mt-1">
+        </label>
         <select v-model="eType" class="border p-2 rounded text-sm h-[38px]">
             <option value="all">全部</option>
             <option value="gift">仅一般礼物</option>
@@ -523,30 +549,43 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </div>
     <div v-if="errExport" class="text-red-500 text-sm mb-2">{{ errExport }}</div>
 
-    <!-- 精美截图区 — 多列布局 -->
+    <!-- 精美截图区 — 手动分列布局（html2canvas 兼容） -->
     <div id="capture" v-if="exportList.length" class="w-full max-w-2xl">
-        <div class="text-center text-gray-400 text-xs mb-2">{{ eDate }} · 礼物投喂明细
+        <div class="text-center text-gray-400 text-xs mb-3">
+            <span class="font-semibold">{{ eName }}</span> ·
+            {{ eDate }} · 礼物投喂明细
             <span v-if="eType==='gift'">（一般礼物）</span>
             <span v-else-if="eType==='blindbox'">（盲盒）</span>
         </div>
-        <div class="capture-columns">
-            <div v-for="(item,idx) in exportList" :key="item.id"
-                 class="bili-card"
-                 :class="'bg-v' + ((idx % 10) + 1)">
-                <div class="avatar-wrap">
-                    <img :src="proxyImg(item.avatar)" class="face"
-                         @error="$event.target.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 44 44%22><rect width=%2244%22 height=%2244%22 fill=%22%23ccc%22 rx=%2222%22/></svg>'">
-                </div>
-                <div class="flex-1 min-w-0">
-                    <div class="font-bold text-sm truncate">{{ item.uname }}</div>
-                    <div class="flex items-center gap-2 mt-0.5 flex-wrap">
-                        <span class="text-xs text-white/80">投喂了 {{ item.gift_name }} × {{ item.gift_num }}</span>
-                        <span class="gift-value" v-if="item.price">¥{{ (item.price / 1000).toFixed(1) }}</span>
-                        <span class="gift-time" v-if="item.ts">{{ fmtTime(item.ts) }}</span>
+        <div class="capture-grid">
+            <div v-for="(col,cidx) in exportCols" :key="cidx" class="capture-col">
+                <div v-for="(item,idx2) in col" :key="item.id"
+                     class="bili-card"
+                     :class="cardBgClass(item.guard_level)">
+                    <div class="avatar-wrap">
+                        <!-- 舰长头像框 — 仅舰长有 -->
+                        <img v-if="item.guard_level === 3"
+                             :src="proxyImg('https://i0.hdslb.com/bfs/live/80f732943cc3367029df65e267960d56736a82ee.png')"
+                             class="frame-img"
+                             @error="$event.target.style.display='none'">
+                        <img :src="proxyImg(item.avatar)" class="face"
+                             @error="$event.target.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 44 44%22><rect width=%2244%22 height=%2244%22 fill=%22%23ccc%22 rx=%2222%22/></svg>'">
                     </div>
+                    <div class="flex-1 min-w-0">
+                        <div class="font-bold text-sm truncate">
+                            {{ item.uname }}
+                            <span v-if="item.guard_level" class="inline-block text-[9px] font-bold px-[5px] py-[1px] rounded-full ml-1 align-middle"
+                                  :class="guardBadgeClass(item.guard_level)">{{ guardLabel(item.guard_level) }}</span>
+                        </div>
+                        <div class="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                            <span class="text-xs text-white/80">投喂了 {{ item.gift_name }} × {{ item.gift_num }}</span>
+                            <span class="gift-value" v-if="item.price">¥{{ (item.price / 1000).toFixed(1) }}</span>
+                            <span class="gift-time" v-if="item.ts">{{ fmtTime(item.ts) }}</span>
+                        </div>
+                    </div>
+                    <img v-if="item.gift_icon" :src="proxyImg(item.gift_icon)" class="gift-icon"
+                         @error="$event.target.style.display='none'">
                 </div>
-                <img v-if="item.gift_icon" :src="proxyImg(item.gift_icon)" class="gift-icon"
-                     @error="$event.target.style.display='none'">
             </div>
         </div>
     </div>
@@ -570,7 +609,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
 <script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
 <script>
-const {createApp, ref, nextTick} = Vue;
+const {createApp, ref, computed, nextTick} = Vue;
 createApp({
     setup() {
         const loggedIn = ref(document.cookie.includes('session='));
@@ -588,10 +627,24 @@ createApp({
 
         // Export
         const eUid = ref(0);
+        const eName = ref('');
         const eDate = ref(new Date().toISOString().slice(0,10));
         const eType = ref('all');
+        const ePerCol = ref(6);
         const exportList = ref([]);
         const errExport = ref('');
+
+        // 手动分列计算
+        const exportCols = Vue.computed(() => {
+            const items = exportList.value;
+            const perCol = Math.max(1, ePerCol.value);
+            if (!items.length) return [];
+            const cols = [];
+            for (let i = 0; i < items.length; i += perCol) {
+                cols.push(items.slice(i, i + perCol));
+            }
+            return cols;
+        });
 
         // Manage
         const delDate = ref('');
@@ -628,6 +681,24 @@ createApp({
             if (!ts) return '';
             const d = new Date(ts * 1000);
             return d.toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit'});
+        }
+        function cardBgClass(guardLevel) {
+            if (guardLevel === 3) return 'bg-captain';
+            if (guardLevel === 2) return 'bg-commander';
+            if (guardLevel === 1) return 'bg-governor';
+            return 'bg-default';
+        }
+        function guardLabel(guardLevel) {
+            if (guardLevel === 3) return '舰长';
+            if (guardLevel === 2) return '提督';
+            if (guardLevel === 1) return '总督';
+            return '';
+        }
+        function guardBadgeClass(guardLevel) {
+            if (guardLevel === 3) return 'bg-blue-500';
+            if (guardLevel === 2) return 'bg-purple-600';
+            if (guardLevel === 1) return 'bg-amber-500';
+            return '';
         }
 
         // ── Ranking ──
@@ -671,12 +742,21 @@ createApp({
                 const res = await fetch(`/api/user_gifts?uid=${eUid.value}&date=${eDate.value}&gift_type=${eType.value}`);
                 if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
                 exportList.value = await res.json();
-                if (!exportList.value.length) errExport.value = '该用户当天无送礼记录';
+                if (exportList.value.length) {
+                    eName.value = exportList.value[0].uname || '';
+                } else {
+                    errExport.value = '该用户当天无送礼记录';
+                }
                 await nextTick();
                 await new Promise(r => setTimeout(r, 800));
             } catch(e) { errExport.value = '加载失败: ' + e.message; }
         }
-        function gotoExport(uid) { eUid.value = uid; tab.value = 'export'; loadExport(); }
+        function gotoExport(uid, uname) {
+            eUid.value = uid;
+            eName.value = uname || '';
+            tab.value = 'export';
+            loadExport();
+        }
 
         // ── Download PNG ──
         function downloadImage() {
@@ -720,7 +800,7 @@ createApp({
 
         return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
                 tab, rStart, rEnd, rType, ranking, errRanking, loadRanking,
-                eUid, eDate, eType, exportList, errExport, loadExport, gotoExport, downloadImage, proxyImg, fmtTime,
+                eUid, eName, eDate, eType, ePerCol, exportList, exportCols, errExport, loadExport, gotoExport, downloadImage, proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete};
     }
 }).mount('#app');
