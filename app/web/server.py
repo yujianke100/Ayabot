@@ -374,10 +374,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
-/* ── 礼物卡片（html2canvas 兼容）── */
+/* ── 礼物卡片（毛玻璃 + 主题色渐变，html2canvas 兼容）── */
 .bili-card {
     border-radius: 12px;
-    padding: 8px 14px;
+    padding: 10px 14px;
     display: flex;
     align-items: center;
     gap: 12px;
@@ -386,24 +386,26 @@ INDEX_HTML = r"""<!DOCTYPE html>
     box-shadow: 0 3px 10px rgba(0,0,0,0.15);
     margin-bottom: 8px;
     position: relative;
-    contain: layout style;
+    min-height: 56px;
+    border: 1px solid rgba(255,255,255,0.08);
 }
-/* 用伪元素实现圆角裁剪，避免 overflow:hidden 在 html2canvas 中出错 */
-.bili-card::before {
+/* 毛玻璃：顶部高光 */
+.bili-card::after {
     content: '';
     position: absolute;
-    inset: 0;
-    border-radius: 12px;
+    top: 0; left: 0; right: 0;
+    height: 48%;
+    border-radius: 12px 12px 0 0;
+    background: linear-gradient(180deg, rgba(255,255,255,0.10) 0%, transparent 100%);
     pointer-events: none;
-    z-index: 0;
 }
 .bili-card > * { position: relative; z-index: 1; }
 
-/* ── 身份底色（柔和深色渐变）── */
+/* ── 身份底色（半透明主题色 + 毛玻璃质感）── */
 .bg-default { background: linear-gradient(135deg, #374151 0%, #1f2937 100%); }
-.bg-captain { background: linear-gradient(135deg, #1e40af 0%, #1e3a8a 100%); }
-.bg-commander { background: linear-gradient(135deg, #5b21b6 0%, #4c1d95 100%); }
-.bg-governor { background: linear-gradient(135deg, #92400e 0%, #78350f 100%); }
+.bg-captain { background: linear-gradient(135deg, #1e3a5f 0%, #1a2d4a 100%); }
+.bg-commander { background: linear-gradient(135deg, #3b1f6e 0%, #2d1550 100%); }
+.bg-governor { background: linear-gradient(135deg, #5c3a0e 0%, #3d2608 100%); }
 
 .avatar-wrap {
     position: relative;
