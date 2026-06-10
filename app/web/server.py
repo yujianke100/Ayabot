@@ -44,15 +44,39 @@ app = FastAPI(title="BiliRobot Manager")
 
 # ── 礼物图标缓存：gift_id → img_basic URL ────────────────────────
 _GIFT_ICON_CACHE: dict[int, str] = {}
+_GIFT_CACHE_BUILT = False
+
+# 常见礼物回退表 — 即使 get_gift_config 失败，这些也保证有图标
+_FALLBACK_ICONS: dict[int, str] = {
+    1: "https://s1.hdslb.com/bfs/live/d57afb7c5596359970eb430655c6aef501a268ab.png",       # 辣条
+    30607: "https://s1.hdslb.com/bfs/live/d4a0827cbb6b00e48f4d3e6c0f4fdd6e24c93a8f.png",   # 小心心
+    31164: "https://s1.hdslb.com/bfs/live/e051dfd4557678f8edcac4993ed00a0935cbd9cc.png",    # 粉丝团灯牌
+    30606: "https://s1.hdslb.com/bfs/live/03f77460f808e33bf3564b1092e261a00b37b4e2.png",   # 泡泡机
+    33972: "https://s1.hdslb.com/bfs/live/a97726f370a5aa6d5e6100b042bee848efc560f6.png",   # 舰长一号
+    33908: "https://s1.hdslb.com/bfs/live/af5b620387a20a8b65b9bd6fc47cf9058a8bbd85.png",   # 提督一号
+    33909: "https://s1.hdslb.com/bfs/live/52e00ca134a8a41f08b203eb5886875507e4b44e.png",   # 总督一号
+    30688: "https://s1.hdslb.com/bfs/live/3816eb1d809c7020a5ef6b4deb10ee9a470acdac.png",   # 冲浪
+    30047: "https://s1.hdslb.com/bfs/live/b33c94c51b669bd88f811ecf5f4e34a1db22a648.png",   # 友谊的小船
+    30608: "https://s1.hdslb.com/bfs/live/a7ef8654bdfc1ed7f55e890c3b1abf5d620607c9.png",   # 奶粉钱
+    30869: "https://s1.hdslb.com/bfs/live/b304a1ae04d10c25db87cfd8ec2a83bce1749322.png",   # 心动卡
+    30675: "https://s1.hdslb.com/bfs/live/8ba04b53487581cda0c25440ca5d3b300c2e5ee2.png",   # 下饭
+    30607: "https://s1.hdslb.com/bfs/live/d4a0827cbb6b00e48f4d3e6c0f4fdd6e24c93a8f.png",   # 小心心
+    31036: "https://s1.hdslb.com/bfs/live/5126973892625f3a43a8290be6b625b5e54261a5.png",   # 小花花
+    33987: "https://s1.hdslb.com/bfs/live/7164c955ec0ed7537491d189b821cc68f1bea20d.png",   # 人气票
+}
 
 
 async def _build_gift_cache() -> None:
     """从 bilibili-api 官方 get_gift_config() 获取全量礼物图标."""
-    global _GIFT_ICON_CACHE
+    global _GIFT_ICON_CACHE, _GIFT_CACHE_BUILT
+    if _GIFT_CACHE_BUILT:
+        return
     try:
         data = await live.get_gift_config()
     except Exception as exc:
-        logger.warning("get_gift_config failed: %s", exc)
+        logger.warning("get_gift_config failed: %s — using fallback icons", exc)
+        _GIFT_ICON_CACHE = dict(_FALLBACK_ICONS)
+        _GIFT_CACHE_BUILT = True
         return
 
     cache: dict[int, str] = {}
@@ -64,12 +88,22 @@ async def _build_gift_cache() -> None:
         if icon:
             cache[gid] = icon
 
-    _GIFT_ICON_CACHE = cache
-    logger.info("gift icon cache built: %d entries", len(cache))
+    # Merge with fallback to fill any gaps, fallback takes lower priority
+    merged = dict(_FALLBACK_ICONS)
+    merged.update(cache)
+    _GIFT_ICON_CACHE = merged
+    _GIFT_CACHE_BUILT = True
+    logger.info("gift icon cache built: %d entries (fallback: %d)", len(cache), len(_FALLBACK_ICONS))
 
 
 def _get_gift_icon(gift_id: int) -> str:
     return _GIFT_ICON_CACHE.get(gift_id, "")
+
+
+async def _ensure_gift_cache() -> None:
+    """确保缓存已加载（懒初始化，给 startup 事件未触发的兜底）."""
+    if not _GIFT_CACHE_BUILT:
+        await _build_gift_cache()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -145,6 +179,9 @@ async def api_ranking(start: str, end: str):
 @app.get("/api/user_gifts")
 async def api_user_gifts(uid: int, date: str):
     try:
+        # 确保礼物图标缓存已加载
+        await _ensure_gift_cache()
+
         day_start, day_end = _parse_date(date)
         conn = _get_db()
         rows = conn.execute(
@@ -299,6 +336,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     top: -5px; left: -5px;
     pointer-events: none;
     z-index: 3;
+    max-width: none !important;
 }
 /* 提督 — 紫色 */
 .avatar-wrap.guard-commander .ring {
