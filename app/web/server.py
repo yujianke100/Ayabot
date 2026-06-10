@@ -309,6 +309,27 @@ async def api_user_gifts(uid: int, date: str, gift_type: str = "all"):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@app.get("/api/user_dates")
+async def api_user_dates(uid: int):
+    """获取某用户有送礼记录的所有日期（去重后的 YYYY-MM-DD 列表）."""
+    try:
+        conn = _get_db()
+        rows = conn.execute(
+            """
+            SELECT DISTINCT strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime') AS d
+            FROM gift_events
+            WHERE uid = ?
+            ORDER BY d DESC
+            LIMIT 60
+            """,
+            (uid,),
+        ).fetchall()
+        return [r["d"] for r in rows if r["d"]]
+    except Exception as exc:
+        logger.exception("user_dates api failed")
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @app.post("/api/delete_old")
 async def api_delete_old(request: Request):
     """删除指定日期之前的数据."""
@@ -369,7 +390,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BiliRobot 管理后台</title>
+<title>文文 BiliRobot 管理后台</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
@@ -435,7 +456,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     max-width: none !important;
 }
 
-/* ── 多列布局（html2canvas 兼容）── */
+/* ── 多列布局 ── */
 .capture-grid {
     display: flex;
     gap: 16px;
@@ -514,19 +535,21 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <button @click="loadRanking" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">查询</button>
         </div>
         <div v-if="errRanking" class="text-red-500 text-sm mb-2">{{ errRanking }}</div>
-        <table class="w-full text-sm" v-if="ranking.length">
-            <thead><tr class="bg-gray-50"><th class="p-2 text-left">#</th><th class="p-2 text-left">用户</th><th class="p-2 text-right">价值</th><th class="p-2 text-right">利润</th></tr></thead>
-            <tbody>
-                <tr v-for="(u,i) in ranking" :key="u.uid"
-                    class="border-t hover:bg-blue-50 cursor-pointer transition"
-                    @click="gotoExport(u.uid, u.uname)">
-                    <td class="p-2">{{ i+1 }}</td>
-                    <td class="p-2">{{ u.uname }}</td>
-                    <td class="p-2 text-right">{{ Number(u.total_val).toFixed(2) }}</td>
-                    <td class="p-2 text-right" :class="Number(u.total_profit)>=0?'text-red-500':'text-green-500'">{{ Number(u.total_profit).toFixed(2) }}</td>
-                </tr>
-            </tbody>
-        </table>
+        <div class="overflow-y-auto max-h-[520px]" v-if="ranking.length">
+            <table class="w-full text-sm">
+                <thead><tr class="bg-gray-50 sticky top-0"><th class="p-2 text-left">#</th><th class="p-2 text-left">用户</th><th class="p-2 text-right">价值</th><th class="p-2 text-right">利润</th></tr></thead>
+                <tbody>
+                    <tr v-for="(u,i) in ranking" :key="u.uid"
+                        class="border-t hover:bg-blue-50 cursor-pointer transition"
+                        @click="gotoExport(u.uid, u.uname)">
+                        <td class="p-2">{{ i+1 }}</td>
+                        <td class="p-2">{{ u.uname }}</td>
+                        <td class="p-2 text-right">{{ Number(u.total_val).toFixed(1) }}</td>
+                        <td class="p-2 text-right" :class="Number(u.total_profit)>=0?'text-red-500':'text-green-500'">{{ Number(u.total_profit).toFixed(1) }}</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
         <div v-else-if="!errRanking" class="text-gray-400 text-center py-8">暂无数据</div>
     </div>
     <div class="bg-white p-4 rounded-xl shadow-sm flex flex-col min-h-[300px]">
@@ -548,11 +571,23 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <option value="blindbox">仅盲盒</option>
         </select>
         <button @click="loadExport" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm h-[38px]">生成</button>
-        <button @click="downloadImage" v-if="exportList.length" class="bg-purple-500 hover:bg-purple-600 text-white px-4 py-2 rounded text-sm h-[38px]">📥 导出 PNG</button>
     </div>
     <div v-if="errExport" class="text-red-500 text-sm mb-2">{{ errExport }}</div>
 
-    <!-- 精美截图区 — 手动分列布局（html2canvas 兼容） -->
+    <!-- 有数据的日期列表 -->
+    <div v-if="exportDates.length && !exportList.length" class="w-full max-w-2xl mb-4">
+        <div class="bg-white p-4 rounded-xl shadow-sm">
+            <div class="text-sm font-semibold text-gray-600 mb-2">有送礼记录的日期：</div>
+            <div class="flex flex-wrap gap-2">
+                <button v-for="d in exportDates" :key="d" @click="eDate = d; loadExport()"
+                        class="bg-blue-100 hover:bg-blue-200 text-blue-700 px-3 py-1 rounded text-sm transition">
+                    {{ d }}
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 精美数据展示区 -->
     <div id="capture" v-if="exportList.length" class="w-full max-w-2xl">
         <div class="text-center text-gray-400 text-xs mb-3">
             <span class="font-semibold">{{ eName }}</span> ·
@@ -610,7 +645,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
 </div>
 
-<script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
 <script>
 const {createApp, ref, computed, nextTick} = Vue;
 createApp({
@@ -635,6 +669,7 @@ createApp({
         const eType = ref('all');
         const ePerCol = ref(6);
         const exportList = ref([]);
+        const exportDates = ref([]);
         const errExport = ref('');
 
         // 手动分列计算
@@ -737,6 +772,14 @@ createApp({
         }
 
         // ── Export ──
+        async function loadUserDates() {
+            if (!eUid.value) return;
+            try {
+                const res = await fetch(`/api/user_dates?uid=${eUid.value}`);
+                if (!res.ok) return;
+                exportDates.value = await res.json();
+            } catch(e) { /* ignore */ }
+        }
         async function loadExport() {
             errExport.value = '';
             exportList.value = [];
@@ -750,39 +793,16 @@ createApp({
                 } else {
                     errExport.value = '该用户当天无送礼记录';
                 }
-                await nextTick();
-                await new Promise(r => setTimeout(r, 800));
             } catch(e) { errExport.value = '加载失败: ' + e.message; }
         }
         function gotoExport(uid, uname) {
             eUid.value = uid;
             eName.value = uname || '';
             tab.value = 'export';
-            loadExport();
-        }
-
-        // ── Download PNG ──
-        function downloadImage() {
-            const el = document.getElementById('capture');
-            if (!el) return;
-            errExport.value = '正在生成图片...';
-            html2canvas(el, {
-                scale: 2,
-                useCORS: true,
-                allowTaint: true,
-                backgroundColor: '#ffffff',
-                logging: false,
-                width: el.scrollWidth,
-                height: el.scrollHeight,
-                windowWidth: el.scrollWidth,
-                windowHeight: el.scrollHeight,
-            }).then(canvas => {
-                const a = document.createElement('a');
-                a.download = `gift_${eUid.value}_${eDate.value}.png`;
-                a.href = canvas.toDataURL('image/png');
-                a.click();
-                errExport.value = '';
-            }).catch(e => { errExport.value = '导出失败: ' + e.message; });
+            exportDates.value = [];
+            exportList.value = [];
+            errExport.value = '';
+            loadUserDates();
         }
 
         // ── Delete ──
@@ -803,7 +823,7 @@ createApp({
 
         return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
                 tab, rStart, rEnd, rType, ranking, errRanking, loadRanking,
-                eUid, eName, eDate, eType, ePerCol, exportList, exportCols, errExport, loadExport, gotoExport, downloadImage, proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
+                eUid, eName, eDate, eType, ePerCol, exportList, exportDates, exportCols, errExport, loadExport, gotoExport, loadUserDates, proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete};
     }
 }).mount('#app');
