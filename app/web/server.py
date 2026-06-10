@@ -303,7 +303,21 @@ async def api_user_gifts(uid: int, date: str, gift_type: str = "all"):
             item["price"] = _safe_int(raw.get("price") or raw.get("total_coin") or 0)
 
             results.append(item)
-        return results
+
+        # 合并：相同礼物、相同 guard_level、2分钟内 → 合并数量
+        merged: list[dict[str, Any]] = []
+        for item in results:
+            if merged:
+                last = merged[-1]
+                same_gift = last["gift_name"] == item["gift_name"]
+                same_guard = last["guard_level"] == item["guard_level"]
+                time_diff = abs(item["ts"] - last["ts"]) < 120
+                if same_gift and same_guard and time_diff:
+                    last["gift_num"] += item["gift_num"]
+                    last["ts"] = max(last["ts"], item["ts"])
+                    continue
+            merged.append(item)
+        return merged
     except Exception as exc:
         logger.exception("user_gifts api failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -456,15 +470,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
     max-width: none !important;
 }
 
-/* ── 多列布局 ── */
+/* ── 多列布局（水平可滚动）── */
 .capture-grid {
     display: flex;
     gap: 16px;
     align-items: flex-start;
 }
 .capture-col {
-    flex: 1;
     min-width: 0;
+    flex-shrink: 0;
 }
 
 .gift-icon {
@@ -558,77 +572,78 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </div>
 
 <!-- ══════ 精美导出 ══════ -->
-<div v-if="tab==='export'" class="flex flex-col items-center">
-    <div class="bg-white p-4 rounded-xl shadow-sm w-full max-w-2xl mb-4 flex flex-wrap gap-2 items-end">
-        <label class="text-xs text-gray-500 flex-[2]">UID<input type="number" v-model.number="eUid" class="border p-2 rounded w-full text-sm mt-1" @input="onUidInput"></label>
-        <label class="text-xs text-gray-500 flex-[2]">
-            日期
-            <div class="relative">
-                <input type="text" readonly :value="eDate" placeholder="点击选择日期"
-                       class="border p-2 rounded w-full text-sm mt-1 cursor-pointer bg-white"
-                       @click="showCalendar = !showCalendar">
-                <!-- 自定义日历面板 -->
-                <div v-if="showCalendar" @click.stop class="absolute top-full left-0 mt-1 bg-white border rounded-xl shadow-lg z-50 p-3 w-[300px]">
-                    <div class="flex justify-between items-center mb-2">
-                        <button @click="calMonth--" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&lt;</button>
-                        <span class="text-sm font-bold">{{ calYear }}年{{ calMonth+1 }}月</span>
-                        <button @click="calMonth++" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&gt;</button>
+<div v-if="tab==='export'" class="flex flex-col items-center w-full">
+    <div class="bg-white p-4 rounded-xl shadow-sm w-full max-w-3xl mb-4 space-y-3">
+        <div class="flex flex-wrap gap-2 items-end">
+            <label class="text-xs text-gray-500 flex-[2]">UID<input type="number" v-model.number="eUid" class="border p-2 rounded w-full text-sm mt-1" @input="onUidInput"></label>
+            <label class="text-xs text-gray-500 flex-[2]">
+                日期
+                <div class="relative">
+                    <input type="text" readonly :value="eDate" placeholder="点击选择日期"
+                           class="border p-2 rounded w-full text-sm mt-1 cursor-pointer bg-white"
+                           @click="showCalendar = !showCalendar">
+                    <div v-if="showCalendar" @click.stop class="absolute top-full left-0 mt-1 bg-white border rounded-xl shadow-lg z-50 p-3 w-[300px]">
+                        <div class="flex justify-between items-center mb-2">
+                            <button @click="calMonth--" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&lt;</button>
+                            <span class="text-sm font-bold">{{ calYear }}年{{ calMonth+1 }}月</span>
+                            <button @click="calMonth++" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&gt;</button>
+                        </div>
+                        <div class="grid grid-cols-7 gap-1 text-center text-xs mb-1">
+                            <div class="text-gray-400 font-medium">日</div>
+                            <div class="text-gray-400 font-medium">一</div>
+                            <div class="text-gray-400 font-medium">二</div>
+                            <div class="text-gray-400 font-medium">三</div>
+                            <div class="text-gray-400 font-medium">四</div>
+                            <div class="text-gray-400 font-medium">五</div>
+                            <div class="text-gray-400 font-medium">六</div>
+                        </div>
+                        <div class="grid grid-cols-7 gap-1">
+                            <template v-for="(day,i) in calDays" :key="i">
+                                <div v-if="!day" class="h-8"></div>
+                                <button v-else
+                                        :disabled="!day.hasData"
+                                        @click="pickDate(day.ymd)"
+                                        class="h-8 rounded text-xs transition"
+                                        :class="day.hasData
+                                            ? (day.ymd === eDate ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-700 hover:bg-blue-200 cursor-pointer')
+                                            : 'text-gray-300 cursor-not-allowed'">
+                                    {{ day.d }}
+                                </button>
+                            </template>
+                        </div>
+                        <div class="text-[10px] text-gray-400 mt-2 text-center">蓝色 = 有数据，灰色 = 无数据</div>
                     </div>
-                    <div class="grid grid-cols-7 gap-1 text-center text-xs mb-1">
-                        <div class="text-gray-400 font-medium">日</div>
-                        <div class="text-gray-400 font-medium">一</div>
-                        <div class="text-gray-400 font-medium">二</div>
-                        <div class="text-gray-400 font-medium">三</div>
-                        <div class="text-gray-400 font-medium">四</div>
-                        <div class="text-gray-400 font-medium">五</div>
-                        <div class="text-gray-400 font-medium">六</div>
-                    </div>
-                    <div class="grid grid-cols-7 gap-1">
-                        <template v-for="(day,i) in calDays" :key="i">
-                            <div v-if="!day" class="h-8"></div>
-                            <button v-else
-                                    :disabled="!day.hasData"
-                                    @click="pickDate(day.ymd)"
-                                    class="h-8 rounded text-xs transition"
-                                    :class="day.hasData
-                                        ? (day.ymd === eDate ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-700 hover:bg-blue-200 cursor-pointer')
-                                        : 'text-gray-300 cursor-not-allowed'">
-                                {{ day.d }}
-                            </button>
-                        </template>
-                    </div>
-                    <div class="text-[10px] text-gray-400 mt-2 text-center">蓝色 = 有数据，灰色 = 无数据</div>
                 </div>
-            </div>
-        </label>
-        <label class="text-xs text-gray-500 w-20">每列行数
-            <input type="number" v-model.number="ePerCol" min="1" max="50" class="border p-2 rounded w-full text-sm mt-1">
-        </label>
-        <label class="text-xs text-gray-500 w-24">展示宽度
-            <div class="flex items-center gap-1 mt-1">
-                <input type="range" v-model.number="eWidth" min="320" max="960" step="20" class="flex-1">
-                <span class="text-sm font-mono w-10 text-right">{{ eWidth }}px</span>
-            </div>
-        </label>
-        <select v-model="eType" class="border p-2 rounded text-sm h-[38px]">
-            <option value="all">全部</option>
-            <option value="gift">仅一般礼物</option>
-            <option value="blindbox">仅盲盒</option>
-        </select>
-        <button @click="loadExport" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm h-[38px]">生成</button>
+            </label>
+            <select v-model="eType" class="border p-2 rounded text-sm h-[38px]">
+                <option value="all">全部</option>
+                <option value="gift">仅一般礼物</option>
+                <option value="blindbox">仅盲盒</option>
+            </select>
+            <button @click="loadExport" class="bg-green-500 hover:bg-green-600 text-white px-5 py-2 rounded text-sm h-[38px]">生成</button>
+        </div>
+        <div class="flex flex-wrap gap-4 items-end">
+            <label class="text-xs text-gray-500">每列行数
+                <input type="number" v-model.number="ePerCol" min="1" max="50" class="border p-2 rounded text-sm mt-1 w-20">
+            </label>
+            <label class="text-xs text-gray-500 flex-1 min-w-[200px]">
+                单列宽度 <span class="text-sm font-mono ml-1">{{ eColWidth }}px</span>
+                <input type="range" v-model.number="eColWidth" min="200" max="600" step="10" class="w-full mt-1">
+            </label>
+        </div>
     </div>
     <div v-if="errExport" class="text-red-500 text-sm mb-2">{{ errExport }}</div>
 
-    <!-- 精美数据展示区 -->
-    <div id="capture" v-if="exportList.length" class="w-full" :style="{ maxWidth: eWidth + 'px' }">
+    <!-- 精美数据展示区（水平可滚动） -->
+    <div id="capture" v-if="exportList.length" class="w-full overflow-x-auto">
         <div class="text-center text-gray-400 text-xs mb-3">
             <span class="font-semibold">{{ eName }}</span> ·
             {{ eDate }} · 礼物投喂明细
             <span v-if="eType==='gift'">（一般礼物）</span>
             <span v-else-if="eType==='blindbox'">（盲盒）</span>
         </div>
-        <div class="capture-grid">
-            <div v-for="(col,cidx) in exportCols" :key="cidx" class="capture-col">
+        <div class="capture-grid" :style="{ minWidth: exportCols.length * (eColWidth + 16) + 'px' }">
+            <div v-for="(col,cidx) in exportCols" :key="cidx" class="capture-col" :style="{ minWidth: eColWidth + 'px', maxWidth: eColWidth + 'px' }">
                 <div v-for="(item,idx2) in col" :key="item.id"
                      class="bili-card"
                      :class="cardBgClass(item.guard_level)">
@@ -700,7 +715,7 @@ createApp({
         const eDate = ref(new Date().toISOString().slice(0,10));
         const eType = ref('all');
         const ePerCol = ref(6);
-        const eWidth = ref(640);
+        const eColWidth = ref(340);
         const exportList = ref([]);
         const exportDates = ref([]);
         const errExport = ref('');
@@ -895,7 +910,7 @@ createApp({
 
         return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
                 tab, rStart, rEnd, rType, ranking, errRanking, loadRanking,
-                eUid, eName, eDate, eType, ePerCol, eWidth, exportList, exportDates, exportCols, errExport,
+                eUid, eName, eDate, eType, ePerCol, eColWidth, exportList, exportDates, exportCols, errExport,
                 loadExport, gotoExport, loadUserDates, onUidInput, pickDate,
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
