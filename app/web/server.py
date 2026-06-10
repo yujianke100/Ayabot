@@ -279,33 +279,42 @@ async def api_user_gifts(uid: int, date: str, gift_type: str = "all"):
         ).fetchall()
 
         results = []
+        last_guard: dict[int, int] = {}  # uid -> 从 SEND_GIFT 记住的 guard_level
         for r in rows:
             item = dict(r)
             raw = json.loads(item.pop("raw_json", "{}")) if isinstance(item.get("raw_json"), str) else {}
 
-            # 头像：SEND_GIFT 在顶层 face，COMBO_SEND 在 sender_uinfo.base.face
+            # COMBO_SEND 是连击总结包，其数量是前面SEND_GIFT的总和
+            # 过滤掉避免重复计数，SEND_GIFT已完整记录了每次送礼
+            if item.get("event_type", "") == "COMBO_SEND":
+                # 但它的 guard_level 可以拿来给后续事件兜底（实际上相同UID的后继事件可能有完整数据）
+                # 从 sender_uinfo 提取头像兜底
+                if not raw.get("face"):
+                    raw["face"] = raw.get("sender_uinfo", {}).get("base", {}).get("face", "")
+                continue
+
+            # 头像
             face = raw.get("face") or raw.get("data", {}).get("face") or ""
-            if not face:
-                face = raw.get("sender_uinfo", {}).get("base", {}).get("face", "")
             item["avatar"] = face
 
-            # 大航海等级：SEND_GIFT 在顶层 guard_level，COMBO_SEND 没有此字段
-            # 从 sender_uinfo 或 medal_info 尝试获取
-            guard = raw.get("guard_level") or raw.get("data", {}).get("guard_level", 0)
-            if not guard:
-                guard = raw.get("medal_info", {}).get("guard_level", 0)
-            item["guard_level"] = _safe_int(guard)
+            # 大航海等级
+            guard = _safe_int(raw.get("guard_level") or raw.get("data", {}).get("guard_level", 0))
+            if guard:
+                last_guard[item["uid"]] = guard
+            item["guard_level"] = guard
 
             gift_id = _safe_int(raw.get("giftId") or raw.get("gift_id") or 0)
             gift_name = raw.get("giftName") or raw.get("gift_name") or item.get("gift_name", "")
             item["gift_name"] = gift_name
 
-            # 图标：按 id 查，查不到按名字查
+            # 图标：按 id 查，查不到按名字查；COMBO_SEND 额外查 gift_info
             icon = ""
             if gift_id and gift_id in _GIFT_ICON_CACHE:
                 icon = _GIFT_ICON_CACHE[gift_id]
             elif gift_name and gift_name in _GIFT_NAME_CACHE:
                 icon = _GIFT_NAME_CACHE[gift_name]
+            if not icon:
+                icon = raw.get("gift_info", {}).get("img_basic", "")
             item["gift_icon"] = icon
 
             item["price"] = _safe_int(raw.get("price") or raw.get("total_coin") or 0)
@@ -529,7 +538,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <!-- ══════ 登录页 ══════ -->
 <div v-if="!loggedIn" class="flex items-center justify-center min-h-[80vh]">
     <div class="bg-white p-8 rounded-xl shadow-md w-80">
-        <h1 class="text-xl font-bold text-center text-blue-600 mb-6">BiliRobot 管理后台</h1>
+        <h1 class="text-xl font-bold text-center text-blue-600 mb-6">文文喵~</h1>
         <div class="space-y-4">
             <input v-model="loginUser" placeholder="账号" class="border p-2 rounded w-full text-sm" @keyup.enter="doLogin">
             <input v-model="loginPass" type="password" placeholder="密码" class="border p-2 rounded w-full text-sm" @keyup.enter="doLogin">
