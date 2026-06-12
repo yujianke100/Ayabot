@@ -307,6 +307,68 @@ class StatsStore:
 
         return continuous, rank, already_checked
 
+    def get_today_total_blindbox(
+        self, start_ts: int, end_ts: int,
+    ) -> tuple[int, int, int, int]:
+        row = self._conn.execute(
+            """
+            SELECT COALESCE(SUM(gift_num), 0), COALESCE(SUM(blind_box_cost), 0),
+                   COALESCE(SUM(actual_value), 0), COALESCE(SUM(profit_value), 0)
+            FROM gift_events
+            WHERE ts >= ? AND ts < ? AND is_blind_box = 1
+            """,
+            (start_ts, end_ts),
+        ).fetchone()
+        return int(row[0]), int(row[1]), int(row[2]), int(row[3])
+
+    def get_today_user_blindbox(
+        self, start_ts: int, end_ts: int, uid: int,
+    ) -> Optional[tuple[int, int, int, int]]:
+        row = self._conn.execute(
+            """
+            SELECT COALESCE(SUM(gift_num), 0), COALESCE(SUM(blind_box_cost), 0),
+                   COALESCE(SUM(actual_value), 0), COALESCE(SUM(profit_value), 0)
+            FROM gift_events
+            WHERE ts >= ? AND ts < ? AND uid = ? AND is_blind_box = 1
+            """,
+            (start_ts, end_ts, uid),
+        ).fetchone()
+        if row and int(row[0]) > 0:
+            return int(row[0]), int(row[1]), int(row[2]), int(row[3])
+        return None
+
+    def get_today_user_blindbox_by_uname(
+        self, start_ts: int, end_ts: int, uname: str,
+    ) -> Optional[tuple[int, int, int, int, int]]:
+        rows = self._conn.execute(
+            """
+            SELECT uid, COALESCE(SUM(gift_num), 0), COALESCE(SUM(blind_box_cost), 0),
+                   COALESCE(SUM(actual_value), 0), COALESCE(SUM(profit_value), 0)
+            FROM gift_events
+            WHERE ts >= ? AND ts < ? AND uname = ? AND is_blind_box = 1
+            GROUP BY uid
+            ORDER BY SUM(blind_box_cost) DESC
+            LIMIT 1
+            """,
+            (start_ts, end_ts, uname),
+        ).fetchone()
+        if rows and int(rows[1]) > 0:
+            return int(rows[0]), int(rows[1]), int(rows[2]), int(rows[3]), int(rows[4])
+        return None
+
+    def get_today_user_gift_activity(
+        self, start_ts: int, end_ts: int, uid: int,
+    ) -> tuple[int, int]:
+        row = self._conn.execute(
+            """
+            SELECT COUNT(1), COALESCE(SUM(gift_num), 0)
+            FROM gift_events
+            WHERE ts >= ? AND ts < ? AND uid = ?
+            """,
+            (start_ts, end_ts, uid),
+        ).fetchone()
+        return int(row[0]), int(row[1])
+
     def close(self) -> None:
         self._conn.close()
 

@@ -464,6 +464,35 @@ class LiveRobot:
             await self._enqueue_message(text=text_out, reply_uid=uid)
             return
 
+        if name == "today_blindbox":
+            self.logger.info("today blindbox stats requested: uid=%s arg=%s", uid, arg)
+            now = datetime.now()
+            today_start = int(datetime(now.year, now.month, now.day).timestamp())
+            today_end = today_start + 86400
+            if arg:
+                result = self.store.get_today_user_blindbox_by_uname(today_start, today_end, arg)
+                if result is None:
+                    await self._enqueue_message(text=f"未找到{arg}今日的盲盒记录", reply_uid=uid)
+                    return
+                _uid, blind_count, cost_total, actual_total, profit_total = result
+                text_out = f"今日{arg}盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
+            else:
+                if uid == self.config.anchor_uid or self._has_control_permission(uid, moderator_hint):
+                    total = self.store.get_today_total_blindbox(today_start, today_end)
+                    blind_count, cost_total, actual_total, profit_total = total
+                    text_out = f"今日本直播间盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
+                else:
+                    row = self.store.get_today_user_blindbox(today_start, today_end, uid)
+                    if row is None:
+                        gift_event_count, _ = self.store.get_today_user_gift_activity(today_start, today_end, uid)
+                        text_out = "今日暂无盲盒记录" if gift_event_count > 0 else "今日无送礼记录"
+                        await self._enqueue_message(text=text_out, reply_uid=uid)
+                        return
+                    blind_count, cost_total, actual_total, profit_total = row
+                    text_out = f"今日盲盒{blind_count}个，支出{cost_total}，收益{profit_total}"
+            await self._enqueue_message(text=text_out, reply_uid=uid)
+            return
+
         if name == "checkin":
             self.logger.info("checkin command: uid=%s uname=%s", uid, uname)
             days, rank, already = self.store.user_checkin(uid, uname)
@@ -806,6 +835,30 @@ def _parse_command(text: str) -> Optional[tuple[str, str]]:
     # Fallback for "#盲盒统计 名字" where compact would be "#盲盒统计名字"
     if s.startswith("#盲盒统计 ") or s.startswith("＃盲盒统计 "):
         return "blindbox_me", s[len("#盲盒统计 "):].strip()
+
+    # Command: #今日盲盒
+    if compact == "#今日盲盒":
+        return "today_blindbox", ""
+
+    # Command: #今日盲盒:用户名
+    if compact.startswith("#今日盲盒:"):
+        return "today_blindbox", compact[len("#今日盲盒:"):]
+
+    # Fallback: #今日盲盒 用户名
+    if s.startswith("#今日盲盒 ") or s.startswith("＃今日盲盒 "):
+        return "today_blindbox", s[len("#今日盲盒 "):].strip()
+
+    # Command: #本月盲盒 — same as #盲盒统计
+    if compact == "#本月盲盒":
+        return "blindbox_me", ""
+
+    # Command: #本月盲盒:用户名
+    if compact.startswith("#本月盲盒:"):
+        return "blindbox_me", compact[len("#本月盲盒:"):]
+
+    # Fallback: #本月盲盒 用户名
+    if s.startswith("#本月盲盒 ") or s.startswith("＃本月盲盒 "):
+        return "blindbox_me", s[len("#本月盲盒 "):].strip()
 
     if compact in ("#欢迎:开", "＃欢迎:开"):
         return "welcome_on", ""
