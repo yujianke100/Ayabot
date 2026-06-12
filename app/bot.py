@@ -350,7 +350,7 @@ class LiveRobot:
             self.logger.debug("danmaku parse failed: event=%s", event)
             return
 
-        uid, text, moderator_hint = parsed
+        uid, uname, text, moderator_hint = parsed
         self.logger.debug("danmaku received: uid=%s text=%s (anchor_uid=%s)", uid, text, self.config.anchor_uid)
 
         # Anchor exclusive reply
@@ -419,10 +419,11 @@ class LiveRobot:
             return
 
         if name == "checkin":
-            parsed = _parse_danmaku_user_and_text(event)
-            uname = parsed[1] if parsed else "用户"
-            days, rank = self.store.user_checkin(uid, uname)
-            msg = f"感谢{uname}签到！连续签到{days}天，目前排名第{rank}。继续坚持喵~"
+            days, rank, already = self.store.user_checkin(uid, uname)
+            if already:
+                msg = f"{uname}今天已经签到了哦！连续签到{days}天，目前排名第{rank}。继续坚持喵~"
+            else:
+                msg = f"感谢{uname}签到！连续签到{days}天，目前排名第{rank}。继续坚持喵~"
             await self._enqueue_message(text=msg, reply_uid=uid)
             return
 
@@ -706,7 +707,7 @@ def _extract_blindbox_profit(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _parse_danmaku_user_and_text(event: dict[str, Any]) -> Optional[tuple[int, str, bool]]:
+def _parse_danmaku_user_and_text(event: dict[str, Any]) -> Optional[tuple[int, str, str, bool]]:
     data = event.get("data", {})
     info = data.get("info") if isinstance(data, dict) else None
     if not isinstance(info, list) or len(info) < 3:
@@ -718,12 +719,13 @@ def _parse_danmaku_user_and_text(event: dict[str, Any]) -> Optional[tuple[int, s
         return None
 
     uid = _safe_int(user_info[0])
+    uname = str(user_info[1]) if len(user_info) > 1 else ""
 
     moderator_hint = False
     if len(user_info) >= 3:
         moderator_hint = _safe_int(user_info[2]) in (1, 2, 3)
 
-    return uid, text.strip(), moderator_hint
+    return uid, uname, text.strip(), moderator_hint
 
 
 def _parse_command(text: str) -> Optional[tuple[str, str]]:

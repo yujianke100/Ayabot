@@ -259,10 +259,11 @@ class StatsStore:
         ).fetchone()
         return row[0] if row else None
 
-    def user_checkin(self, uid: int, uname: str) -> tuple[int, int]:
-        """ 返回 (连续签到天数, 连续天数排名) """
+    def user_checkin(self, uid: int, uname: str) -> tuple[int, int, bool]:
+        """ 返回 (连续签到天数, 连续天数排名, 今日是否已签到) """
         today = datetime.now().strftime("%Y-%m-%d")
         prev_stream_date = self._get_previous_stream_date(today)
+        already_checked = False
 
         # 获取当前签到状态
         row = self._conn.execute(
@@ -273,7 +274,7 @@ class StatsStore:
             last_date, continuous = row[0], row[1]
             if last_date == today:
                 # 今天已经签到过了，直接返回当前数据
-                pass
+                already_checked = True
             elif prev_stream_date and last_date == prev_stream_date:
                 # 上次签到是上一次开播日期，直播场场不落，续签
                 continuous += 1
@@ -304,7 +305,7 @@ class StatsStore:
         ).fetchone()
         rank = (rank_row[0] if rank_row else 0) + 1
 
-        return continuous, rank
+        return continuous, rank, already_checked
 
     def close(self) -> None:
         self._conn.close()
