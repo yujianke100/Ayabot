@@ -498,6 +498,40 @@ class LiveRobot:
             await self._enqueue_reply(text=text_out, reply_uid=uid)
             return
 
+        if name == "llm_chat":
+            self.logger.info("llm chat requested: uid=%s text=%s", uid, arg)
+            from app.web.server import get_llm_config
+            from app.llm_client import LLMClient
+
+            cfg = get_llm_config()
+            if not cfg.get("enabled") or not cfg.get("api_key"):
+                self.logger.debug("llm not configured, skipping")
+                await self._enqueue_reply(text="文文还没学会说话呢~", reply_uid=uid)
+                return
+
+            if not arg:
+                await self._enqueue_reply(text="想和文文说什么？例如 #文文 你好", reply_uid=uid)
+                return
+
+            client = LLMClient(
+                provider=cfg.get("provider", "openai"),
+                api_key=cfg.get("api_key", ""),
+                base_url=cfg.get("base_url", "https://api.openai.com/v1"),
+                model=cfg.get("model", "gpt-4o-mini"),
+                system_prompt=cfg.get("system_prompt", "你是文文，一个可爱温柔的虚拟主播助手。"),
+            )
+            reply = await client.chat(user_text=arg, uname=uname)
+
+            if not reply:
+                await self._enqueue_reply(text="文文不知道该怎么回答呢~", reply_uid=uid)
+                return
+
+            # Truncate to fit B站 danmaku limit (~30 chars)
+            if len(reply) > 27:
+                reply = reply[:27] + "..."
+            await self._enqueue_reply(text=reply, reply_uid=uid)
+            return
+
         if name == "help":
             self.logger.info("help requested: uid=%s", uid)
             await self._enqueue_reply(
@@ -843,6 +877,28 @@ def _parse_command(text: str) -> Optional[tuple[str, str]]:
     
     # Create a normalized compact version for simple commands
     compact = "".join(s.split()).replace("：", ":")
+
+    # Command: #文文
+    if compact == "#文文" or compact.startswith("#文文"):
+        rest = ""
+        if compact == "#文文":
+            # Just "#文文" with nothing after it
+            pass
+        elif compact.startswith("#文文:"):
+            rest = compact[len("#文文:"):]
+        elif compact.startswith("#文文"):
+            rest = compact[len("#文文"):]  # after normalization, could be "#文文你好"
+        # Also handle space-separated: "#文文 你好"
+        if not rest and (s.startswith("#文文 ") or s.startswith("＃文文 ")):
+            rest = s.split(" ", 1)[1] if " " in s else ""
+        # Also handle full-width colon
+        if not rest and "：" in s:
+            parts = s.split("：", 1)
+            if parts[0].strip() in ("#文文", "＃文文"):
+                rest = parts[1].strip()
+        if not rest:
+            return "llm_chat", ""
+        return "llm_chat", rest.strip()
 
     # Command: #帮助
     if compact in ("#帮助", "#help"):

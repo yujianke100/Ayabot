@@ -70,3 +70,11 @@ web_ui:
   username: "wenwen"
   password: "31415926"
   session_timeout: 3600
+
+llm:
+  enabled: false
+  provider: "openai"
+  api_key: ""
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o-mini"
+  system_prompt: "你是文文，一个可爱温柔的虚拟主播助手。你的任务是在直播间用弹幕和观众互动。"

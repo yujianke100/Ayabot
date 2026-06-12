@@ -101,6 +101,16 @@ class WebUIConfig:
 
 
 @dataclass(slots=True)
+class LLMConfig:
+    enabled: bool = False
+    provider: str = "openai"        # "openai" or "anthropic"
+    api_key: str = ""
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "gpt-4o-mini"
+    system_prompt: str = "你是文文，一个可爱温柔的虚拟主播助手。"
+
+
+@dataclass(slots=True)
 class AppConfig:
     room_display_id: int
     anchor_uid: int
@@ -112,6 +122,7 @@ class AppConfig:
     storage: StorageConfig
     auth: AuthConfig
     web_ui: WebUIConfig
+    llm: LLMConfig
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -137,6 +148,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
     storage = raw.get("storage", {})
     auth = raw.get("auth", {})
     web_ui = raw.get("web_ui", {})
+    llm = raw.get("llm", {})
 
     return AppConfig(
         room_display_id=int(raw["room_display_id"]),
@@ -219,6 +231,14 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             password=str(web_ui.get("password", "admin")),
             session_timeout=int(web_ui.get("session_timeout", 3600)),
             title=str(web_ui.get("title", "BILIBILI-LIVE-ROBOT")),
+        ),
+        llm=LLMConfig(
+            enabled=bool(llm.get("enabled", False)),
+            provider=str(llm.get("provider", "openai")),
+            api_key=str(llm.get("api_key", "")),
+            base_url=str(llm.get("base_url", "https://api.openai.com/v1")),
+            model=str(llm.get("model", "gpt-4o-mini")),
+            system_prompt=str(llm.get("system_prompt", "你是文文，一个可爱温柔的虚拟主播助手。")),
         ),
     )
 

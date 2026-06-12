@@ -40,10 +40,19 @@ _HTTP_HOST = "0.0.0.0"
 _HTTP_PORT = 8000
 _DB_PATH = "data/bot.db"
 
+# LLM 配置（可变引用，webui 可保存更新）
+_LLM_CONFIG_DICT: dict[str, Any] = {}
+_CONFIG_YAML_PATH: str = "config.yaml"
+
+
+def get_llm_config() -> dict[str, Any]:
+    """公开访问 LLM 配置（bot 通过此函数获取运行时配置）."""
+    return _LLM_CONFIG_DICT
+
 
 def init_app(config: Any = None) -> None:
     """从 AppConfig 初始化 WebUI 配置."""
-    global AUTH_USER, AUTH_PASS, _SESSION_TIMEOUT, _HTTP_HOST, _HTTP_PORT, _DB_PATH
+    global AUTH_USER, AUTH_PASS, _SESSION_TIMEOUT, _HTTP_HOST, _HTTP_PORT, _DB_PATH, _LLM_CONFIG_DICT, _CONFIG_YAML_PATH
     if config is None:
         _fallback_read_config()
         return
@@ -55,6 +64,15 @@ def init_app(config: Any = None) -> None:
     _DB_PATH = config.storage.sqlite_path
     if not os.path.isabs(_DB_PATH):
         _DB_PATH = str(Path("config.yaml").parent / _DB_PATH)
+    _LLM_CONFIG_DICT.update({
+        "enabled": config.llm.enabled,
+        "provider": config.llm.provider,
+        "api_key": config.llm.api_key,
+        "base_url": config.llm.base_url,
+        "model": config.llm.model,
+        "system_prompt": config.llm.system_prompt,
+    })
+    _CONFIG_YAML_PATH = "config.yaml"
     logger.info("webui configured: host=%s port=%s db=%s", _HTTP_HOST, _HTTP_PORT, os.path.abspath(_DB_PATH))
 
 
@@ -432,6 +450,82 @@ async def api_proxy_image(url: str):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  LLM Config API
+# ══════════════════════════════════════════════════════════════════
+
+
+@app.get("/api/llm_config")
+async def api_get_llm_config():
+    """返回 LLM 配置（不含 api_key，仅用于展示状态）."""
+    return {
+        "enabled": _LLM_CONFIG_DICT.get("enabled", False),
+        "provider": _LLM_CONFIG_DICT.get("provider", "openai"),
+        "has_api_key": bool(_LLM_CONFIG_DICT.get("api_key")),
+        "base_url": _LLM_CONFIG_DICT.get("base_url", ""),
+        "model": _LLM_CONFIG_DICT.get("model", ""),
+        "system_prompt": _LLM_CONFIG_DICT.get("system_prompt", ""),
+    }
+
+
+@app.post("/api/llm_config")
+async def api_save_llm_config(request: Request):
+    """保存 LLM 配置到 config.yaml 并更新内存."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    # 更新内存中的配置
+    for key in ("enabled", "provider", "api_key", "base_url", "model", "system_prompt"):
+        if key in body:
+            _LLM_CONFIG_DICT[key] = body[key]
+
+    # 回写到 config.yaml
+    try:
+        cfg_path = Path(_CONFIG_YAML_PATH)
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+
+        llm_section = raw.setdefault("llm", {})
+        llm_section["enabled"] = _LLM_CONFIG_DICT.get("enabled", False)
+        llm_section["provider"] = _LLM_CONFIG_DICT.get("provider", "openai")
+        llm_section["api_key"] = _LLM_CONFIG_DICT.get("api_key", "")
+        llm_section["base_url"] = _LLM_CONFIG_DICT.get("base_url", "")
+        llm_section["model"] = _LLM_CONFIG_DICT.get("model", "")
+        llm_section["system_prompt"] = _LLM_CONFIG_DICT.get("system_prompt", "")
+
+        # 手动写 YAML 保留锚点和格式
+        cfg_path.write_text(yaml.dump(raw, default_flow_style=False, allow_unicode=True), encoding="utf-8")
+        logger.info("llm config saved to %s", cfg_path)
+    except Exception as exc:
+        logger.warning("failed to save config.yaml: %s", exc)
+        return JSONResponse({"error": f"save failed: {exc}"}, status_code=500)
+
+    return {"ok": True}
+
+
+@app.post("/api/llm_test")
+async def api_llm_test(request: Request):
+    """测试 LLM 连接."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    from app.llm_client import LLMClient
+
+    client = LLMClient(
+        provider=_LLM_CONFIG_DICT.get("provider", "openai"),
+        api_key=_LLM_CONFIG_DICT.get("api_key", ""),
+        base_url=_LLM_CONFIG_DICT.get("base_url", ""),
+        model=_LLM_CONFIG_DICT.get("model", ""),
+        system_prompt=_LLM_CONFIG_DICT.get("system_prompt", ""),
+    )
+    text = body.get("text", "")
+    reply = await client.chat(user_text=text, uname="测试")
+    return {"reply": reply or "(无回复)"}
+
+
+# ══════════════════════════════════════════════════════════════════
 #  HTML
 # ══════════════════════════════════════════════════════════════════
 
@@ -574,6 +668,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <div class="flex items-center gap-4 text-sm">
         <button @click="tab='ranking'" :class="tab==='ranking'?'text-blue-600 font-bold border-b-2 border-blue-600':''">送礼排行</button>
         <button @click="tab='export'"  :class="tab==='export' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">精美导出</button>
+        <button @click="tab='llm'"    :class="tab==='llm'    ?'text-blue-600 font-bold border-b-2 border-blue-600':''">AI 回复</button>
         <button @click="tab='manage'" :class="tab==='manage'?'text-blue-600 font-bold border-b-2 border-blue-600':''">数据管理</button>
         <button @click="doLogout" class="text-gray-400 hover:text-red-500 ml-2">退出</button>
     </div>
@@ -723,6 +818,57 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <div v-else-if="!errExport" class="text-gray-400 mt-20">输入 UID 和日期后点击"生成"</div>
 </div>
 
+<!-- ══════ AI 回复设置 ══════ -->
+<div v-if="tab==='llm'" class="max-w-2xl mx-auto">
+    <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
+        <h2 class="text-lg font-bold">🤖 AI 回复设置</h2>
+        <p class="text-xs text-gray-400">用户发送 <code class="bg-gray-100 px-1 rounded">#文文 你好</code> 时调用 LLM API 自动回复。</p>
+
+        <label class="flex items-center gap-2 text-sm">
+            <input type="checkbox" v-model="llmEnabled" class="w-4 h-4">
+            启用 AI 回复
+        </label>
+
+        <div class="grid grid-cols-2 gap-4">
+            <label class="text-xs text-gray-500">接口格式
+                <select v-model="llmProvider" class="border p-2 rounded w-full text-sm mt-1">
+                    <option value="openai">OpenAI 格式</option>
+                    <option value="anthropic">Anthropic 格式</option>
+                </select>
+            </label>
+            <label class="text-xs text-gray-500">模型
+                <input type="text" v-model="llmModel" placeholder="gpt-4o-mini" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+        </div>
+
+        <label class="text-xs text-gray-500">API Key
+            <input type="password" v-model="llmApiKey" placeholder="sk-..." class="border p-2 rounded w-full text-sm mt-1">
+        </label>
+
+        <label class="text-xs text-gray-500">Base URL
+            <input type="url" v-model="llmBaseUrl" placeholder="https://api.openai.com/v1" class="border p-2 rounded w-full text-sm mt-1">
+        </label>
+
+        <label class="text-xs text-gray-500">人设（System Prompt）
+            <textarea v-model="llmPrompt" rows="3" class="border p-2 rounded w-full text-sm mt-1" placeholder="你是文文，一个可爱温柔的虚拟主播助手。"></textarea>
+        </label>
+
+        <div class="flex items-center gap-4">
+            <button @click="saveLlmConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
+            <span v-if="llmSaveMsg" class="text-sm" :class="llmSaveOk ? 'text-green-600' : 'text-red-500'">{{ llmSaveMsg }}</span>
+        </div>
+
+        <hr class="my-2">
+        <h3 class="text-sm font-bold">测试</h3>
+        <div class="flex gap-2">
+            <input type="text" v-model="llmTestText" placeholder="输入测试消息" class="border p-2 rounded flex-1 text-sm"
+                   @keyup.enter="testLlm">
+            <button @click="testLlm" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">测试</button>
+        </div>
+        <div v-if="llmTestResp" class="text-sm bg-gray-50 p-3 rounded">{{ llmTestResp }}</div>
+    </div>
+</div>
+
 <!-- ══════ 数据管理 ══════ -->
 <div v-if="tab==='manage'" class="max-w-lg mx-auto bg-white p-6 rounded-xl shadow-sm">
     <h2 class="text-lg font-bold mb-4 text-red-600">⚠️ 数据管理</h2>
@@ -802,6 +948,18 @@ createApp({
         // Manage
         const delDate = ref('');
         const delResult = ref('');
+
+        // LLM Config
+        const llmEnabled = ref(false);
+        const llmProvider = ref('openai');
+        const llmApiKey = ref('');
+        const llmBaseUrl = ref('');
+        const llmModel = ref('');
+        const llmPrompt = ref('');
+        const llmSaveMsg = ref('');
+        const llmSaveOk = ref(false);
+        const llmTestText = ref('');
+        const llmTestResp = ref('');
 
         let chartInst = null;
 
@@ -954,13 +1112,88 @@ createApp({
             } catch(e) { delResult.value = '删除失败: ' + e.message; }
         }
 
+        // ── LLM Config ──
+        async function loadLlmConfig() {
+            try {
+                const res = await fetch('/api/llm_config');
+                if (!res.ok) return;
+                const data = await res.json();
+                llmEnabled.value = data.enabled;
+                llmProvider.value = data.provider;
+                llmBaseUrl.value = data.base_url;
+                llmModel.value = data.model;
+                llmPrompt.value = data.system_prompt;
+                // api_key 不回显，仅通过 has_api_key 提示
+                if (data.has_api_key) {
+                    llmApiKey.value = '********';
+                }
+            } catch(e) { /* ignore */ }
+        }
+        async function saveLlmConfig() {
+            llmSaveMsg.value = '';
+            const body = {
+                enabled: llmEnabled.value,
+                provider: llmProvider.value,
+                base_url: llmBaseUrl.value,
+                model: llmModel.value,
+                system_prompt: llmPrompt.value,
+            };
+            // 如果 api_key 没改（还是 ********），不传；否则传新值
+            if (llmApiKey.value && llmApiKey.value !== '********') {
+                body.api_key = llmApiKey.value;
+            }
+            try {
+                const res = await fetch('/api/llm_config', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify(body),
+                });
+                if (!res.ok) throw new Error((await res.text()).slice(0,80));
+                const data = await res.json();
+                if (data.ok) {
+                    llmSaveMsg.value = '已保存';
+                    llmSaveOk.value = true;
+                    // 回显 token 状态
+                    await loadLlmConfig();
+                } else {
+                    llmSaveMsg.value = data.error || '保存失败';
+                    llmSaveOk.value = false;
+                }
+            } catch(e) {
+                llmSaveMsg.value = '保存失败: ' + e.message;
+                llmSaveOk.value = false;
+            }
+        }
+        async function testLlm() {
+            llmTestResp.value = '';
+            if (!llmTestText.value) return;
+            try {
+                const res = await fetch('/api/llm_test', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({text: llmTestText.value}),
+                });
+                if (!res.ok) { llmTestResp.value = '测试失败'; return; }
+                const data = await res.json();
+                llmTestResp.value = data.reply || '(无回复)';
+            } catch(e) {
+                llmTestResp.value = '测试失败: ' + e.message;
+            }
+        }
+
+        // 自动加载配置
+        loadLlmConfig();
+
         return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
                 tab, rStart, rEnd, rType, ranking, errRanking, loadRanking,
                 eUid, eName, eDate, eType, ePerCol, eColWidth, exportList, exportDates, exportCols, errExport,
                 loadExport, gotoExport, loadUserDates, onUidInput, pickDate,
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
-                delDate, delResult, confirmDelete};
+                delDate, delResult, confirmDelete,
+                llmEnabled, llmProvider, llmApiKey, llmBaseUrl, llmModel, llmPrompt,
+                llmSaveMsg, llmSaveOk, llmTestText, llmTestResp,
+                saveLlmConfig, testLlm};
     }
 }).mount('#app');
 </script>
