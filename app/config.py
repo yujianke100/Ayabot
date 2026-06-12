@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +116,10 @@ class LLMConfig:
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4o-mini"
+    wake_word: str = "文文"
+    temperature: float = 0.7
+    top_p: float = 0.9
+    max_tokens: int = 150
     system_prompt: str = "你是文文，一个可爱温柔的虚拟主播助手。"
     context: LLMContextConfig = None    # type: ignore[assignment]
 
@@ -248,6 +253,10 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             api_key=str(llm.get("api_key", "")),
             base_url=str(llm.get("base_url", "https://api.openai.com/v1")),
             model=str(llm.get("model", "gpt-4o-mini")),
+            wake_word=str(llm.get("wake_word", "文文")),
+            temperature=float(llm.get("temperature", 0.7)),
+            top_p=float(llm.get("top_p", 0.9)),
+            max_tokens=int(llm.get("max_tokens", 150)),
             system_prompt=str(llm.get("system_prompt", "你是文文，一个可爱温柔的虚拟主播助手。")),
             context=LLMContextConfig(
                 enabled=bool(llm_ctx.get("enabled", True)),
@@ -273,6 +282,61 @@ def _parse_anchor_reply(raw: Any) -> list[AnchorExclusiveRule]:
             is_regex=bool(item.get("is_regex", False)),
         ))
     return rules
+
+
+def config_to_dict(config: AppConfig) -> dict[str, Any]:
+    """将 AppConfig 序列化为 dict, 用于 Web UI 前端展示."""
+    return {
+        "room_display_id": config.room_display_id,
+        "anchor_uid": config.anchor_uid,
+        "cooldown": {
+            "welcome_user_seconds": config.cooldown.welcome_user_seconds,
+            "thanks_user_seconds": config.cooldown.thanks_user_seconds,
+        },
+        "rate_limit": {
+            "send_interval_seconds": config.rate_limit.send_interval_seconds,
+            "retry_count": config.rate_limit.retry_count,
+            "max_queue_size": config.rate_limit.max_queue_size,
+            "reply_delay_seconds": config.rate_limit.reply_delay_seconds,
+        },
+        "features": {
+            "welcome_enabled": config.features.welcome_enabled,
+            "thanks_enabled": config.features.thanks_enabled,
+            "blindbox_enabled": config.features.blindbox_enabled,
+            "guard_thanks_enabled": config.features.guard_thanks_enabled,
+            "connected_message_enabled": config.features.connected_message_enabled,
+        },
+    }
+
+
+def update_config_from_dict(raw: dict[str, Any], cfg_path: str) -> bool:
+    """从 dict 更新 config.yaml (覆盖写入)."""
+    try:
+        import yaml
+        from pathlib import Path
+
+        existing = yaml.safe_load(Path(cfg_path).read_text(encoding="utf-8")) or {}
+
+        if "cooldown" in raw:
+            existing.setdefault("cooldown", {}).update(raw["cooldown"])
+        if "rate_limit" in raw:
+            existing.setdefault("rate_limit", {}).update(raw["rate_limit"])
+        if "features" in raw:
+            existing.setdefault("features", {}).update(raw["features"])
+        if "room_display_id" in raw:
+            existing["room_display_id"] = raw["room_display_id"]
+        if "anchor_uid" in raw:
+            existing["anchor_uid"] = raw["anchor_uid"]
+
+        Path(cfg_path).write_text(
+            yaml.dump(existing, default_flow_style=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        return True
+    except Exception as exc:
+        logger = logging.getLogger("config")
+        logger.warning("config save failed: %s", exc)
+        return False
 
 
 def _parse_keyword_reply(raw: Any) -> KeywordReplyConfig:

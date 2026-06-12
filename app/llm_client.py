@@ -79,12 +79,18 @@ class LLMClient:
         api_key: str = "",
         base_url: str = "https://api.openai.com/v1",
         model: str = "gpt-4o-mini",
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        max_tokens: int = 150,
         system_prompt: str = "你是文文，一个可爱温柔的虚拟主播助手。",
     ) -> None:
         self.provider = provider
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.temperature = temperature
+        self.top_p = top_p
+        self.max_tokens = max_tokens
         self.system_prompt = system_prompt
 
     def _build_payload(
@@ -124,13 +130,17 @@ class LLMClient:
                 "model": self.model,
                 "system": final_system,
                 "messages": anthro_msgs,
-                "max_tokens": 150,
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
             }
         else:
             return {
                 "model": self.model,
                 "messages": messages,
-                "max_tokens": 150,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "max_tokens": self.max_tokens,
             }
 
     def _headers(self) -> dict[str, str]:

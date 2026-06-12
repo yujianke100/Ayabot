@@ -77,6 +77,10 @@ llm:
   api_key: ""
   base_url: "https://api.openai.com/v1"
   model: "gpt-4o-mini"
+  wake_word: "文文"
+  temperature: 0.7
+  top_p: 0.9
+  max_tokens: 150
   system_prompt: "你是文文，一个可爱温柔的虚拟主播助手。你的任务是在直播间用弹幕和观众互动。"
   context:
     enabled: true

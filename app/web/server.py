@@ -70,6 +70,10 @@ def init_app(config: Any = None) -> None:
         "api_key": config.llm.api_key,
         "base_url": config.llm.base_url,
         "model": config.llm.model,
+        "wake_word": config.llm.wake_word,
+        "temperature": config.llm.temperature,
+        "top_p": config.llm.top_p,
+        "max_tokens": config.llm.max_tokens,
         "system_prompt": config.llm.system_prompt,
         "context": {
             "enabled": config.llm.context.enabled,
@@ -470,6 +474,10 @@ async def api_get_llm_config():
         "has_api_key": bool(_LLM_CONFIG_DICT.get("api_key")),
         "base_url": _LLM_CONFIG_DICT.get("base_url", ""),
         "model": _LLM_CONFIG_DICT.get("model", ""),
+        "wake_word": _LLM_CONFIG_DICT.get("wake_word", "文文"),
+        "temperature": _LLM_CONFIG_DICT.get("temperature", 0.7),
+        "top_p": _LLM_CONFIG_DICT.get("top_p", 0.9),
+        "max_tokens": _LLM_CONFIG_DICT.get("max_tokens", 150),
         "system_prompt": _LLM_CONFIG_DICT.get("system_prompt", ""),
         "context": {
             "enabled": ctx.get("enabled", True),
@@ -489,7 +497,7 @@ async def api_save_llm_config(request: Request):
         return JSONResponse({"error": "bad request"}, status_code=400)
 
     # 更新内存中的配置
-    for key in ("enabled", "provider", "api_key", "base_url", "model", "system_prompt"):
+    for key in ("enabled", "provider", "api_key", "base_url", "model", "wake_word", "temperature", "top_p", "max_tokens", "system_prompt"):
         if key in body:
             _LLM_CONFIG_DICT[key] = body[key]
     if "context" in body and isinstance(body["context"], dict):
@@ -509,6 +517,10 @@ async def api_save_llm_config(request: Request):
         llm_section["api_key"] = _LLM_CONFIG_DICT.get("api_key", "")
         llm_section["base_url"] = _LLM_CONFIG_DICT.get("base_url", "")
         llm_section["model"] = _LLM_CONFIG_DICT.get("model", "")
+        llm_section["wake_word"] = _LLM_CONFIG_DICT.get("wake_word", "文文")
+        llm_section["temperature"] = _LLM_CONFIG_DICT.get("temperature", 0.7)
+        llm_section["top_p"] = _LLM_CONFIG_DICT.get("top_p", 0.9)
+        llm_section["max_tokens"] = _LLM_CONFIG_DICT.get("max_tokens", 150)
         llm_section["system_prompt"] = _LLM_CONFIG_DICT.get("system_prompt", "")
         llm_section["context"] = {
             "enabled": _LLM_CONFIG_DICT.get("context", {}).get("enabled", True),
@@ -549,7 +561,37 @@ async def api_llm_test(request: Request):
     return {"reply": reply or "(无回复)"}
 
 
-# ══════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+#  通用机器人配置 API
+# ══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/general_config")
+async def api_get_general_config():
+    """返回机器人全局配置."""
+    from app.config import load_config, config_to_dict
+    try:
+        cfg = load_config(_CONFIG_YAML_PATH)
+        return config_to_dict(cfg)
+    except Exception as exc:
+        logger.warning("general config load failed: %s", exc)
+        return {"error": str(exc)}
+
+
+@app.post("/api/general_config")
+async def api_save_general_config(request: Request):
+    """保存机器人全局配置到 config.yaml."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    from app.config import update_config_from_dict
+    ok = update_config_from_dict(body, _CONFIG_YAML_PATH)
+    return {"ok": ok}
+
+
+# ══════════════════════════════════════════════════════════════
 #  HTML
 # ══════════════════════════════════════════════════════════════════
 
@@ -693,6 +735,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <button @click="tab='ranking'" :class="tab==='ranking'?'text-blue-600 font-bold border-b-2 border-blue-600':''">送礼排行</button>
         <button @click="tab='export'"  :class="tab==='export' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">精美导出</button>
         <button @click="tab='llm'"    :class="tab==='llm'    ?'text-blue-600 font-bold border-b-2 border-blue-600':''">AI 回复</button>
+        <button @click="tab='config'" :class="tab==='config'?'text-blue-600 font-bold border-b-2 border-blue-600':''">机器人配置</button>
         <button @click="tab='manage'" :class="tab==='manage'?'text-blue-600 font-bold border-b-2 border-blue-600':''">数据管理</button>
         <button @click="doLogout" class="text-gray-400 hover:text-red-500 ml-2">退出</button>
     </div>
@@ -842,6 +885,66 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <div v-else-if="!errExport" class="text-gray-400 mt-20">输入 UID 和日期后点击"生成"</div>
 </div>
 
+<!-- ══════ 机器人配置 ══════ -->
+<div v-if="tab==='config'" class="max-w-2xl mx-auto">
+    <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
+        <h2 class="text-lg font-bold">⚙️ 机器人配置</h2>
+
+        <div class="grid grid-cols-2 gap-4">
+            <label class="text-xs text-gray-500">直播间 ID
+                <input type="number" v-model.number="cfgRoomId" class="border p-2 rounded w-full text-sm mt-1" disabled>
+            </label>
+            <label class="text-xs text-gray-500">主播 UID
+                <input type="number" v-model.number="cfgAnchorUid" class="border p-2 rounded w-full text-sm mt-1" disabled>
+            </label>
+        </div>
+
+        <hr>
+        <h3 class="text-sm font-bold">⏱️ 冷却时间（秒）</h3>
+        <div class="grid grid-cols-2 gap-4">
+            <label class="text-xs text-gray-500">欢迎同用户间隔
+                <input type="number" v-model.number="cfgWelcomeCd" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500">感谢同用户间隔
+                <input type="number" v-model.number="cfgThanksCd" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+        </div>
+
+        <hr>
+        <h3 class="text-sm font-bold">🚦 限流</h3>
+        <div class="grid grid-cols-2 gap-4">
+            <label class="text-xs text-gray-500">弹幕发送间隔(秒)
+                <input type="number" v-model="cfgSendInterval" step="0.1" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500">重试次数
+                <input type="number" v-model.number="cfgRetry" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500">队列上限
+                <input type="number" v-model.number="cfgMaxQueue" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500">回复延迟(秒)
+                <input type="number" v-model="cfgReplyDelay" step="0.1" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+        </div>
+
+        <hr>
+        <h3 class="text-sm font-bold">🎛️ 功能开关</h3>
+        <div class="grid grid-cols-2 gap-2 text-sm">
+            <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgWelcomeOn" class="w-4 h-4"> 欢迎</label>
+            <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgThanksOn" class="w-4 h-4"> 感谢</label>
+            <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgBlindboxOn" class="w-4 h-4"> 盲盒统计</label>
+            <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgGuardOn" class="w-4 h-4"> 大航海感谢</label>
+            <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgConnectedMsg" class="w-4 h-4"> 连接消息</label>
+        </div>
+
+        <div class="flex items-center gap-4 mt-4">
+            <button @click="saveGeneralConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
+            <span v-if="cfgSaveMsg" class="text-sm" :class="cfgSaveOk ? 'text-green-600' : 'text-red-500'">{{ cfgSaveMsg }}</span>
+            <button @click="loadGeneralConfig" class="text-gray-500 hover:text-gray-700 underline text-sm">刷新</button>
+        </div>
+    </div>
+</div>
+
 <!-- ══════ AI 回复设置 ══════ -->
 <div v-if="tab==='llm'" class="max-w-2xl mx-auto">
     <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
@@ -862,6 +965,18 @@ INDEX_HTML = r"""<!DOCTYPE html>
             </label>
             <label class="text-xs text-gray-500">模型
                 <input type="text" v-model="llmModel" placeholder="gpt-4o-mini" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500">唤醒词
+                <input type="text" v-model="llmWakeWord" placeholder="文文" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500">温度 (temperature)
+                <input type="number" v-model="llmTemp" step="0.1" min="0" max="2" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500">Top P
+                <input type="number" v-model="llmTopP" step="0.05" min="0" max="1" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500">最大 Token
+                <input type="number" v-model.number="llmMaxTokens" min="1" max="2000" class="border p-2 rounded w-full text-sm mt-1">
             </label>
         </div>
 
@@ -1006,6 +1121,10 @@ createApp({
         const llmApiKey = ref('');
         const llmBaseUrl = ref('');
         const llmModel = ref('');
+        const llmWakeWord = ref('文文');
+        const llmTemp = ref(0.7);
+        const llmTopP = ref(0.9);
+        const llmMaxTokens = ref(150);
         const llmPrompt = ref('');
         const llmSaveMsg = ref('');
         const llmSaveOk = ref(false);
@@ -1017,6 +1136,23 @@ createApp({
         const ctxMode = ref('isolated');
         const ctxContent = ref('llm_only');
         const ctxMaxMsg = ref(10);
+
+        // General Config
+        const cfgRoomId = ref(0);
+        const cfgAnchorUid = ref(0);
+        const cfgWelcomeCd = ref(600);
+        const cfgThanksCd = ref(10);
+        const cfgSendInterval = ref(1.2);
+        const cfgRetry = ref(2);
+        const cfgMaxQueue = ref(50);
+        const cfgReplyDelay = ref(3.0);
+        const cfgWelcomeOn = ref(true);
+        const cfgThanksOn = ref(true);
+        const cfgBlindboxOn = ref(true);
+        const cfgGuardOn = ref(true);
+        const cfgConnectedMsg = ref(false);
+        const cfgSaveMsg = ref('');
+        const cfgSaveOk = ref(false);
 
         let chartInst = null;
 
@@ -1180,6 +1316,10 @@ createApp({
                 llmProvider.value = data.provider;
                 llmBaseUrl.value = data.base_url;
                 llmModel.value = data.model;
+                llmWakeWord.value = data.wake_word || '文文';
+                llmTemp.value = data.temperature ?? 0.7;
+                llmTopP.value = data.top_p ?? 0.9;
+                llmMaxTokens.value = data.max_tokens ?? 150;
                 llmPrompt.value = data.system_prompt;
                 if (data.has_api_key) {
                     llmApiKey.value = '********';
@@ -1199,6 +1339,10 @@ createApp({
                 provider: llmProvider.value,
                 base_url: llmBaseUrl.value,
                 model: llmModel.value,
+                wake_word: llmWakeWord.value,
+                temperature: llmTemp.value,
+                top_p: llmTopP.value,
+                max_tokens: llmMaxTokens.value,
                 system_prompt: llmPrompt.value,
                 context: {
                     enabled: ctxEnabled.value,
@@ -1259,6 +1403,73 @@ createApp({
 
         // 自动加载配置
         loadLlmConfig();
+        loadGeneralConfig();
+
+        // ── General Config ──
+        async function loadGeneralConfig() {
+            try {
+                const res = await fetch('/api/general_config', {credentials: 'include'});
+                if (res.status === 401) { loggedIn.value = false; return; }
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.error) return;
+                cfgRoomId.value = data.room_display_id || 0;
+                cfgAnchorUid.value = data.anchor_uid || 0;
+                cfgWelcomeCd.value = data.cooldown?.welcome_user_seconds ?? 600;
+                cfgThanksCd.value = data.cooldown?.thanks_user_seconds ?? 10;
+                cfgSendInterval.value = data.rate_limit?.send_interval_seconds ?? 1.2;
+                cfgRetry.value = data.rate_limit?.retry_count ?? 2;
+                cfgMaxQueue.value = data.rate_limit?.max_queue_size ?? 50;
+                cfgReplyDelay.value = data.rate_limit?.reply_delay_seconds ?? 3.0;
+                cfgWelcomeOn.value = data.features?.welcome_enabled ?? true;
+                cfgThanksOn.value = data.features?.thanks_enabled ?? true;
+                cfgBlindboxOn.value = data.features?.blindbox_enabled ?? true;
+                cfgGuardOn.value = data.features?.guard_thanks_enabled ?? true;
+                cfgConnectedMsg.value = data.features?.connected_message_enabled ?? false;
+            } catch(e) { /* ignore */ }
+        }
+        async function saveGeneralConfig() {
+            cfgSaveMsg.value = '';
+            try {
+                const res = await fetch('/api/general_config', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        cooldown: {
+                            welcome_user_seconds: cfgWelcomeCd.value,
+                            thanks_user_seconds: cfgThanksCd.value,
+                        },
+                        rate_limit: {
+                            send_interval_seconds: cfgSendInterval.value,
+                            retry_count: cfgRetry.value,
+                            max_queue_size: cfgMaxQueue.value,
+                            reply_delay_seconds: cfgReplyDelay.value,
+                        },
+                        features: {
+                            welcome_enabled: cfgWelcomeOn.value,
+                            thanks_enabled: cfgThanksOn.value,
+                            blindbox_enabled: cfgBlindboxOn.value,
+                            guard_thanks_enabled: cfgGuardOn.value,
+                            connected_message_enabled: cfgConnectedMsg.value,
+                        },
+                    }),
+                });
+                if (res.status === 401) { loggedIn.value = false; return; }
+                if (!res.ok) throw new Error((await res.text()).slice(0,80));
+                const data = await res.json();
+                if (data.ok) {
+                    cfgSaveMsg.value = '已保存（重启后生效）';
+                    cfgSaveOk.value = true;
+                } else {
+                    cfgSaveMsg.value = '保存失败';
+                    cfgSaveOk.value = false;
+                }
+            } catch(e) {
+                cfgSaveMsg.value = '保存失败: ' + e.message;
+                cfgSaveOk.value = false;
+            }
+        }
 
         return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
                 tab, rStart, rEnd, rType, ranking, errRanking, loadRanking,
@@ -1268,9 +1479,14 @@ createApp({
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
                 llmEnabled, llmProvider, llmApiKey, llmBaseUrl, llmModel, llmPrompt,
+                llmWakeWord, llmTemp, llmTopP, llmMaxTokens,
                 llmSaveMsg, llmSaveOk, llmTestText, llmTestResp,
                 ctxEnabled, ctxMode, ctxContent, ctxMaxMsg,
-                saveLlmConfig, testLlm};
+                saveLlmConfig, testLlm,
+                cfgRoomId, cfgAnchorUid, cfgWelcomeCd, cfgThanksCd,
+                cfgSendInterval, cfgRetry, cfgMaxQueue, cfgReplyDelay,
+                cfgWelcomeOn, cfgThanksOn, cfgBlindboxOn, cfgGuardOn, cfgConnectedMsg,
+                cfgSaveMsg, cfgSaveOk, loadGeneralConfig, saveGeneralConfig};
     }
 }).mount('#app');
 </script>

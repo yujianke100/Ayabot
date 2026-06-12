@@ -64,6 +64,10 @@ class LiveRobot:
         self._admin_uids: set[int] = set()
         self._keyword_reply_cooldown_ts: dict[int, float] = {}
 
+        # 从配置读取唤醒词
+        wake = getattr(config.llm, 'wake_word', '文文')
+        _set_wake_word(wake)
+
     async def run(self) -> None:
         self.logger.info("robot started, room=%s", self.config.room_display_id)
         self._msg_worker_task = asyncio.create_task(self._message_worker())
@@ -514,7 +518,8 @@ class LiveRobot:
                 return
 
             if not arg:
-                await self._enqueue_reply(text="想和文文说什么？例如 #文文 你好", reply_uid=uid)
+                wake = _CURRENT_WAKE_WORD
+                await self._enqueue_reply(text=f"想和{wake}说什么？例如 #{wake} 你好", reply_uid=uid)
                 return
 
             client = LLMClient(
@@ -522,6 +527,9 @@ class LiveRobot:
                 api_key=cfg.get("api_key", ""),
                 base_url=cfg.get("base_url", "https://api.openai.com/v1"),
                 model=cfg.get("model", "gpt-4o-mini"),
+                temperature=float(cfg.get("temperature", 0.7)),
+                top_p=float(cfg.get("top_p", 0.9)),
+                max_tokens=int(cfg.get("max_tokens", 150)),
                 system_prompt=cfg.get("system_prompt", "你是文文，一个可爱温柔的虚拟主播助手。"),
             )
 
@@ -925,23 +933,25 @@ def _parse_command(text: str) -> Optional[tuple[str, str]]:
     # Create a normalized compact version for simple commands
     compact = "".join(s.split()).replace("：", ":")
 
-    # Command: #文文
-    if compact == "#文文" or compact.startswith("#文文"):
+    # Command: #{wake_word} (e.g. #文文)
+    wake = _CURRENT_WAKE_WORD
+    wake_hash = f"#{wake}"
+    if compact == wake_hash or compact.startswith(wake_hash):
         rest = ""
-        if compact == "#文文":
-            # Just "#文文" with nothing after it
+        if compact == wake_hash:
+            # Just "#{wake}" with nothing after it
             pass
-        elif compact.startswith("#文文:"):
-            rest = compact[len("#文文:"):]
-        elif compact.startswith("#文文"):
-            rest = compact[len("#文文"):]  # after normalization, could be "#文文你好"
-        # Also handle space-separated: "#文文 你好"
-        if not rest and (s.startswith("#文文 ") or s.startswith("＃文文 ")):
+        elif compact.startswith(f"{wake_hash}:"):
+            rest = compact[len(f"{wake_hash}:"):]
+        elif compact.startswith(wake_hash):
+            rest = compact[len(wake_hash):]
+        # Also handle space-separated: "#{wake} 你好"
+        if not rest and (s.startswith(f"{wake_hash} ") or s.startswith(f"＃{wake} ")):
             rest = s.split(" ", 1)[1] if " " in s else ""
         # Also handle full-width colon
         if not rest and "：" in s:
             parts = s.split("：", 1)
-            if parts[0].strip() in ("#文文", "＃文文"):
+            if parts[0].strip() in (wake_hash, f"＃{wake}"):
                 rest = parts[1].strip()
         if not rest:
             return "llm_chat", ""
@@ -1019,6 +1029,18 @@ def _parse_command(text: str) -> Optional[tuple[str, str]]:
         return "welcome_text", s[len("#welcome text ") :].strip()
 
     return None
+
+
+# ══════════════════════════════════════════════════════════════
+#  可配置唤醒词
+# ══════════════════════════════════════════════════════════════
+
+_CURRENT_WAKE_WORD = "文文"
+
+
+def _set_wake_word(word: str) -> None:
+    global _CURRENT_WAKE_WORD
+    _CURRENT_WAKE_WORD = word
 
 
 def _match_keyword_rule(text: str, rules: list[KeywordRule]) -> Optional[str]:
