@@ -71,6 +71,12 @@ def init_app(config: Any = None) -> None:
         "base_url": config.llm.base_url,
         "model": config.llm.model,
         "system_prompt": config.llm.system_prompt,
+        "context": {
+            "enabled": config.llm.context.enabled,
+            "mode": config.llm.context.mode,
+            "content": config.llm.context.content,
+            "max_messages": config.llm.context.max_messages,
+        },
     })
     _CONFIG_YAML_PATH = "config.yaml"
     logger.info("webui configured: host=%s port=%s db=%s", _HTTP_HOST, _HTTP_PORT, os.path.abspath(_DB_PATH))
@@ -457,6 +463,7 @@ async def api_proxy_image(url: str):
 @app.get("/api/llm_config")
 async def api_get_llm_config():
     """返回 LLM 配置（不含 api_key，仅用于展示状态）."""
+    ctx = _LLM_CONFIG_DICT.get("context", {})
     return {
         "enabled": _LLM_CONFIG_DICT.get("enabled", False),
         "provider": _LLM_CONFIG_DICT.get("provider", "openai"),
@@ -464,6 +471,12 @@ async def api_get_llm_config():
         "base_url": _LLM_CONFIG_DICT.get("base_url", ""),
         "model": _LLM_CONFIG_DICT.get("model", ""),
         "system_prompt": _LLM_CONFIG_DICT.get("system_prompt", ""),
+        "context": {
+            "enabled": ctx.get("enabled", True),
+            "mode": ctx.get("mode", "isolated"),
+            "content": ctx.get("content", "llm_only"),
+            "max_messages": ctx.get("max_messages", 10),
+        },
     }
 
 
@@ -479,6 +492,11 @@ async def api_save_llm_config(request: Request):
     for key in ("enabled", "provider", "api_key", "base_url", "model", "system_prompt"):
         if key in body:
             _LLM_CONFIG_DICT[key] = body[key]
+    if "context" in body and isinstance(body["context"], dict):
+        _LLM_CONFIG_DICT.setdefault("context", {})
+        for ck in ("enabled", "mode", "content", "max_messages"):
+            if ck in body["context"]:
+                _LLM_CONFIG_DICT["context"][ck] = body["context"][ck]
 
     # 回写到 config.yaml
     try:
@@ -492,6 +510,12 @@ async def api_save_llm_config(request: Request):
         llm_section["base_url"] = _LLM_CONFIG_DICT.get("base_url", "")
         llm_section["model"] = _LLM_CONFIG_DICT.get("model", "")
         llm_section["system_prompt"] = _LLM_CONFIG_DICT.get("system_prompt", "")
+        llm_section["context"] = {
+            "enabled": _LLM_CONFIG_DICT.get("context", {}).get("enabled", True),
+            "mode": _LLM_CONFIG_DICT.get("context", {}).get("mode", "isolated"),
+            "content": _LLM_CONFIG_DICT.get("context", {}).get("content", "llm_only"),
+            "max_messages": _LLM_CONFIG_DICT.get("context", {}).get("max_messages", 10),
+        }
 
         # 手动写 YAML 保留锚点和格式
         cfg_path.write_text(yaml.dump(raw, default_flow_style=False, allow_unicode=True), encoding="utf-8")
@@ -853,6 +877,33 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <textarea v-model="llmPrompt" rows="3" class="border p-2 rounded w-full text-sm mt-1" placeholder="你是文文，一个可爱温柔的虚拟主播助手。"></textarea>
         </label>
 
+        <hr class="my-2">
+        <h3 class="text-sm font-bold">🧠 对话上下文</h3>
+
+        <label class="flex items-center gap-2 text-sm">
+            <input type="checkbox" v-model="ctxEnabled" class="w-4 h-4">
+            开启上下文记忆
+        </label>
+
+        <div v-if="ctxEnabled" class="grid grid-cols-2 gap-4">
+            <label class="text-xs text-gray-500">隔离方式
+                <select v-model="ctxMode" class="border p-2 rounded w-full text-sm mt-1">
+                    <option value="isolated">按用户隔离</option>
+                    <option value="merged">所有用户合并</option>
+                </select>
+            </label>
+            <label class="text-xs text-gray-500">记录内容
+                <select v-model="ctxContent" class="border p-2 rounded w-full text-sm mt-1">
+                    <option value="llm_only">仅 #文文 对话</option>
+                    <option value="all">所有弹幕消息</option>
+                </select>
+            </label>
+        </div>
+
+        <label v-if="ctxEnabled" class="text-xs text-gray-500">保留条数
+            <input type="number" v-model.number="ctxMaxMsg" min="1" max="50" class="border p-2 rounded w-full text-sm mt-1">
+        </label>
+
         <div class="flex items-center gap-4">
             <button @click="saveLlmConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
             <span v-if="llmSaveMsg" class="text-sm" :class="llmSaveOk ? 'text-green-600' : 'text-red-500'">{{ llmSaveMsg }}</span>
@@ -960,6 +1011,12 @@ createApp({
         const llmSaveOk = ref(false);
         const llmTestText = ref('');
         const llmTestResp = ref('');
+
+        // LLM Context Config
+        const ctxEnabled = ref(true);
+        const ctxMode = ref('isolated');
+        const ctxContent = ref('llm_only');
+        const ctxMaxMsg = ref(10);
 
         let chartInst = null;
 
@@ -1127,6 +1184,12 @@ createApp({
                 if (data.has_api_key) {
                     llmApiKey.value = '********';
                 }
+                if (data.context) {
+                    ctxEnabled.value = data.context.enabled;
+                    ctxMode.value = data.context.mode;
+                    ctxContent.value = data.context.content;
+                    ctxMaxMsg.value = data.context.max_messages;
+                }
             } catch(e) { /* ignore */ }
         }
         async function saveLlmConfig() {
@@ -1137,6 +1200,12 @@ createApp({
                 base_url: llmBaseUrl.value,
                 model: llmModel.value,
                 system_prompt: llmPrompt.value,
+                context: {
+                    enabled: ctxEnabled.value,
+                    mode: ctxMode.value,
+                    content: ctxContent.value,
+                    max_messages: ctxMaxMsg.value,
+                },
             };
             if (llmApiKey.value && llmApiKey.value !== '********') {
                 body.api_key = llmApiKey.value;
@@ -1200,6 +1269,7 @@ createApp({
                 delDate, delResult, confirmDelete,
                 llmEnabled, llmProvider, llmApiKey, llmBaseUrl, llmModel, llmPrompt,
                 llmSaveMsg, llmSaveOk, llmTestText, llmTestResp,
+                ctxEnabled, ctxMode, ctxContent, ctxMaxMsg,
                 saveLlmConfig, testLlm};
     }
 }).mount('#app');

@@ -101,6 +101,14 @@ class WebUIConfig:
 
 
 @dataclass(slots=True)
+class LLMContextConfig:
+    enabled: bool = True        # 上下文记忆是否开启
+    mode: str = "isolated"       # "isolated"=单用户隔离, "merged"=所有用户合并
+    content: str = "llm_only"    # "llm_only"=仅文文对话, "all"=所有弹幕
+    max_messages: int = 10       # 保留的消息条数
+
+
+@dataclass(slots=True)
 class LLMConfig:
     enabled: bool = False
     provider: str = "openai"        # "openai" or "anthropic"
@@ -108,6 +116,7 @@ class LLMConfig:
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4o-mini"
     system_prompt: str = "你是文文，一个可爱温柔的虚拟主播助手。"
+    context: LLMContextConfig = None    # type: ignore[assignment]
 
 
 @dataclass(slots=True)
@@ -149,6 +158,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
     auth = raw.get("auth", {})
     web_ui = raw.get("web_ui", {})
     llm = raw.get("llm", {})
+    llm_ctx = llm.get("context", {})
 
     return AppConfig(
         room_display_id=int(raw["room_display_id"]),
@@ -239,6 +249,12 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             base_url=str(llm.get("base_url", "https://api.openai.com/v1")),
             model=str(llm.get("model", "gpt-4o-mini")),
             system_prompt=str(llm.get("system_prompt", "你是文文，一个可爱温柔的虚拟主播助手。")),
+            context=LLMContextConfig(
+                enabled=bool(llm_ctx.get("enabled", True)),
+                mode=str(llm_ctx.get("mode", "isolated")),
+                content=str(llm_ctx.get("content", "llm_only")),
+                max_messages=int(llm_ctx.get("max_messages", 10)),
+            ),
         ),
     )
 

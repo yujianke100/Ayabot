@@ -436,6 +436,9 @@ class LiveRobot:
                         self._keyword_reply_cooldown_ts[uid] = now
                         self.logger.debug("keyword reply matched: uid=%s text=%s reply=%s", uid, text, reply)
                         await self._enqueue_reply(text=reply, reply_uid=uid)
+
+            # 记录所有弹幕到上下文
+            self._record_chat_context(text, uname, uid)
             return
 
         name, arg = command
@@ -522,11 +525,18 @@ class LiveRobot:
                 system_prompt=cfg.get("system_prompt", "你是文文，一个可爱温柔的虚拟主播助手。"),
             )
 
-            # 对话上下文: 最近 5 轮交换
-            MAX_HISTORY = 10  # 5 轮 = 10 条消息 (user + assistant)
-            history = self._chat_contexts.get(uid, [])
-            if len(history) > MAX_HISTORY:
-                history = history[-MAX_HISTORY:]
+            # 对话上下文
+            ctx_cfg = cfg.get("context", {})
+            ctx_enabled = ctx_cfg.get("enabled", True)
+            ctx_mode = ctx_cfg.get("mode", "isolated")  # "isolated" or "merged"
+            ctx_content = ctx_cfg.get("content", "llm_only")  # "llm_only" or "all"
+            ctx_max = ctx_cfg.get("max_messages", 10)
+
+            history: list[dict[str, str]] = []
+            if ctx_enabled:
+                ctx_key = 0 if ctx_mode == "merged" else uid
+                history = self._chat_contexts.get(ctx_key, [])
+                history = history[-ctx_max:] if len(history) > ctx_max else history
 
             reply = await client.chat(
                 user_text=arg, uname=uname,
@@ -538,11 +548,13 @@ class LiveRobot:
                 return
 
             # 保存到上下文
-            history.append({"role": "user", "content": f'用户"{uname}"说: {arg}'})
-            history.append({"role": "assistant", "content": reply})
-            if len(history) > MAX_HISTORY:
-                history = history[-MAX_HISTORY:]
-            self._chat_contexts[uid] = history
+            if ctx_enabled:
+                ctx_key = 0 if ctx_mode == "merged" else uid
+                history.append({"role": "user", "content": f'用户"{uname}"说: {arg}'})
+                history.append({"role": "assistant", "content": reply})
+                if len(history) > ctx_max:
+                    history = history[-ctx_max:]
+                self._chat_contexts[ctx_key] = history
 
             # Truncate to fit B站 danmaku limit (~30 chars)
             if len(reply) > 27:
@@ -688,6 +700,23 @@ class LiveRobot:
         if delay > 0:
             await asyncio.sleep(delay)
         await self._enqueue_message(text=text, reply_uid=reply_uid)
+
+    def _record_chat_context(self, text: str, uname: str, uid: int) -> None:
+        """记录弹幕到上下文缓存（当配置为 all 时）. """
+        from app.web.server import get_llm_config
+        cfg = get_llm_config()
+        ctx_cfg = cfg.get("context", {})
+        if not ctx_cfg.get("enabled", True):
+            return
+        if ctx_cfg.get("content", "llm_only") != "all":
+            return
+        ctx_key = 0 if ctx_cfg.get("mode", "isolated") == "merged" else uid
+        ctx_max = ctx_cfg.get("max_messages", 10)
+        history = self._chat_contexts.get(ctx_key, [])
+        history.append({"role": "user", "content": f'用户"{uname}"说: {text}'})
+        if len(history) > ctx_max:
+            history = history[-ctx_max:]
+        self._chat_contexts[ctx_key] = history
 
 
 def _safe_int(value: Any) -> int:

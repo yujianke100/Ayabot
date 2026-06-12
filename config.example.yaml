@@ -78,3 +78,8 @@ llm:
   base_url: "https://api.openai.com/v1"
   model: "gpt-4o-mini"
   system_prompt: "你是文文，一个可爱温柔的虚拟主播助手。你的任务是在直播间用弹幕和观众互动。"
+  context:
+    enabled: true
+    mode: "isolated"
+    content: "llm_only"
+    max_messages: 10
