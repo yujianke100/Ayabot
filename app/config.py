@@ -120,11 +120,11 @@ class LLMConfig:
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4o-mini"
-    wake_word: str = "文文"
+    wake_word: str = "bilibot"
     temperature: float = 0.7
     top_p: float = 0.9
     max_tokens: int = 150
-    system_prompt: str = "你是文文，一个可爱温柔的虚拟主播助手。"
+    system_prompt: str = "你是bilibot，一个可爱温柔的虚拟主播助手。"
     context: LLMContextConfig = None    # type: ignore[assignment]
 
 
@@ -261,11 +261,11 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             api_key=str(llm.get("api_key", "")),
             base_url=str(llm.get("base_url", "https://api.openai.com/v1")),
             model=str(llm.get("model", "gpt-4o-mini")),
-            wake_word=str(llm.get("wake_word", "文文")),
+            wake_word=str(llm.get("wake_word", "bilibot")),
             temperature=float(llm.get("temperature", 0.7)),
             top_p=float(llm.get("top_p", 0.9)),
             max_tokens=int(llm.get("max_tokens", 150)),
-            system_prompt=str(llm.get("system_prompt", "你是文文，一个可爱温柔的虚拟主播助手。")),
+            system_prompt=str(llm.get("system_prompt", "你是bilibot，一个可爱温柔的虚拟主播助手。")),
             context=LLMContextConfig(
                 enabled=bool(llm_ctx.get("enabled", True)),
                 mode=str(llm_ctx.get("mode", "isolated")),
@@ -348,6 +348,8 @@ def update_config_from_dict(raw: dict[str, Any], cfg_path: str) -> bool:
             existing["room_display_id"] = raw["room_display_id"]
         if "anchor_uid" in raw:
             existing["anchor_uid"] = raw["anchor_uid"]
+        if "bot_name" in raw:
+            existing.setdefault("web_ui", {})["bot_name"] = raw["bot_name"]
 
         Path(cfg_path).write_text(
             yaml.dump(existing, default_flow_style=False, allow_unicode=True),

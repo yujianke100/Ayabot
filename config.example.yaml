@@ -22,8 +22,8 @@ features:
   connected_message: "机器人已上线～"
   connected_message_enabled: true
   anchor_exclusive_reply:
-    - trigger_keyword: "^文文"
-      reply_template: "在的喵，找文文有什么事吗？"
+    - trigger_keyword: "^bilibot"
+      reply_template: "在的喵，找bilibot有什么事吗？"
       is_regex: true
     - trigger_keyword: "下班"
       reply_template: "主播辛苦了喵！"
@@ -70,6 +70,7 @@ web_ui:
   username: "wenwen"
   password: "31415926"
   session_timeout: 3600
+  bot_name: "bilibot"
 
 llm:
   enabled: false
@@ -77,11 +78,11 @@ llm:
   api_key: ""
   base_url: "https://api.openai.com/v1"
   model: "gpt-4o-mini"
-  wake_word: "文文"
+  wake_word: "bilibot"
   temperature: 0.7
   top_p: 0.9
   max_tokens: 150
-  system_prompt: "你是文文，一个可爱温柔的虚拟主播助手。你的任务是在直播间用弹幕和观众互动。"
+  system_prompt: "你是bilibot，一个可爱温柔的虚拟主播助手。你的任务是在直播间用弹幕和观众互动。"
   context:
     enabled: true
     mode: "isolated"

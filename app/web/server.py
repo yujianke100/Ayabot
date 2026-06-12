@@ -474,7 +474,7 @@ async def api_get_llm_config():
         "has_api_key": bool(_LLM_CONFIG_DICT.get("api_key")),
         "base_url": _LLM_CONFIG_DICT.get("base_url", ""),
         "model": _LLM_CONFIG_DICT.get("model", ""),
-        "wake_word": _LLM_CONFIG_DICT.get("wake_word", "文文"),
+        "wake_word": _LLM_CONFIG_DICT.get("wake_word", "bilibot"),
         "temperature": _LLM_CONFIG_DICT.get("temperature", 0.7),
         "top_p": _LLM_CONFIG_DICT.get("top_p", 0.9),
         "max_tokens": _LLM_CONFIG_DICT.get("max_tokens", 150),
@@ -517,7 +517,7 @@ async def api_save_llm_config(request: Request):
         llm_section["api_key"] = _LLM_CONFIG_DICT.get("api_key", "")
         llm_section["base_url"] = _LLM_CONFIG_DICT.get("base_url", "")
         llm_section["model"] = _LLM_CONFIG_DICT.get("model", "")
-        llm_section["wake_word"] = _LLM_CONFIG_DICT.get("wake_word", "文文")
+        llm_section["wake_word"] = _LLM_CONFIG_DICT.get("wake_word", "bilibot")
         llm_section["temperature"] = _LLM_CONFIG_DICT.get("temperature", 0.7)
         llm_section["top_p"] = _LLM_CONFIG_DICT.get("top_p", 0.9)
         llm_section["max_tokens"] = _LLM_CONFIG_DICT.get("max_tokens", 150)
@@ -914,6 +914,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <h2 class="text-lg font-bold">⚙️ 机器人配置</h2>
 
         <div class="grid grid-cols-2 gap-4">
+            <label class="text-xs text-gray-500">机器人名称
+                <input type="text" v-model="botName" class="border p-2 rounded w-full text-sm mt-1" placeholder="bilibot">
+            </label>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4">
             <label class="text-xs text-gray-500">直播间 ID
                 <input type="number" v-model.number="cfgRoomId" class="border p-2 rounded w-full text-sm mt-1">
             </label>
@@ -1041,9 +1047,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <label class="text-xs text-gray-500">唤醒词
                 <div class="flex items-center mt-1">
                     <span class="bg-gray-200 px-2 py-[7px] rounded-l text-sm font-mono text-gray-500">#</span>
-                    <input type="text" v-model="llmWakeWord" placeholder="文文" class="border p-2 rounded-r w-full text-sm flex-1">
+                    <input type="text" v-model="llmWakeWord" placeholder="bilibot" class="border p-2 rounded-r w-full text-sm flex-1">
                 </div>
-                <span class="text-xs text-gray-400">用户发送 <code>#{{ llmWakeWord || '文文' }} 你好</code> 触发</span>
+                <span class="text-xs text-gray-400">用户发送 <code>#{{ llmWakeWord || 'bilibot' }} 你好</code> 触发</span>
             </label>
             <label class="text-xs text-gray-500">温度 (temperature)
                 <input type="number" v-model="llmTemp" step="0.1" min="0" max="2" class="border p-2 rounded w-full text-sm mt-1">
@@ -1065,7 +1071,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </label>
 
         <label class="text-xs text-gray-500">人设（System Prompt）
-            <textarea v-model="llmPrompt" rows="3" class="border p-2 rounded w-full text-sm mt-1" placeholder="你是文文，一个可爱温柔的虚拟主播助手。"></textarea>
+            <textarea v-model="llmPrompt" rows="3" class="border p-2 rounded w-full text-sm mt-1" placeholder="你是bilibot，一个可爱温柔的虚拟主播助手。"></textarea>
         </label>
 
         <hr class="my-2">
@@ -1085,7 +1091,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             </label>
             <label class="text-xs text-gray-500">记录内容
                 <select v-model="ctxContent" class="border p-2 rounded w-full text-sm mt-1">
-                    <option value="llm_only">仅 #文文 对话</option>
+                    <option value="llm_only">仅 #{{ llmWakeWord }} 对话</option>
                     <option value="all">所有弹幕消息</option>
                 </select>
             </label>
@@ -1137,7 +1143,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <tr><td class="border p-1"><code>#抽签</code></td><td class="border p-1">今日运势抽签</td></tr>
                     <tr><td class="border p-1"><code>#今日盲盒</code></td><td class="border p-1">今日盲盒统计</td></tr>
                     <tr><td class="border p-1"><code>#本月盲盒</code></td><td class="border p-1">本月盲盒统计</td></tr>
-                    <tr><td class="border p-1"><code>#{{ llmWakeWord || '文文' }} 消息</code></td><td class="border p-1">AI 智能回复（需在 AI 回复页开启）</td></tr>
+                    <tr><td class="border p-1"><code>#{{ llmWakeWord || 'bilibot' }} 消息</code></td><td class="border p-1">AI 智能回复（需在 AI 回复页开启）</td></tr>
                     <tr><td class="border p-1"><code>#帮助</code></td><td class="border p-1">显示所有命令</td></tr>
                 </tbody>
             </table>
@@ -1250,7 +1256,7 @@ createApp({
         const llmApiKey = ref('');
         const llmBaseUrl = ref('');
         const llmModel = ref('');
-        const llmWakeWord = ref('文文');
+        const llmWakeWord = ref('bilibot');
         const llmTemp = ref(0.7);
         const llmTopP = ref(0.9);
         const llmMaxTokens = ref(150);
@@ -1460,7 +1466,7 @@ createApp({
                 llmProvider.value = data.provider;
                 llmBaseUrl.value = data.base_url;
                 llmModel.value = data.model;
-                llmWakeWord.value = data.wake_word || '文文';
+                llmWakeWord.value = data.wake_word || 'bilibot';
                 llmTemp.value = data.temperature ?? 0.7;
                 llmTopP.value = data.top_p ?? 0.9;
                 llmMaxTokens.value = data.max_tokens ?? 150;
@@ -1591,6 +1597,7 @@ createApp({
                     headers: {'Content-Type':'application/json'},
                     credentials: 'include',
                     body: JSON.stringify({
+                        bot_name: botName.value,
                         cooldown: {
                             welcome_user_seconds: cfgWelcomeCd.value,
                             thanks_user_seconds: cfgThanksCd.value,

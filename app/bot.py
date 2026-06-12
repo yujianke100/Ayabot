@@ -66,7 +66,7 @@ class LiveRobot:
         self._keyword_reply_cooldown_ts: dict[int, float] = {}
 
         # 从配置读取唤醒词
-        wake = getattr(config.llm, 'wake_word', '文文')
+        wake = getattr(config.llm, 'wake_word', 'bilibot')
         _set_wake_word(wake)
 
     async def run(self) -> None:
@@ -538,7 +538,7 @@ class LiveRobot:
             cfg = get_llm_config()
             if not cfg.get("enabled") or not cfg.get("api_key"):
                 self.logger.debug("llm not configured, skipping")
-                await self._enqueue_reply(text="文文还没学会说话呢~", reply_uid=uid)
+                await self._enqueue_reply(text=_CURRENT_WAKE_WORD + "还没学会说话呢~", reply_uid=uid)
                 return
 
             if not arg:
@@ -554,7 +554,8 @@ class LiveRobot:
                 temperature=float(cfg.get("temperature", 0.7)),
                 top_p=float(cfg.get("top_p", 0.9)),
                 max_tokens=int(cfg.get("max_tokens", 150)),
-                system_prompt=cfg.get("system_prompt", "你是文文，一个可爱温柔的虚拟主播助手。"),
+                system_prompt=cfg.get("system_prompt", "你是bilibot，一个可爱温柔的虚拟主播助手。"),
+                bot_name=_CURRENT_WAKE_WORD,
             )
 
             # 对话上下文
@@ -576,7 +577,7 @@ class LiveRobot:
             )
 
             if not reply:
-                await self._enqueue_reply(text="文文不知道该怎么回答呢~", reply_uid=uid)
+                await self._enqueue_reply(text=_CURRENT_WAKE_WORD + "不知道该怎么回答呢~", reply_uid=uid)
                 return
 
             # 保存到上下文
@@ -597,7 +598,7 @@ class LiveRobot:
         if name == "help":
             self.logger.info("help requested: uid=%s", uid)
             await self._enqueue_reply(
-                text="#签到 #抽签 #今日盲盒 #本月盲盒",
+                text=f"#{_CURRENT_WAKE_WORD} #签到 #抽签 #今日盲盒 #本月盲盒 #帮助",
                 reply_uid=uid,
             )
             return
@@ -1059,7 +1060,7 @@ def _parse_command(text: str) -> Optional[tuple[str, str]]:
 #  可配置唤醒词
 # ══════════════════════════════════════════════════════════════
 
-_CURRENT_WAKE_WORD = "文文"
+_CURRENT_WAKE_WORD = "bilibot"
 
 
 def _set_wake_word(word: str) -> None:
