@@ -87,7 +87,10 @@ class LLMClient:
         self.model = model
         self.system_prompt = system_prompt
 
-    def _build_payload(self, user_text: str, uname: str) -> Optional[dict[str, Any]]:
+    def _build_payload(
+        self, user_text: str, uname: str,
+        chat_history: Optional[list[dict[str, str]]] = None,
+    ) -> Optional[dict[str, Any]]:
         """构造 API 请求体.
 
         三层防注入策略:
@@ -106,22 +109,27 @@ class LLMClient:
         # Layer 3: 防注入 system prompt
         final_system = _build_system_prompt(self.system_prompt)
 
+        # 构建 messages: system + 历史 + 当前用户消息
+        user_msg: dict[str, str] = {"role": "user", "content": wrapped_user_msg}
+        messages: list[dict[str, str]] = [{"role": "system", "content": final_system}]
+        if chat_history:
+            messages.extend(chat_history)
+        messages.append(user_msg)
+
         if self.provider == "anthropic":
+            # Anthropic: system 是顶层参数, messages 只含 user/assistant
+            anthro_msgs = list(chat_history) if chat_history else []
+            anthro_msgs.append(user_msg)
             return {
                 "model": self.model,
                 "system": final_system,
-                "messages": [
-                    {"role": "user", "content": wrapped_user_msg},
-                ],
+                "messages": anthro_msgs,
                 "max_tokens": 150,
             }
         else:
             return {
                 "model": self.model,
-                "messages": [
-                    {"role": "system", "content": final_system},
-                    {"role": "user", "content": wrapped_user_msg},
-                ],
+                "messages": messages,
                 "max_tokens": 150,
             }
 
@@ -138,11 +146,14 @@ class LLMClient:
                 "Authorization": f"Bearer {self.api_key}",
             }
 
-    async def chat(self, user_text: str, uname: str) -> Optional[str]:
+    async def chat(
+        self, user_text: str, uname: str,
+        chat_history: Optional[list[dict[str, str]]] = None,
+    ) -> Optional[str]:
         """调用 LLM API, 返回回复文本.
 
         如果预过滤检测到注入攻击, 直接返回预设的安全回复."""
-        payload = self._build_payload(user_text, uname)
+        payload = self._build_payload(user_text, uname, chat_history=chat_history)
 
         # Layer 1 拦截: 预过滤命中, 直接返回安全回复
         if payload is None:

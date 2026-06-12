@@ -59,6 +59,7 @@ class LiveRobot:
         self._last_thanks_ts: dict[int, float] = {}
 
         self._pending_texts: set[str] = set()
+        self._chat_contexts: dict[int, list[dict[str, str]]] = {}
 
         self._admin_uids: set[int] = set()
         self._keyword_reply_cooldown_ts: dict[int, float] = {}
@@ -520,11 +521,28 @@ class LiveRobot:
                 model=cfg.get("model", "gpt-4o-mini"),
                 system_prompt=cfg.get("system_prompt", "你是文文，一个可爱温柔的虚拟主播助手。"),
             )
-            reply = await client.chat(user_text=arg, uname=uname)
+
+            # 对话上下文: 最近 5 轮交换
+            MAX_HISTORY = 10  # 5 轮 = 10 条消息 (user + assistant)
+            history = self._chat_contexts.get(uid, [])
+            if len(history) > MAX_HISTORY:
+                history = history[-MAX_HISTORY:]
+
+            reply = await client.chat(
+                user_text=arg, uname=uname,
+                chat_history=history if history else None,
+            )
 
             if not reply:
                 await self._enqueue_reply(text="文文不知道该怎么回答呢~", reply_uid=uid)
                 return
+
+            # 保存到上下文
+            history.append({"role": "user", "content": f'用户"{uname}"说: {arg}'})
+            history.append({"role": "assistant", "content": reply})
+            if len(history) > MAX_HISTORY:
+                history = history[-MAX_HISTORY:]
+            self._chat_contexts[uid] = history
 
             # Truncate to fit B站 danmaku limit (~30 chars)
             if len(reply) > 27:
