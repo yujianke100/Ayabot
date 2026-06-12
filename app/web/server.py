@@ -1537,7 +1537,7 @@ createApp({
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
                 llmEnabled, llmProvider, llmApiKey, llmBaseUrl, llmModel, llmPrompt,
-                llmWakeWord, llmTemp, llmTopP, llmMaxTokens, llmCtxWindow,
+                llmWakeWord, llmTemp, llmTopP, llmMaxTokens,
                 llmSaveMsg, llmSaveOk, llmTestText, llmTestResp,
                 ctxEnabled, ctxMode, ctxContent, ctxMaxMsg,
                 saveLlmConfig, testLlm,
