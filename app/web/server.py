@@ -622,7 +622,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ botName }}喵~</title>
+<title>{{ botName }} 直播间机器人</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
@@ -739,7 +739,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <!-- ══════ 登录页 ══════ -->
 <div v-if="!loggedIn" class="flex items-center justify-center min-h-[80vh]">
     <div class="bg-white p-8 rounded-xl shadow-md w-80">
-        <h1 class="text-xl font-bold text-center text-blue-600 mb-6">{{ botName }}喵~</h1>
+        <h1 class="text-xl font-bold text-center text-blue-600 mb-6">{{ botName }} 管理后台</h1>
         <div class="space-y-4">
             <input v-model="loginUser" placeholder="账号" class="border p-2 rounded w-full text-sm" @keyup.enter="doLogin">
             <input v-model="loginPass" type="password" placeholder="密码" class="border p-2 rounded w-full text-sm" @keyup.enter="doLogin">
@@ -752,7 +752,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <!-- ══════ 主界面 ══════ -->
 <div v-if="loggedIn">
 <header class="mb-6 flex justify-between items-center bg-white p-4 rounded-xl shadow-sm">
-    <h1 class="text-xl font-bold text-blue-600">🎯 {{ botName }}喵~</h1>
+    <h1 class="text-xl font-bold text-blue-600">🎯 {{ botName }} 管理后台</h1>
     <div class="flex items-center gap-4 text-sm">
         <button @click="tab='ranking'" :class="tab==='ranking'?'text-blue-600 font-bold border-b-2 border-blue-600':''">送礼排行</button>
         <button @click="tab='export'"  :class="tab==='export' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">精美导出</button>
@@ -1027,7 +1027,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <div v-if="tab==='llm'" class="max-w-2xl mx-auto">
     <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
         <h2 class="text-lg font-bold">🤖 AI 回复设置</h2>
-        <p class="text-xs text-gray-400">用户发送 <code class="bg-gray-100 px-1 rounded">#{{ llmWakeWord || 'bilibot' }} 你好</code> 时调用 LLM API 自动回复。</p>
+        <p class="text-xs text-gray-400">用户发送 <code class="bg-gray-100 px-1 rounded">#{{ llmWakeWord || 'bilibot' }} &lt;聊天内容&gt;</code> 时调用 LLM API 自动回复。</p>
 
         <label class="flex items-center gap-2 text-sm">
             <input type="checkbox" v-model="llmEnabled" class="w-4 h-4">
@@ -1049,7 +1049,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <span class="bg-gray-200 px-2 py-[7px] rounded-l text-sm font-mono text-gray-500">#</span>
                     <input type="text" v-model="llmWakeWord" placeholder="bilibot" class="border p-2 rounded-r w-full text-sm flex-1">
                 </div>
-                <span class="text-xs text-gray-400">用户发送 <code>#{{ llmWakeWord || 'bilibot' }} 你好</code> 触发</span>
+                <span class="text-xs text-gray-400">用户发送 <code>#{{ llmWakeWord || 'bilibot' }} &lt;聊天内容&gt;</code> 触发</span>
             </label>
             <label class="text-xs text-gray-500">温度 (temperature)
                 <input type="number" v-model="llmTemp" step="0.1" min="0" max="2" class="border p-2 rounded w-full text-sm mt-1">
@@ -1143,7 +1143,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <tr><td class="border p-1"><code>#抽签</code></td><td class="border p-1">今日运势抽签</td></tr>
                     <tr><td class="border p-1"><code>#今日盲盒</code></td><td class="border p-1">今日盲盒统计</td></tr>
                     <tr><td class="border p-1"><code>#本月盲盒</code></td><td class="border p-1">本月盲盒统计</td></tr>
-                    <tr><td class="border p-1"><code>#{{ llmWakeWord || 'bilibot' }} 消息</code></td><td class="border p-1">AI 智能回复（需在 AI 回复页开启）</td></tr>
+                    <tr><td class="border p-1"><code>#{{ llmWakeWord || 'bilibot' }} &lt;聊天内容&gt;</code></td><td class="border p-1">AI 智能回复（需在 AI 回复页开启）</td></tr>
                     <tr><td class="border p-1"><code>#帮助</code></td><td class="border p-1">显示所有命令</td></tr>
                 </tbody>
             </table>

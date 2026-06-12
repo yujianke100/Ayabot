@@ -543,7 +543,7 @@ class LiveRobot:
 
             if not arg:
                 wake = _CURRENT_WAKE_WORD
-                await self._enqueue_reply(text=f"想和{wake}说什么？例如 #{wake} 你好", reply_uid=uid)
+                await self._enqueue_reply(text=f"想和{wake}说什么？例如 #{wake} <聊天内容>", reply_uid=uid)
                 return
 
             client = LLMClient(
