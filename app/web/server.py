@@ -584,6 +584,143 @@ async def api_restart():
 
 
 # ══════════════════════════════════════════════════════════════
+#  B站 扫码登录 API
+# ══════════════════════════════════════════════════════════════
+
+import io as _io
+import base64 as _base64
+from bilibili_api import login_v2
+
+# 存储活跃的 QR 登录会话 (session_id → QRLoginObj + QR image)
+_BILI_LOGIN_SESSIONS: dict[str, dict] = {}
+
+
+@app.post("/api/bili_login/start")
+async def api_bili_login_start():
+    """生成 B站 QR 登录二维码并返回 session_id."""
+    import qrcode
+    import uuid
+    import time as _time
+
+    session_id = uuid.uuid4().hex[:12]
+
+    qr = login_v2.QrCodeLogin(platform=login_v2.QrCodeLoginChannel.WEB)
+    await qr.generate_qrcode()
+
+    # 获取 QR URL（使用属性访问，bilibili_api 内部用 name mangling）
+    qr_url = qr._QrCodeLogin__qr_link  # noqa: SLF001
+
+    # 用 Python qrcode 生成 base64 图片
+    qr_img = qrcode.make(qr_url)
+    buf = _io.BytesIO()
+    qr_img.save(buf, format="PNG")
+    img_b64 = _base64.b64encode(buf.getvalue()).decode("ascii")
+
+    _BILI_LOGIN_SESSIONS[session_id] = {
+        "qr": qr,
+        "created_at": _time.time(),
+        "state": "waiting",
+    }
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "qr_image": f"data:image/png;base64,{img_b64}",
+        "qr_url": qr_url,
+    }
+
+
+@app.get("/api/bili_login/status")
+async def api_bili_login_status(session_id: str):
+    """查询 B站 QR 登录状态."""
+    sess = _BILI_LOGIN_SESSIONS.get(session_id)
+    if not sess:
+        return {"state": "expired"}
+
+    qr = sess["qr"]
+
+    if qr.has_done():
+        sess["state"] = "done"
+        return {"state": "done"}
+
+    try:
+        state = await qr.check_state()
+        state_str = state.value if hasattr(state, "value") else str(state)
+    except Exception as exc:
+        logger.warning("bili login check_state error: %s", exc)
+        return {"state": "error", "message": str(exc)}
+
+    if state == login_v2.QrCodeLoginEvents.TIMEOUT:
+        sess["state"] = "timeout"
+        _BILI_LOGIN_SESSIONS.pop(session_id, None)
+        return {"state": "timeout"}
+
+    if state == login_v2.QrCodeLoginEvents.SCANNED:
+        sess["state"] = "scanned"
+        return {"state": "scanned"}
+
+    if state == login_v2.QrCodeLoginEvents.CONFIRMED:
+        sess["state"] = "done"
+        return {"state": "done"}
+
+    return {"state": "waiting"}
+
+
+@app.post("/api/bili_login/save")
+async def api_bili_login_save(request: Request):
+    """保存 B站 二维码登录凭据并重启服务."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "bad request"}, status_code=400)
+    session_id = body.get("session_id", "")
+    sess = _BILI_LOGIN_SESSIONS.get(session_id)
+    if not sess:
+        return {"ok": False, "error": "session expired"}
+
+    qr = sess["qr"]
+    if not qr.has_done():
+        return {"ok": False, "error": "login not completed"}
+
+    try:
+        credential = qr.get_credential()
+    except Exception as exc:
+        return {"ok": False, "error": f"get credential failed: {exc}"}
+
+    # 保存凭据
+    cookies = credential.get_cookies()
+    store_path = Path(_CONFIG_YAML_PATH).parent / "data" / "credential.json"
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    store_path.write_text(
+        json.dumps({
+            "SESSDATA": cookies.get("SESSDATA", ""),
+            "bili_jct": cookies.get("bili_jct", ""),
+            "buvid3": cookies.get("buvid3", ""),
+            "DedeUserID": cookies.get("DedeUserID", ""),
+            "ac_time_value": cookies.get("ac_time_value", ""),
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    _BILI_LOGIN_SESSIONS.pop(session_id, None)
+
+    # 重启服务
+    import threading as _threading
+    def _restart():
+        import time as _t
+        _t.sleep(1)
+        try:
+            import subprocess as _sp
+            _sp.run(["systemctl", "restart", "bili-live-bot.service"],
+                    capture_output=True, text=True, timeout=30)
+        except Exception:
+            pass
+    _threading.Thread(target=_restart, daemon=True).start()
+
+    return {"ok": True, "message": "凭据已保存，服务正在重启..."}
+
+
+# ══════════════════════════════════════════════════════════════
 #  通用机器人配置 API
 # ══════════════════════════════════════════════════════════════
 
@@ -758,6 +895,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <button @click="tab='export'"  :class="tab==='export' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">精美导出</button>
         <button @click="tab='llm'"    :class="tab==='llm'    ?'text-blue-600 font-bold border-b-2 border-blue-600':''">AI 回复</button>
         <button @click="tab='config'" :class="tab==='config'?'text-blue-600 font-bold border-b-2 border-blue-600':''">机器人配置</button>
+        <button @click="tab='bili_login'" :class="tab==='bili_login'?'text-blue-600 font-bold border-b-2 border-blue-600':''">B站登录</button>
         <button @click="tab='manage'" :class="tab==='manage'?'text-blue-600 font-bold border-b-2 border-blue-600':''">数据管理</button>
         <button @click="tab='help'"  :class="tab==='help' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">帮助</button>
         <button @click="doLogout" class="text-gray-400 hover:text-red-500 ml-2">退出</button>
@@ -1117,6 +1255,55 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </div>
 </div>
 
+<!-- ══════ B站 扫码登录 ══════ -->
+<div v-if="tab==='bili_login'" class="max-w-lg mx-auto">
+    <div class="bg-white p-6 rounded-xl shadow-sm text-center space-y-4">
+        <h2 class="text-lg font-bold">🅱️ B 站扫码登录</h2>
+        <p class="text-sm text-gray-500">首次启动或 Cookie 过期时，使用 Bilibili App 扫码登录</p>
+
+        <div v-if="biliLoginState === 'idle'">
+            <button @click="startBiliLogin" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">📱 生成二维码</button>
+        </div>
+
+        <div v-if="biliLoginState === 'loading'" class="py-4">
+            <p class="text-gray-400">正在生成二维码...</p>
+        </div>
+
+        <div v-if="biliLoginState === 'waiting' || biliLoginState === 'scanned'" class="space-y-3">
+            <div class="flex justify-center">
+                <img :src="biliQrImage" class="border-2 border-gray-200 rounded-lg" style="width:200px;height:200px">
+            </div>
+            <div class="flex items-center justify-center gap-2">
+                <span v-if="biliLoginState==='waiting'" class="inline-block w-3 h-3 rounded-full bg-green-400 animate-pulse"></span>
+                <span v-if="biliLoginState==='scanned'" class="inline-block w-3 h-3 rounded-full bg-yellow-400 animate-pulse"></span>
+                <span class="text-sm">{{ biliLoginState === 'waiting' ? '等待扫码...' : '已扫码，请在手机上确认' }}</span>
+            </div>
+        </div>
+
+        <div v-if="biliLoginState === 'done'" class="space-y-3 py-4">
+            <div class="text-4xl text-green-500">✅</div>
+            <p class="text-green-600 font-bold">扫码成功！</p>
+            <button @click="saveBiliLogin" class="bg-green-500 hover:bg-green-600 text-white px-6 py-2 rounded text-sm">
+                保存凭据并重启服务
+            </button>
+        </div>
+
+        <div v-if="biliLoginState === 'saving'" class="py-4">
+            <p class="text-gray-400">正在保存凭据并重启服务...</p>
+        </div>
+
+        <div v-if="biliLoginState === 'timeout'" class="space-y-3">
+            <p class="text-red-500">⏰ 二维码已过期</p>
+            <button @click="startBiliLogin" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">重新生成</button>
+        </div>
+
+        <div v-if="biliLoginState === 'error'" class="space-y-3">
+            <p class="text-red-500">❌ {{ biliLoginError }}</p>
+            <button @click="startBiliLogin" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">重试</button>
+        </div>
+    </div>
+</div>
+
 <!-- ══════ 数据管理 ══════ -->
 <div v-if="tab==='manage'" class="max-w-lg mx-auto bg-white p-6 rounded-xl shadow-sm">
     <h2 class="text-lg font-bold mb-4 text-red-600">⚠️ 数据管理</h2>
@@ -1301,6 +1488,13 @@ createApp({
         const cfgSaveOk = ref(false);
         const restartMsg = ref('');
         const restartOk = ref(false);
+
+        // B站 登录
+        let biliPollTimer = null;
+        const biliLoginState = ref('idle');
+        const biliQrImage = ref('');
+        const biliLoginError = ref('');
+        const biliSessionId = ref('');
 
         let chartInst = null;
 
@@ -1643,6 +1837,75 @@ createApp({
             }
         }
 
+        // ── B站 扫码登录 ──
+        async function startBiliLogin() {
+            biliLoginState.value = 'loading';
+            biliLoginError.value = '';
+            if (biliPollTimer) { clearInterval(biliPollTimer); biliPollTimer = null; }
+            try {
+                const res = await fetch('/api/bili_login/start', {
+                    method: 'POST', credentials: 'include',
+                });
+                if (!res.ok) throw new Error('请求失败');
+                const data = await res.json();
+                if (!data.ok) throw new Error(data.error || '生成二维码失败');
+                biliQrImage.value = data.qr_image;
+                biliSessionId.value = data.session_id;
+                biliLoginState.value = 'waiting';
+                // 开始轮询
+                biliPollTimer = setInterval(pollBiliLogin, 2000);
+            } catch(e) {
+                biliLoginError.value = e.message;
+                biliLoginState.value = 'error';
+            }
+        }
+        async function pollBiliLogin() {
+            if (!biliSessionId.value) return;
+            try {
+                const res = await fetch('/api/bili_login/status?session_id=' + biliSessionId.value, {
+                    credentials: 'include',
+                });
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.state === 'done') {
+                    biliLoginState.value = 'done';
+                    if (biliPollTimer) { clearInterval(biliPollTimer); biliPollTimer = null; }
+                } else if (data.state === 'scanned') {
+                    biliLoginState.value = 'scanned';
+                } else if (data.state === 'timeout') {
+                    biliLoginState.value = 'timeout';
+                    if (biliPollTimer) { clearInterval(biliPollTimer); biliPollTimer = null; }
+                } else if (data.state === 'error') {
+                    biliLoginError.value = data.message || '登录失败';
+                    biliLoginState.value = 'error';
+                    if (biliPollTimer) { clearInterval(biliPollTimer); biliPollTimer = null; }
+                }
+            } catch(e) { /* ignore */ }
+        }
+        async function saveBiliLogin() {
+            biliLoginState.value = 'saving';
+            try {
+                const res = await fetch('/api/bili_login/save', {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({session_id: biliSessionId.value}),
+                });
+                if (!res.ok) throw new Error('保存失败');
+                const data = await res.json();
+                if (data.ok) {
+                    // 服务正在重启，自动登出
+                    setTimeout(() => { loggedIn.value = false; }, 2000);
+                } else {
+                    biliLoginError.value = data.error || '保存失败';
+                    biliLoginState.value = 'error';
+                }
+            } catch(e) {
+                biliLoginError.value = '保存失败: ' + e.message;
+                biliLoginState.value = 'error';
+            }
+        }
+
         // ── Restart ──
         async function restartService() {
             restartMsg.value = '';
@@ -1688,7 +1951,9 @@ createApp({
                 cfgPeriodicOn, cfgPeriodicInterval, cfgPeriodicTmpl,
                 botName,
                 cfgSaveMsg, cfgSaveOk, loadGeneralConfig, saveGeneralConfig,
-                restartMsg, restartOk, restartService};
+                restartMsg, restartOk, restartService,
+                biliLoginState, biliQrImage, biliLoginError,
+                startBiliLogin, saveBiliLogin};
     }
 }).mount('#app');
 </script>

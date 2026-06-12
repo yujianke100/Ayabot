@@ -1,4 +1,4 @@
-# bilibili-live-robot
+# bilibot
 
 轻量 B 站直播间弹幕机器人（单直播间、低资源常驻）。支持自动欢迎、送礼感谢、大航海答谢、盲盒统计、签到抽签、AI 智能回复（LLM 驱动）、自定义关键词回复，以及带登录认证的 Web 管理后台。
 
@@ -6,38 +6,22 @@
 
 ## 快速开始
 
-### 方式一：Python 本地运行
+### 方式一：Docker（推荐）
 
 ```bash
-# 1. 创建虚拟环境
-python3 -m venv .venv
-source .venv/bin/activate
+mkdir bilibot && cd bilibot
+wget https://raw.githubusercontent.com/yujianke100/bilibot/main/config.example.yaml -O config.yaml
+# 编辑 config.yaml 填写房间号、主播 UID、B 站 Cookie
 
-# 2. 安装依赖
-pip install -r requirements.txt
-
-# 3. 配置
-cp config.example.yaml config.yaml
-# 编辑 config.yaml，填写房间号、主播 UID、B 站 Cookie 等
-
-# 4. 启动
-python -m app.main
-```
-
-首次启动会打印二维码，使用 Bilibili App 扫码登录，凭据自动保存到 `data/credential.json`，后续重启自动复用。
-
-> 也可在 `config.yaml` 中直接填入 `credential` 下的 Cookie 字段（SESSDATA / bili_jct / buvid3 / DedeUserID）跳过扫码。
-
-### 方式二：Docker（推荐）
-
-```bash
 docker run -d \
   --name bili-bot \
-  -v /path/to/config.yaml:/app/config.yaml \
-  -v /path/to/data:/app/data \
+  -v ./config.yaml:/app/config.yaml \
+  -v ./data:/app/data \
   -p 8000:8000 \
-  ghcr.io/yujianke100/bilibili-live-robot:latest
+  yujianke100/bilibot:latest
 ```
+
+首次启动会打印二维码，使用 Bilibili App 扫码登录，凭据自动保存到 `data/credential.json`。
 
 或使用 docker-compose：
 
@@ -45,7 +29,7 @@ docker run -d \
 # docker-compose.yml
 services:
   bili-bot:
-    image: ghcr.io/yujianke100/bilibili-live-robot:latest
+    image: yujianke100/bilibot:latest
     container_name: bili-bot
     restart: unless-stopped
     ports:
@@ -59,6 +43,37 @@ services:
 
 ```bash
 docker compose up -d
+```
+
+### 方式二：Python 本地运行
+
+```bash
+git clone https://github.com/yujianke100/bilibot.git
+cd bilibot
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp config.example.yaml config.yaml
+# 编辑 config.yaml
+
+python -m app.main
+```
+
+---
+
+## 🔐 B 站登录
+
+首次启动或 Cookie 过期时，机器人会在终端打印二维码，扫码后自动保存凭据。
+
+**Web UI 也可扫码登录**：登录 Web 管理后台后，点击「B站登录」选项卡，显示二维码后用 Bilibili App 扫码，成功自动保存并重启服务。
+
+也可在 `config.yaml` 中直接填写 Cookie 字段跳过扫码：
+
+```yaml
+credential:
+  sessdata: "你的SESSDATA"
+  bili_jct: "你的bili_jct"
+  buvid3: "你的buvid3"
+  dedeuserid: "你的DedeUserID"
 ```
 
 ---
@@ -116,6 +131,7 @@ docker compose up -d
 | 模块 | 功能 |
 |------|------|
 | **🔐 登录** | 账号密码认证（可在 `config.yaml` 修改），Session 有效期可配置 |
+| **🅱️ B站登录** | 扫码登录 B 站（凭据过期或首次启动时使用） |
 | **📊 送礼排行** | 按日期范围查看送礼排行（支持礼物/盲盒/全部），含柱状图 |
 | **🎨 精美导出** | 按用户导出仿 B 站送礼明细卡片，自定义列宽和每列行数 |
 | **⚙️ 机器人配置** | 直播间 ID、主播 UID、冷却时间、限流参数、功能开关、回复模板、定时消息、机器人名称（需重启生效） |
@@ -129,54 +145,98 @@ docker compose up -d
 ### `config.yaml` 主要字段
 
 ```yaml
-# 直播间 & 主播
 room_display_id: 1946287911      # 直播间号
 anchor_uid: 1000000              # 主播 UID
 
-# B 站登录凭据（二选一：Cookie 或扫码）
 credential:
-  sessdata: ""                   # 浏览器 Cookie
+  sessdata: ""                   # B 站 Cookie（二选一：填写或首次扫码）
   bili_jct: ""
   buvid3: ""
   dedeuserid: ""
 
-# 功能开关
 features:
-  welcome_enabled: true          # 欢迎
-  thanks_enabled: true           # 送礼感谢
-  blindbox_enabled: true         # 盲盒统计
-  guard_thanks_enabled: true     # 大航海感谢
+  welcome_enabled: true
+  thanks_enabled: true
+  blindbox_enabled: true
+  guard_thanks_enabled: true
   connected_message_enabled: true
-  periodic_message_enabled: true # 定时消息
-  periodic_message_interval_seconds: 600  # 间隔（秒）
+  periodic_message_enabled: true
+  periodic_message_interval_seconds: 600
   periodic_message_template: "欢迎关注直播间~点个关注不迷路！"
 
-# Web 管理后台
 web_ui:
   enabled: true
   host: "0.0.0.0"
   port: 8000
   username: "admin"
   password: "your_password"
-  bot_name: "bilibot"            # 机器人名称（影响 UI 标题和帮助文本）
+  bot_name: "bilibot"            # 机器人名称（UI 标题 + 帮助文本）
 
-# LLM / AI 回复
 llm:
   enabled: false
   provider: "openai"             # "openai" 或 "anthropic"
   api_key: ""
   base_url: "https://api.openai.com/v1"
   model: "gpt-4o-mini"
-  wake_word: "bilibot"           # 弹幕唤醒词
+  wake_word: "bilibot"
   system_prompt: "你是bilibot，一个可爱温柔的虚拟主播助手。"
   temperature: 0.7
   top_p: 0.9
   max_tokens: 150
   context:
     enabled: true
-    mode: "isolated"             # "isolated"=按用户 / "merged"=合并
-    content: "llm_only"          # "llm_only"=仅AI对话 / "all"=所有弹幕
+    mode: "isolated"
+    content: "llm_only"
     max_messages: 10
+```
+
+---
+
+## Docker 构建
+
+代码推送到 `main` 分支后，GitHub Actions 自动构建并推送到：
+
+- **Docker Hub**（主）: `yujianke100/bilibot:latest`
+- **ghcr.io**（备用）: `ghcr.io/yujianke100/bilibot:latest`
+
+```bash
+docker pull yujianke100/bilibot:latest
+```
+
+### 🇨🇳 国内拉取加速
+
+Docker Hub 在国内有多个公共镜像站，可替代 `docker.io` 前缀直接拉取：
+
+```bash
+# 实用镜像站
+docker pull hub-mirror.c.163.com/yujianke100/bilibot:latest
+docker pull docker.mirrors.ustc.edu.cn/yujianke100/bilibot:latest
+```
+
+> ⚠️ 镜像站偶有失效。查看最新可用镜像站：
+> **[https://demo.kentxxq.com/app/mirror](https://demo.kentxxq.com/app/mirror)**
+
+**配置 Docker Daemon 全局镜像加速**（推荐，一劳永逸）：
+
+编辑 `/etc/docker/daemon.json`：
+
+```json
+{
+  "registry-mirrors": [
+    "https://docker.mirrors.ustc.edu.cn",
+    "https://hub-mirror.c.163.com"
+  ]
+}
+```
+
+然后 `systemctl restart docker`，之后 `docker pull` 命令自动走镜像。
+
+**手动构建**：
+
+```bash
+git clone https://github.com/yujianke100/bilibot.git
+cd bilibot
+docker build -t bili-bot .
 ```
 
 ---
@@ -199,72 +259,6 @@ llm:
 - **数据库**: SQLite（默认 `data/bot.db`），所有事件自动入库，**永不自动删除**
 - **登录凭据**: `data/credential.json`
 - **配置**: `config.yaml`
-
----
-
-## Docker 构建
-
-代码推送到 `main` 分支后，GitHub Actions 自动构建并推送到以下仓库：
-
-- **ghcr.io**: `ghcr.io/yujianke100/bilibili-live-robot:latest`
-- **Docker Hub**（如配置了密钥）: `docker.io/yujianke100/bilibili-live-robot:latest`
-
-```bash
-# 拉取最新镜像
-docker pull ghcr.io/yujianke100/bilibili-live-robot:latest
-```
-
-### 🇨🇳 国内拉取加速
-
-ghcr.io 在国内没有官方镜像，访问可能不稳定。推荐以下方式：
-
-**方案一：使用 Docker Hub 镜像加速（最简单）**
-
-在 GitHub 仓库 Settings → Secrets → Actions 中添加 `DOCKER_USERNAME` 和 `DOCKER_PASSWORD`，之后自动同步到 Docker Hub，然后通过内置镜像站拉取：
-
-```bash
-# 以下镜像站可直接替代 docker.io 前缀
-docker pull dockerproxy.com/yujianke100/bilibili-live-robot:latest
-docker pull hub-mirror.c.163.com/yujianke100/bilibili-live-robot:latest
-docker pull docker.mirrors.ustc.edu.cn/yujianke100/bilibili-live-robot:latest
-```
-
-**方案二：配置 Docker Daemon 镜像加速**
-
-编辑 `/etc/docker/daemon.json`：
-
-```json
-{
-  "registry-mirrors": [
-    "https://docker.mirrors.ustc.edu.cn",
-    "https://hub-mirror.c.163.com",
-    "https://dockerproxy.com"
-  ]
-}
-```
-
-然后 `systemctl restart docker`，之后 `docker pull ghcr.io/yujianke100/bilibili-live-robot:latest` 会自动走镜像。
-
-**方案三：手动构建**
-
-```bash
-git clone https://github.com/yujianke100/bilibili-live-robot.git
-cd bilibili-live-robot
-docker build -t bili-bot .
-```
-
----
-
-## 同步到国内镜像仓库
-
-如需将镜像同步到阿里云/腾讯云/华为云等国内容器镜像服务：
-
-1. 在这些平台创建命名空间和镜像仓库
-2. 在 GitHub 仓库 Settings → Secrets → Actions 中添加对应平台的用户名和密码（如 `ALIYUN_REGISTRY_USERNAME`、`ALIYUN_REGISTRY_PASSWORD`）
-3. 修改 `.github/workflows/docker.yml`，增加一个 `docker/login-action` 步骤指向国内 registry
-4. 下次 push 到 main 后自动同步
-
-> 也可在本地手动操作：`docker pull ghcr.io/yujianke100/bilibili-live-robot:latest && docker tag ... && docker push ...`
 
 ---
 

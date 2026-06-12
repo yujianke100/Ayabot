@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────
-#  bilibili-live-robot — 多阶段构建
+#  bilibot — B 站弹幕机器人（多阶段构建）
 # ──────────────────────────────────────────────
 
 # ── Stage 1: 依赖安装 ──
@@ -12,9 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ── Stage 2: 运行镜像 ──
 FROM python:3.11-slim
 
-LABEL org.opencontainers.image.title="bilibili-live-robot"
+LABEL org.opencontainers.image.title="bilibot"
 LABEL org.opencontainers.image.description="轻量 B 站直播间弹幕机器人"
-LABEL org.opencontainers.image.source="https://github.com/yujianke100/bilibili-live-robot"
+LABEL org.opencontainers.image.source="https://github.com/yujianke100/bilibot"
 LABEL org.opencontainers.image.licenses="MIT"
 
 WORKDIR /app
