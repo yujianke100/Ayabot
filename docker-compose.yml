@@ -2,14 +2,14 @@ services:
   bili-bot:
     # ── 镜像来源 ──
     # 主镜像（Docker Hub）:
-    #   docker pull yujianke100/bilibot:latest
+    #   docker pull yujianke100/ayabot:latest
     # 国内加速（Docker Hub 镜像站）:
-    #   docker pull hub-mirror.c.163.com/yujianke100/bilibot:latest
+    #   docker pull hub-mirror.c.163.com/yujianke100/ayabot:latest
     # 备用（ghcr.io）:
-    #   docker pull ghcr.io/yujianke100/bilibot:latest
+    #   docker pull ghcr.io/yujianke100/ayabot:latest
     # 手动构建:
     #   docker build -t bili-bot . ; 然后改 image: bili-bot
-    image: yujianke100/bilibot:latest
+    image: yujianke100/ayabot:latest
 
     container_name: bili-bot
     restart: unless-stopped

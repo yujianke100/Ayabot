@@ -1,4 +1,4 @@
-# bilibot
+# ayabot
 
 轻量 B 站直播间弹幕机器人（单直播间、低资源常驻）。支持自动欢迎、送礼感谢、大航海答谢、盲盒统计、签到抽签、AI 智能回复（LLM 驱动）、自定义关键词回复，以及带登录认证的 Web 管理后台。
 
@@ -9,8 +9,8 @@
 ### 方式一：Docker（推荐）
 
 ```bash
-mkdir bilibot && cd bilibot
-wget https://raw.githubusercontent.com/yujianke100/bilibot/main/config.example.yaml -O config.yaml
+mkdir ayabot && cd ayabot
+wget https://raw.githubusercontent.com/yujianke100/ayabot/main/config.example.yaml -O config.yaml
 # 编辑 config.yaml 填写房间号、主播 UID、B 站 Cookie
 
 docker run -d \
@@ -18,7 +18,7 @@ docker run -d \
   -v ./config.yaml:/app/config.yaml \
   -v ./data:/app/data \
   -p 8000:8000 \
-  yujianke100/bilibot:latest
+  yujianke100/ayabot:latest
 ```
 
 首次启动会打印二维码，使用 Bilibili App 扫码登录，凭据自动保存到 `data/credential.json`。
@@ -29,7 +29,7 @@ docker run -d \
 # docker-compose.yml
 services:
   bili-bot:
-    image: yujianke100/bilibot:latest
+    image: yujianke100/ayabot:latest
     container_name: bili-bot
     restart: unless-stopped
     ports:
@@ -48,8 +48,8 @@ docker compose up -d
 ### 方式二：Python 本地运行
 
 ```bash
-git clone https://github.com/yujianke100/bilibot.git
-cd bilibot
+git clone https://github.com/yujianke100/ayabot.git
+cd ayabot
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp config.example.yaml config.yaml
@@ -89,7 +89,7 @@ credential:
 | `#今日盲盒` | 今日盲盒统计 |
 | `#本月盲盒` / `#盲盒统计` | 本月盲盒汇总 |
 | `#本月盲盒:用户昵称` | 查询指定用户的盲盒汇总 |
-| `#bilibot <聊天内容>` | AI 智能回复（唤醒词和聊天内容可自定义） |
+| `#ayabot <聊天内容>` | AI 智能回复（唤醒词和聊天内容可自定义） |
 | `#帮助` | 显示所有命令 |
 
 > 所有中文指令支持全角/半角 `#`，如 `＃签到` 也可识别。
@@ -113,7 +113,7 @@ credential:
 
 ### AI 智能回复（LLM）
 
-- 自定义唤醒词（如 `#文文`、`#bilibot`）
+- 自定义唤醒词（如 `#文文`、`#ayabot`）
 - 支持 OpenAI / Anthropic 格式接口
 - 可自定义人设（System Prompt）
 - 内置三层防注入保护（预过滤 + 消息包裹 + 不可绕过的安全规则）
@@ -170,7 +170,7 @@ web_ui:
   port: 8000
   username: "admin"
   password: "your_password"
-  bot_name: "bilibot"            # 机器人名称（UI 标题 + 帮助文本）
+  bot_name: "ayabot"            # 机器人名称（UI 标题 + 帮助文本）
 
 llm:
   enabled: false
@@ -178,8 +178,8 @@ llm:
   api_key: ""
   base_url: "https://api.openai.com/v1"
   model: "gpt-4o-mini"
-  wake_word: "bilibot"
-  system_prompt: "你是bilibot，一个可爱温柔的虚拟主播助手。"
+  wake_word: "ayabot"
+  system_prompt: "你是ayabot，一个可爱温柔的虚拟主播助手。"
   temperature: 0.7
   top_p: 0.9
   max_tokens: 150
@@ -196,11 +196,11 @@ llm:
 
 代码推送到 `main` 分支后，GitHub Actions 自动构建并推送到：
 
-- **Docker Hub**（主）: `yujianke100/bilibot:latest`
-- **ghcr.io**（备用）: `ghcr.io/yujianke100/bilibot:latest`
+- **Docker Hub**（主）: `yujianke100/ayabot:latest`
+- **ghcr.io**（备用）: `ghcr.io/yujianke100/ayabot:latest`
 
 ```bash
-docker pull yujianke100/bilibot:latest
+docker pull yujianke100/ayabot:latest
 ```
 
 ### 🇨🇳 国内拉取加速
@@ -209,8 +209,8 @@ Docker Hub 在国内有多个公共镜像站，可替代 `docker.io` 前缀直�
 
 ```bash
 # 实用镜像站
-docker pull hub-mirror.c.163.com/yujianke100/bilibot:latest
-docker pull docker.mirrors.ustc.edu.cn/yujianke100/bilibot:latest
+docker pull hub-mirror.c.163.com/yujianke100/ayabot:latest
+docker pull docker.mirrors.ustc.edu.cn/yujianke100/ayabot:latest
 ```
 
 > ⚠️ 镜像站偶有失效。查看最新可用镜像站：
@@ -234,8 +234,8 @@ docker pull docker.mirrors.ustc.edu.cn/yujianke100/bilibot:latest
 **手动构建**：
 
 ```bash
-git clone https://github.com/yujianke100/bilibot.git
-cd bilibot
+git clone https://github.com/yujianke100/ayabot.git
+cd ayabot
 docker build -t bili-bot .
 ```
 

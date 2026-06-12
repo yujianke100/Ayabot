@@ -9,8 +9,8 @@
 #     DOCKER_PASSWORD: Docker Hub 访问令牌（Settings → Security → Access Tokens）
 #
 # 国内拉取加速（Docker Hub 镜像）:
-#   docker pull hub-mirror.c.163.com/yujianke100/bilibot:latest
-#   docker pull docker.mirrors.ustc.edu.cn/yujianke100/bilibot:latest
+#   docker pull hub-mirror.c.163.com/yujianke100/ayabot:latest
+#   docker pull docker.mirrors.ustc.edu.cn/yujianke100/ayabot:latest
 #
 # 最新可用镜像站查询:
 #   https://demo.kentxxq.com/app/mirror
@@ -26,8 +26,8 @@ on:
   workflow_dispatch:
 
 env:
-  GHCR_IMAGE: ghcr.io/yujianke100/bilibot
-  DOCKERHUB_IMAGE: ${{ secrets.DOCKER_USERNAME && format('{0}/bilibot', secrets.DOCKER_USERNAME) || '' }}
+  GHCR_IMAGE: ghcr.io/yujianke100/ayabot
+  DOCKERHUB_IMAGE: ${{ secrets.DOCKER_USERNAME && format('{0}/ayabot', secrets.DOCKER_USERNAME) || '' }}
 
 jobs:
   build:

@@ -102,7 +102,7 @@ class WebUIConfig:
     password: str
     session_timeout: int
     title: str
-    bot_name: str = "bilibot"
+    bot_name: str = "ayabot"
 
 
 @dataclass(slots=True)
@@ -120,11 +120,11 @@ class LLMConfig:
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4o-mini"
-    wake_word: str = "bilibot"
+    wake_word: str = "ayabot"
     temperature: float = 0.7
     top_p: float = 0.9
     max_tokens: int = 150
-    system_prompt: str = "你是bilibot，一个可爱温柔的虚拟主播助手。"
+    system_prompt: str = "你是ayabot，一个可爱温柔的虚拟主播助手。"
     context: LLMContextConfig = None    # type: ignore[assignment]
 
 
@@ -253,7 +253,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             password=str(web_ui.get("password", "admin")),
             session_timeout=int(web_ui.get("session_timeout", 3600)),
             title=str(web_ui.get("title", "BILIBILI-LIVE-ROBOT")),
-            bot_name=str(web_ui.get("bot_name", "bilibot")),
+            bot_name=str(web_ui.get("bot_name", "ayabot")),
         ),
         llm=LLMConfig(
             enabled=bool(llm.get("enabled", False)),
@@ -261,11 +261,11 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             api_key=str(llm.get("api_key", "")),
             base_url=str(llm.get("base_url", "https://api.openai.com/v1")),
             model=str(llm.get("model", "gpt-4o-mini")),
-            wake_word=str(llm.get("wake_word", "bilibot")),
+            wake_word=str(llm.get("wake_word", "ayabot")),
             temperature=float(llm.get("temperature", 0.7)),
             top_p=float(llm.get("top_p", 0.9)),
             max_tokens=int(llm.get("max_tokens", 150)),
-            system_prompt=str(llm.get("system_prompt", "你是bilibot，一个可爱温柔的虚拟主播助手。")),
+            system_prompt=str(llm.get("system_prompt", "你是ayabot，一个可爱温柔的虚拟主播助手。")),
             context=LLMContextConfig(
                 enabled=bool(llm_ctx.get("enabled", True)),
                 mode=str(llm_ctx.get("mode", "isolated")),

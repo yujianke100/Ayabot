@@ -66,7 +66,7 @@ class LiveRobot:
         self._keyword_reply_cooldown_ts: dict[int, float] = {}
 
         # 从配置读取唤醒词
-        wake = getattr(config.llm, 'wake_word', 'bilibot')
+        wake = getattr(config.llm, 'wake_word', 'ayabot')
         _set_wake_word(wake)
 
     async def run(self) -> None:
@@ -554,7 +554,7 @@ class LiveRobot:
                 temperature=float(cfg.get("temperature", 0.7)),
                 top_p=float(cfg.get("top_p", 0.9)),
                 max_tokens=int(cfg.get("max_tokens", 150)),
-                system_prompt=cfg.get("system_prompt", "你是bilibot，一个可爱温柔的虚拟主播助手。"),
+                system_prompt=cfg.get("system_prompt", "你是ayabot，一个可爱温柔的虚拟主播助手。"),
                 bot_name=_CURRENT_WAKE_WORD,
             )
 
@@ -1060,7 +1060,7 @@ def _parse_command(text: str) -> Optional[tuple[str, str]]:
 #  可配置唤醒词
 # ══════════════════════════════════════════════════════════════
 
-_CURRENT_WAKE_WORD = "bilibot"
+_CURRENT_WAKE_WORD = "ayabot"
 
 
 def _set_wake_word(word: str) -> None:

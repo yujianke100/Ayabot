@@ -82,8 +82,8 @@ class LLMClient:
         temperature: float = 0.7,
         top_p: float = 0.9,
         max_tokens: int = 150,
-        system_prompt: str = "你是bilibot，一个可爱温柔的虚拟主播助手。",
-        bot_name: str = "bilibot",
+        system_prompt: str = "你是ayabot，一个可爱温柔的虚拟主播助手。",
+        bot_name: str = "ayabot",
     ) -> None:
         self.provider = provider
         self.api_key = api_key
