@@ -450,7 +450,7 @@ class LiveRobot:
                     await self._enqueue_reply(text=f"未找到{arg}的盲盒记录", reply_uid=uid)
                     return
                 _uid, blind_count, cost_total, actual_total, profit_total = result
-                text_out = f"{month_label}{arg}盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
+                text_out = f"{month_label}该用户盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
             else:
                 # If anchor or admin, show total stats of the room
                 if uid == self.config.anchor_uid or self._has_control_permission(uid, moderator_hint):
@@ -480,7 +480,7 @@ class LiveRobot:
                     await self._enqueue_reply(text=f"未找到{arg}今日的盲盒记录", reply_uid=uid)
                     return
                 _uid, blind_count, cost_total, actual_total, profit_total = result
-                text_out = f"今日{arg}盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
+                text_out = f"今日该用户盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
             else:
                 if uid == self.config.anchor_uid or self._has_control_permission(uid, moderator_hint):
                     total = self.store.get_today_total_blindbox(today_start, today_end)
