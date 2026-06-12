@@ -74,7 +74,6 @@ def init_app(config: Any = None) -> None:
         "temperature": config.llm.temperature,
         "top_p": config.llm.top_p,
         "max_tokens": config.llm.max_tokens,
-        "context_window": config.llm.context_window,
         "system_prompt": config.llm.system_prompt,
         "context": {
             "enabled": config.llm.context.enabled,
@@ -274,10 +273,10 @@ async def api_ranking(start: str, end: str, gift_type: str = "all"):
     """
     try:
         s_start, _ = _parse_date(start)
-        e_start, _ = _parse_date(end)
+        _, e_end = _parse_date(end)
 
         where_clause = "ts >= ? AND ts < ?"
-        params: list[Any] = [s_start, e_start]
+        params: list[Any] = [s_start, e_end]
 
         if gift_type == "blindbox":
             where_clause += " AND is_blind_box = 1"
@@ -479,7 +478,6 @@ async def api_get_llm_config():
         "temperature": _LLM_CONFIG_DICT.get("temperature", 0.7),
         "top_p": _LLM_CONFIG_DICT.get("top_p", 0.9),
         "max_tokens": _LLM_CONFIG_DICT.get("max_tokens", 150),
-        "context_window": _LLM_CONFIG_DICT.get("context_window", 4096),
         "system_prompt": _LLM_CONFIG_DICT.get("system_prompt", ""),
         "context": {
             "enabled": ctx.get("enabled", True),
@@ -499,7 +497,7 @@ async def api_save_llm_config(request: Request):
         return JSONResponse({"error": "bad request"}, status_code=400)
 
     # 更新内存中的配置
-    for key in ("enabled", "provider", "api_key", "base_url", "model", "wake_word", "temperature", "top_p", "max_tokens", "context_window", "system_prompt"):
+    for key in ("enabled", "provider", "api_key", "base_url", "model", "wake_word", "temperature", "top_p", "max_tokens", "system_prompt"):
         if key in body:
             _LLM_CONFIG_DICT[key] = body[key]
     if "context" in body and isinstance(body["context"], dict):
@@ -523,7 +521,6 @@ async def api_save_llm_config(request: Request):
         llm_section["temperature"] = _LLM_CONFIG_DICT.get("temperature", 0.7)
         llm_section["top_p"] = _LLM_CONFIG_DICT.get("top_p", 0.9)
         llm_section["max_tokens"] = _LLM_CONFIG_DICT.get("max_tokens", 150)
-        llm_section["context_window"] = _LLM_CONFIG_DICT.get("context_window", 4096)
         llm_section["system_prompt"] = _LLM_CONFIG_DICT.get("system_prompt", "")
         llm_section["context"] = {
             "enabled": _LLM_CONFIG_DICT.get("context", {}).get("enabled", True),
@@ -1011,10 +1008,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <label class="text-xs text-gray-500">最大 Token
                 <input type="number" v-model.number="llmMaxTokens" min="1" max="2000" class="border p-2 rounded w-full text-sm mt-1">
             </label>
-            <label class="text-xs text-gray-500">模型上下文窗口
-                <input type="number" v-model.number="llmCtxWindow" min="1024" max="1048576" step="1024" class="border p-2 rounded w-full text-sm mt-1">
-                <span class="text-xs text-gray-400">如 4096, 8192, 32768, 128000</span>
-            </label>
         </div>
 
         <label class="text-xs text-gray-500">API Key
@@ -1162,7 +1155,6 @@ createApp({
         const llmTemp = ref(0.7);
         const llmTopP = ref(0.9);
         const llmMaxTokens = ref(150);
-        const llmCtxWindow = ref(4096);
         const llmPrompt = ref('');
         const llmSaveMsg = ref('');
         const llmSaveOk = ref(false);
@@ -1360,7 +1352,6 @@ createApp({
                 llmTemp.value = data.temperature ?? 0.7;
                 llmTopP.value = data.top_p ?? 0.9;
                 llmMaxTokens.value = data.max_tokens ?? 150;
-                llmCtxWindow.value = data.context_window ?? 4096;
                 llmPrompt.value = data.system_prompt;
                 if (data.has_api_key) {
                     llmApiKey.value = '********';
@@ -1384,7 +1375,6 @@ createApp({
                 temperature: llmTemp.value,
                 top_p: llmTopP.value,
                 max_tokens: llmMaxTokens.value,
-                context_window: llmCtxWindow.value,
                 system_prompt: llmPrompt.value,
                 context: {
                     enabled: ctxEnabled.value,

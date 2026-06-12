@@ -530,7 +530,6 @@ class LiveRobot:
                 temperature=float(cfg.get("temperature", 0.7)),
                 top_p=float(cfg.get("top_p", 0.9)),
                 max_tokens=int(cfg.get("max_tokens", 150)),
-                context_window=int(cfg.get("context_window", 4096)),
                 system_prompt=cfg.get("system_prompt", "你是文文，一个可爱温柔的虚拟主播助手。"),
             )
 
