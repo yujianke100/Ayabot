@@ -504,10 +504,6 @@ class LiveRobot:
                 text="#签到 #抽签 #今日盲盒 #本月盲盒",
                 reply_uid=uid,
             )
-            await self._enqueue_reply(
-                text="#盲盒统计:名 #欢迎:开/关 #欢迎词",
-                reply_uid=uid,
-            )
             return
 
         if name == "checkin":
