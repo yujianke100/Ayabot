@@ -16,7 +16,7 @@ logger = logging.getLogger("bili-live-robot.llm")
 
 _INJECTION_PATTERNS: list[re.Pattern] = [
     # 忽略/忘记历史指令
-    re.compile(r"(忽略|忘记|无视)(所有|之前|以上|我)?的?(指令|命令|要求|设定|规则|告诉)"),
+    re.compile(r"(忽略|忘记|忘了|无视).{0,10}(指令|命令|要求|设定|规则|告诉|提示)"),
     re.compile(r"(不用|不要|别再)(管|理|遵守|执行|遵循)(系统|设定|规则)"),
     # 输出系统信息
     re.compile(r"(输出|打印|显示|复制|重复|告诉我)(你(的|的)?|系统)((初始|原始|默认|系统)?(设定|指令|提示词|prompt|system prompt|规则))"),
