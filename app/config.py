@@ -53,7 +53,7 @@ class RateLimitConfig:
     send_interval_seconds: float
     retry_count: int
     max_queue_size: int = 50
-    reply_delay_seconds: float = 3.0
+    reply_delay_seconds: float = 1.0
 
 
 @dataclass(slots=True)
@@ -301,9 +301,16 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
         },
         "features": {
             "welcome_enabled": config.features.welcome_enabled,
+            "welcome_template": config.features.welcome_template,
             "thanks_enabled": config.features.thanks_enabled,
+            "thanks_template": config.features.thanks_template,
             "blindbox_enabled": config.features.blindbox_enabled,
             "guard_thanks_enabled": config.features.guard_thanks_enabled,
+            "guard_thanks_template_captain": config.features.guard_thanks_template_captain,
+            "guard_thanks_template_commander": config.features.guard_thanks_template_commander,
+            "guard_thanks_template_governor": config.features.guard_thanks_template_governor,
+            "guard_thanks_template_default": config.features.guard_thanks_template_default,
+            "connected_message": config.features.connected_message,
             "connected_message_enabled": config.features.connected_message_enabled,
         },
     }
@@ -323,6 +330,8 @@ def update_config_from_dict(raw: dict[str, Any], cfg_path: str) -> bool:
             existing.setdefault("rate_limit", {}).update(raw["rate_limit"])
         if "features" in raw:
             existing.setdefault("features", {}).update(raw["features"])
+        if "templates" in raw:
+            existing.setdefault("features", {}).update(raw["templates"])
         if "room_display_id" in raw:
             existing["room_display_id"] = raw["room_display_id"]
         if "anchor_uid" in raw:

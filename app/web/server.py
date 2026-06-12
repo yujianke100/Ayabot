@@ -759,6 +759,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <button @click="tab='llm'"    :class="tab==='llm'    ?'text-blue-600 font-bold border-b-2 border-blue-600':''">AI 回复</button>
         <button @click="tab='config'" :class="tab==='config'?'text-blue-600 font-bold border-b-2 border-blue-600':''">机器人配置</button>
         <button @click="tab='manage'" :class="tab==='manage'?'text-blue-600 font-bold border-b-2 border-blue-600':''">数据管理</button>
+        <button @click="tab='help'"  :class="tab==='help' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">帮助</button>
         <button @click="doLogout" class="text-gray-400 hover:text-red-500 ml-2">退出</button>
     </div>
 </header>
@@ -914,10 +915,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
         <div class="grid grid-cols-2 gap-4">
             <label class="text-xs text-gray-500">直播间 ID
-                <input type="number" v-model.number="cfgRoomId" class="border p-2 rounded w-full text-sm mt-1" disabled>
+                <input type="number" v-model.number="cfgRoomId" class="border p-2 rounded w-full text-sm mt-1">
             </label>
             <label class="text-xs text-gray-500">主播 UID
-                <input type="number" v-model.number="cfgAnchorUid" class="border p-2 rounded w-full text-sm mt-1" disabled>
+                <input type="number" v-model.number="cfgAnchorUid" class="border p-2 rounded w-full text-sm mt-1">
             </label>
         </div>
 
@@ -957,6 +958,32 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgBlindboxOn" class="w-4 h-4"> 盲盒统计</label>
             <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgGuardOn" class="w-4 h-4"> 大航海感谢</label>
             <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgConnectedMsg" class="w-4 h-4"> 连接消息</label>
+        </div>
+
+        <hr>
+        <h3 class="text-sm font-bold">📝 回复模板</h3>
+        <div class="space-y-3">
+            <label class="text-xs text-gray-500 block">欢迎模板
+                <input type="text" v-model="cfgWelcomeTmpl" placeholder="欢迎{uname}来到直播间" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500 block">感谢模板
+                <input type="text" v-model="cfgThanksTmpl" placeholder="感谢{uname}的{gift_name}x{gift_num}!" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500 block">大航海 - 舰长
+                <input type="text" v-model="cfgGuardCaptain" placeholder="感谢{uname}上舰！" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500 block">大航海 - 提督
+                <input type="text" v-model="cfgGuardCommander" placeholder="感谢{uname}支持！" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500 block">大航海 - 总督
+                <input type="text" v-model="cfgGuardGovernor" placeholder="感谢{uname}支持！" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500 block">大航海 - 默认
+                <input type="text" v-model="cfgGuardDefault" placeholder="感谢{uname}开通大航海！" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500 block">连接消息
+                <input type="text" v-model="cfgConnMsg" placeholder="文文来了喵~" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
         </div>
 
         <div class="flex items-center gap-4 mt-4">
@@ -1076,6 +1103,59 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <div v-if="delResult" class="mt-4 text-sm">{{ delResult }}</div>
 </div>
 
+
+<!-- ══════ 帮助页面 ══════ -->
+<div v-if="tab==='help'" class="max-w-3xl mx-auto">
+    <div class="bg-white p-6 rounded-xl shadow-sm space-y-6 text-sm leading-relaxed">
+        <h2 class="text-lg font-bold">📖 使用指南</h2>
+
+        <div>
+            <h3 class="font-bold text-blue-600 mb-1">🎯 弹幕命令</h3>
+            <table class="w-full text-xs border-collapse">
+                <thead><tr class="bg-gray-100"><th class="border p-1 text-left">命令</th><th class="border p-1 text-left">说明</th></tr></thead>
+                <tbody>
+                    <tr><td class="border p-1"><code>#签到</code></td><td class="border p-1">每日签到（按直播场次计算）</td></tr>
+                    <tr><td class="border p-1"><code>#抽签</code></td><td class="border p-1">今日运势抽签</td></tr>
+                    <tr><td class="border p-1"><code>#今日盲盒</code></td><td class="border p-1">今日盲盒统计</td></tr>
+                    <tr><td class="border p-1"><code>#本月盲盒</code></td><td class="border p-1">本月盲盒统计</td></tr>
+                    <tr><td class="border p-1"><code>#{{ llmWakeWord || '文文' }} 消息</code></td><td class="border p-1">AI 智能回复（需在 AI 回复页开启）</td></tr>
+                    <tr><td class="border p-1"><code>#帮助</code></td><td class="border p-1">显示所有命令</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div>
+            <h3 class="font-bold text-blue-600 mb-1">🤖 功能介绍</h3>
+            <ul class="list-disc pl-4 space-y-1 text-xs">
+                <li><b>欢迎</b> — 新观众进入直播间时自动发送欢迎消息</li>
+                <li><b>感谢</b> — 观众送礼物/盲盒时自动感谢</li>
+                <li><b>大航海感谢</b> — 舰长/提督/总督购买时自动感谢</li>
+                <li><b>关键词回复</b> — 设定关键词自动回复（如「群」回复群号）</li>
+                <li><b>AI 回复</b> — 唤醒词触发 LLM 智能对话，支持自定义人设和上下文记忆</li>
+                <li><b>连接消息</b> — 机器人成功连接直播间时发送消息</li>
+            </ul>
+        </div>
+
+        <div>
+            <h3 class="font-bold text-blue-600 mb-1">⚙️ 配置提示</h3>
+            <ul class="list-disc pl-4 space-y-1 text-xs">
+                <li>机器人配置修改后需要点击「重启服务」按钮才能生效</li>
+                <li>AI 回复配置保存后立即生效，无需重启</li>
+                <li>直播间 ID 和主播 UID 修改后需要重启才能生效</li>
+                <li>如果收不到弹幕命令回复，可以尝试调大「回复延迟」或「弹幕发送间隔」</li>
+            </ul>
+        </div>
+
+        <div>
+            <h3 class="font-bold text-blue-600 mb-1">🎨 界面功能</h3>
+            <ul class="list-disc pl-4 space-y-1 text-xs">
+                <li><b>送礼排行</b> — 按日期范围查看送礼排行（支持礼物/盲盒/全部）</li>
+                <li><b>精美导出</b> — 按用户导出精美礼物卡片，支持多列布局</li>
+                <li><b>数据管理</b> — 删除指定日期之前的旧数据</li>
+            </ul>
+        </div>
+    </div>
+</div>
 </div><!-- /loggedIn -->
 
 </div>
@@ -1175,12 +1255,19 @@ createApp({
         const cfgSendInterval = ref(1.2);
         const cfgRetry = ref(2);
         const cfgMaxQueue = ref(50);
-        const cfgReplyDelay = ref(3.0);
+        const cfgReplyDelay = ref(1.0);
         const cfgWelcomeOn = ref(true);
         const cfgThanksOn = ref(true);
         const cfgBlindboxOn = ref(true);
         const cfgGuardOn = ref(true);
         const cfgConnectedMsg = ref(false);
+        const cfgWelcomeTmpl = ref('');
+        const cfgThanksTmpl = ref('');
+        const cfgGuardCaptain = ref('');
+        const cfgGuardCommander = ref('');
+        const cfgGuardGovernor = ref('');
+        const cfgGuardDefault = ref('');
+        const cfgConnMsg = ref('');
         const cfgSaveMsg = ref('');
         const cfgSaveOk = ref(false);
         const restartMsg = ref('');
@@ -1454,12 +1541,19 @@ createApp({
                 cfgSendInterval.value = data.rate_limit?.send_interval_seconds ?? 1.2;
                 cfgRetry.value = data.rate_limit?.retry_count ?? 2;
                 cfgMaxQueue.value = data.rate_limit?.max_queue_size ?? 50;
-                cfgReplyDelay.value = data.rate_limit?.reply_delay_seconds ?? 3.0;
+                cfgReplyDelay.value = data.rate_limit?.reply_delay_seconds ?? 1.0;
                 cfgWelcomeOn.value = data.features?.welcome_enabled ?? true;
                 cfgThanksOn.value = data.features?.thanks_enabled ?? true;
                 cfgBlindboxOn.value = data.features?.blindbox_enabled ?? true;
                 cfgGuardOn.value = data.features?.guard_thanks_enabled ?? true;
                 cfgConnectedMsg.value = data.features?.connected_message_enabled ?? false;
+                cfgWelcomeTmpl.value = data.features?.welcome_template || '';
+                cfgThanksTmpl.value = data.features?.thanks_template || '';
+                cfgGuardCaptain.value = data.features?.guard_thanks_template_captain || '';
+                cfgGuardCommander.value = data.features?.guard_thanks_template_commander || '';
+                cfgGuardGovernor.value = data.features?.guard_thanks_template_governor || '';
+                cfgGuardDefault.value = data.features?.guard_thanks_template_default || '';
+                cfgConnMsg.value = data.features?.connected_message || '';
             } catch(e) { /* ignore */ }
         }
         async function saveGeneralConfig() {
@@ -1482,9 +1576,16 @@ createApp({
                         },
                         features: {
                             welcome_enabled: cfgWelcomeOn.value,
+                            welcome_template: cfgWelcomeTmpl.value,
                             thanks_enabled: cfgThanksOn.value,
+                            thanks_template: cfgThanksTmpl.value,
                             blindbox_enabled: cfgBlindboxOn.value,
                             guard_thanks_enabled: cfgGuardOn.value,
+                            guard_thanks_template_captain: cfgGuardCaptain.value,
+                            guard_thanks_template_commander: cfgGuardCommander.value,
+                            guard_thanks_template_governor: cfgGuardGovernor.value,
+                            guard_thanks_template_default: cfgGuardDefault.value,
+                            connected_message: cfgConnMsg.value,
                             connected_message_enabled: cfgConnectedMsg.value,
                         },
                     }),
@@ -1546,6 +1647,7 @@ createApp({
                 cfgRoomId, cfgAnchorUid, cfgWelcomeCd, cfgThanksCd,
                 cfgSendInterval, cfgRetry, cfgMaxQueue, cfgReplyDelay,
                 cfgWelcomeOn, cfgThanksOn, cfgBlindboxOn, cfgGuardOn, cfgConnectedMsg,
+                cfgWelcomeTmpl, cfgThanksTmpl, cfgGuardCaptain, cfgGuardCommander, cfgGuardGovernor, cfgGuardDefault, cfgConnMsg,
                 cfgSaveMsg, cfgSaveOk, loadGeneralConfig, saveGeneralConfig,
                 restartMsg, restartOk, restartService};
     }
