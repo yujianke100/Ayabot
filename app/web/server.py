@@ -1199,6 +1199,8 @@ createApp({
                 });
                 if (!res.ok) { loginErr.value = '账号或密码错误'; return; }
                 loggedIn.value = true;
+                await loadLlmConfig();
+                await loadGeneralConfig();
             } catch(e) { loginErr.value = '登录失败: ' + e.message; }
         }
         function doLogout() {
