@@ -1,8 +1,18 @@
-# GitHub Container Registry 设置
-# 1. 在 GitHub 仓库 Settings → Actions → General → 底部 Workflow permissions → 选
-#    "Read and write permissions"
-# 2. 确保 GHCR_TOKEN 或自动可用（默认 GITHUB_TOKEN 有写入权限）
-# 3. 镜像地址: ghcr.io/<owner>/bilibili-live-robot:latest
+# ── Docker 镜像构建与多仓库推送 ──
+#
+# 自动推送到:
+#   1. ghcr.io — 默认（无需额外配置）
+#   2. Docker Hub — 可选，适合国内用户通过镜像加速拉取
+#
+# 启用 Docker Hub 推送:
+#   仓库 → Settings → Secrets → Actions → 添加:
+#     DOCKER_USERNAME: Docker Hub 用户名
+#     DOCKER_PASSWORD: Docker Hub 访问令牌（Settings → Security → Access Tokens）
+#
+# 国内拉取加速（Docker Hub 镜像）:
+#   docker pull dockerproxy.com/yujianke100/bilibili-live-robot:latest
+#   docker pull hub-mirror.c.163.com/yujianke100/bilibili-live-robot:latest
+#   docker pull docker.mirrors.ustc.edu.cn/yujianke100/bilibili-live-robot:latest
 
 name: Build & Push Docker Image
 
@@ -15,8 +25,8 @@ on:
   workflow_dispatch:
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
+  DOCKERHUB_IMAGE: ${{ secrets.DOCKER_USERNAME && format('{0}/bilibili-live-robot', secrets.DOCKER_USERNAME) || '' }}
 
 jobs:
   build:
@@ -28,26 +38,56 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ── 登录 ghcr.io ──
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata
-        id: meta
+      # ── 登录 Docker Hub（如配置了密钥） ──
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_IMAGE != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # ── 元数据 ──
+      - name: Extract metadata for ghcr.io
+        id: meta_ghcr
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.GHCR_IMAGE }}
           tags: |
             type=raw,value=latest,enable={{ is_default_branch }}
             type=sha,format=short
 
-      - name: Build and push
+      - name: Extract metadata for Docker Hub
+        id: meta_hub
+        if: env.DOCKERHUB_IMAGE != ''
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{ is_default_branch }}
+            type=sha,format=short
+
+      # ── 构建 & 推送 ──
+      - name: Build and push to ghcr.io
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta_ghcr.outputs.tags }}
+          labels: ${{ steps.meta_ghcr.outputs.labels }}
+
+      - name: Build and push to Docker Hub
+        if: env.DOCKERHUB_IMAGE != ''
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta_hub.outputs.tags }}
+          labels: ${{ steps.meta_hub.outputs.labels }}

@@ -1,0 +1,33 @@
+version: "3"
+
+services:
+  bili-bot:
+    # ── 镜像来源 ──
+    # ghcr.io 在国内可能访问较慢，可用以下替代方案：
+    #
+    #   方式 A: 使用 Docker Hub 镜像加速（推荐）
+    #     image: dockerproxy.com/yujianke100/bilibili-live-robot:latest
+    #
+    #   方式 B: 使用阿里云加速（需要先登录 registry.cn-hangzhou.aliyuncs.com）
+    #     image: registry.cn-hangzhou.aliyuncs.com/your-namespace/bilibili-live-robot:latest
+    #
+    #   方式 C: 手动构建
+    #     docker build -t bili-bot .
+    #     然后改 image: bili-bot
+    #
+    image: ghcr.io/yujianke100/bilibili-live-robot:latest
+
+    container_name: bili-bot
+    restart: unless-stopped
+
+    ports:
+      - "8000:8000"          # Web 管理后台
+
+    volumes:
+      # 配置文件（必须）— 从 config.example.yaml 复制修改
+      - ./config.yaml:/app/config.yaml
+      # 数据持久化（SQLite + 登录凭据）
+      - ./data:/app/data
+
+    environment:
+      - TZ=Asia/Shanghai

@@ -42,7 +42,7 @@ docker run -d \
 或使用 docker-compose：
 
 ```yaml
-version: "3"
+# docker-compose.yml
 services:
   bili-bot:
     image: ghcr.io/yujianke100/bilibili-live-robot:latest
@@ -53,6 +53,12 @@ services:
     volumes:
       - ./config.yaml:/app/config.yaml
       - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+```
+
+```bash
+docker compose up -d
 ```
 
 ---
@@ -198,18 +204,67 @@ llm:
 
 ## Docker 构建
 
-代码推送到 `main` 分支后，GitHub Actions 自动构建并推送到 [ghcr.io](https://github.com/yujianke100/bilibili-live-robot/pkgs/container/bilibili-live-robot)：
+代码推送到 `main` 分支后，GitHub Actions 自动构建并推送到以下仓库：
+
+- **ghcr.io**: `ghcr.io/yujianke100/bilibili-live-robot:latest`
+- **Docker Hub**（如配置了密钥）: `docker.io/yujianke100/bilibili-live-robot:latest`
 
 ```bash
 # 拉取最新镜像
 docker pull ghcr.io/yujianke100/bilibili-live-robot:latest
 ```
 
-也可手动构建：
+### 🇨🇳 国内拉取加速
+
+ghcr.io 在国内没有官方镜像，访问可能不稳定。推荐以下方式：
+
+**方案一：使用 Docker Hub 镜像加速（最简单）**
+
+在 GitHub 仓库 Settings → Secrets → Actions 中添加 `DOCKER_USERNAME` 和 `DOCKER_PASSWORD`，之后自动同步到 Docker Hub，然后通过内置镜像站拉取：
 
 ```bash
-docker build -t bilibili-live-robot .
+# 以下镜像站可直接替代 docker.io 前缀
+docker pull dockerproxy.com/yujianke100/bilibili-live-robot:latest
+docker pull hub-mirror.c.163.com/yujianke100/bilibili-live-robot:latest
+docker pull docker.mirrors.ustc.edu.cn/yujianke100/bilibili-live-robot:latest
 ```
+
+**方案二：配置 Docker Daemon 镜像加速**
+
+编辑 `/etc/docker/daemon.json`：
+
+```json
+{
+  "registry-mirrors": [
+    "https://docker.mirrors.ustc.edu.cn",
+    "https://hub-mirror.c.163.com",
+    "https://dockerproxy.com"
+  ]
+}
+```
+
+然后 `systemctl restart docker`，之后 `docker pull ghcr.io/yujianke100/bilibili-live-robot:latest` 会自动走镜像。
+
+**方案三：手动构建**
+
+```bash
+git clone https://github.com/yujianke100/bilibili-live-robot.git
+cd bilibili-live-robot
+docker build -t bili-bot .
+```
+
+---
+
+## 同步到国内镜像仓库
+
+如需将镜像同步到阿里云/腾讯云/华为云等国内容器镜像服务：
+
+1. 在这些平台创建命名空间和镜像仓库
+2. 在 GitHub 仓库 Settings → Secrets → Actions 中添加对应平台的用户名和密码（如 `ALIYUN_REGISTRY_USERNAME`、`ALIYUN_REGISTRY_PASSWORD`）
+3. 修改 `.github/workflows/docker.yml`，增加一个 `docker/login-action` 步骤指向国内 registry
+4. 下次 push 到 main 后自动同步
+
+> 也可在本地手动操作：`docker pull ghcr.io/yujianke100/bilibili-live-robot:latest && docker tag ... && docker push ...`
 
 ---
 
