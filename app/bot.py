@@ -347,7 +347,7 @@ class LiveRobot:
     async def _on_danmaku(self, event: dict[str, Any]) -> None:
         parsed = _parse_danmaku_user_and_text(event)
         if parsed is None:
-            self.logger.debug("danmaku parse failed: event=%s", event)
+            self.logger.warning("danmaku parse failed: raw_event_type=%s keys=%s", event.get("type"), list(event.get("data", {}).keys() if event.get("data") else []))
             return
 
         uid, uname, text, moderator_hint = parsed
@@ -419,6 +419,7 @@ class LiveRobot:
             return
 
         if name == "checkin":
+            self.logger.info("checkin command: uid=%s uname=%s", uid, uname)
             days, rank, already = self.store.user_checkin(uid, uname)
             if already:
                 msg = f"今天已经签到了哦！连续签到{days}天，排名第{rank}。继续坚持喵~"
