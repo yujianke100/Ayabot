@@ -1115,7 +1115,8 @@ createApp({
         // ── LLM Config ──
         async function loadLlmConfig() {
             try {
-                const res = await fetch('/api/llm_config');
+                const res = await fetch('/api/llm_config', {credentials: 'include'});
+                if (res.status === 401) { loggedIn.value = false; return; }
                 if (!res.ok) return;
                 const data = await res.json();
                 llmEnabled.value = data.enabled;
@@ -1123,7 +1124,6 @@ createApp({
                 llmBaseUrl.value = data.base_url;
                 llmModel.value = data.model;
                 llmPrompt.value = data.system_prompt;
-                // api_key 不回显，仅通过 has_api_key 提示
                 if (data.has_api_key) {
                     llmApiKey.value = '********';
                 }
@@ -1138,7 +1138,6 @@ createApp({
                 model: llmModel.value,
                 system_prompt: llmPrompt.value,
             };
-            // 如果 api_key 没改（还是 ********），不传；否则传新值
             if (llmApiKey.value && llmApiKey.value !== '********') {
                 body.api_key = llmApiKey.value;
             }
@@ -1146,14 +1145,20 @@ createApp({
                 const res = await fetch('/api/llm_config', {
                     method: 'POST',
                     headers: {'Content-Type':'application/json'},
+                    credentials: 'include',
                     body: JSON.stringify(body),
                 });
+                if (res.status === 401) {
+                    loggedIn.value = false;
+                    llmSaveMsg.value = '会话已过期，请重新登录';
+                    llmSaveOk.value = false;
+                    return;
+                }
                 if (!res.ok) throw new Error((await res.text()).slice(0,80));
                 const data = await res.json();
                 if (data.ok) {
                     llmSaveMsg.value = '已保存';
                     llmSaveOk.value = true;
-                    // 回显 token 状态
                     await loadLlmConfig();
                 } else {
                     llmSaveMsg.value = data.error || '保存失败';
@@ -1171,8 +1176,10 @@ createApp({
                 const res = await fetch('/api/llm_test', {
                     method: 'POST',
                     headers: {'Content-Type':'application/json'},
+                    credentials: 'include',
                     body: JSON.stringify({text: llmTestText.value}),
                 });
+                if (res.status === 401) { loggedIn.value = false; return; }
                 if (!res.ok) { llmTestResp.value = '测试失败'; return; }
                 const data = await res.json();
                 llmTestResp.value = data.reply || '(无回复)';
