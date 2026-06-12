@@ -565,30 +565,25 @@ async def api_llm_test(request: Request):
 
 
 import subprocess
+import threading
 
 
 @app.post("/api/restart")
 async def api_restart():
-    """重启 B站 Bot 服务 (systemctl restart bili-live-bot.service)."""
-    try:
-        result = subprocess.run(
-            ["systemctl", "restart", "bili-live-bot.service"],
-            capture_output=True, text=True, timeout=15,
-        )
-        if result.returncode != 0:
-            logger.warning("restart failed: %s", result.stderr.strip())
-            return JSONResponse(
-                {"ok": False, "error": result.stderr.strip() or "restart failed"},
-                status_code=500,
+    """重启 B站 Bot 服务 (在后台线程执行, 避免杀死自身进程)."""
+    def _do_restart():
+        import time
+        time.sleep(0.5)
+        try:
+            subprocess.run(
+                ["systemctl", "restart", "bili-live-bot.service"],
+                capture_output=True, text=True, timeout=30,
             )
-        logger.info("bot service restarted successfully")
-        return {"ok": True, "message": "服务已重启"}
-    except FileNotFoundError:
-        return JSONResponse({"ok": False, "error": "systemctl not found"}, status_code=500)
-    except subprocess.TimeoutExpired:
-        return JSONResponse({"ok": False, "error": "restart timed out"}, status_code=500)
-    except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        except Exception:
+            pass
+
+    threading.Thread(target=_do_restart, daemon=True).start()
+    return {"ok": True, "message": "服务正在重启..."}
 
 
 # ══════════════════════════════════════════════════════════════
