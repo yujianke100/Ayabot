@@ -58,6 +58,8 @@ class LiveRobot:
         self._last_welcome_ts: dict[int, float] = {}
         self._last_thanks_ts: dict[int, float] = {}
 
+        self._pending_texts: set[str] = set()
+
         self._admin_uids: set[int] = set()
         self._keyword_reply_cooldown_ts: dict[int, float] = {}
 
@@ -158,6 +160,9 @@ class LiveRobot:
 
         while True:
             msg = await self._msg_queue.get()
+
+            # Remove from pending set (no longer pending)
+            self._pending_texts.discard(msg.text)
 
             # Truncate to stay within Bilibili's danmaku length limit (~30 Chinese chars)
             MAX_TEXT_LEN = 30
@@ -604,9 +609,15 @@ class LiveRobot:
         return moderator_hint
 
     async def _enqueue_message(self, text: str, reply_uid: Optional[int]) -> None:
+        # Deduplicate: skip if same text is already queued
+        if text in self._pending_texts:
+            self.logger.debug("dedup enqueue: text=%s", text)
+            return
+        self._pending_texts.add(text)
         try:
             self._msg_queue.put_nowait(OutboundMessage(text=text, reply_uid=reply_uid))
         except asyncio.QueueFull:
+            self._pending_texts.discard(text)
             self.logger.warning("queue full, cannot enqueue: reply_uid=%s text=%s", reply_uid, text)
 
 
