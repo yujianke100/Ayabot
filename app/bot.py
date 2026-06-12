@@ -187,7 +187,7 @@ class LiveRobot:
                 retries = self.config.rate_limit.retry_count
                 for attempt in range(1 + retries):
                     try:
-                        resp = await self.live_room.send_danmaku(danmaku=danmaku, reply_mid=msg.reply_uid)
+                        resp = await self.live_room.send_danmaku(danmaku=danmaku)
                     except Exception as exc:  # noqa: BLE001
                         err_str = str(exc)
                         # Rate-limited or server error → back off
