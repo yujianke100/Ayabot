@@ -655,11 +655,11 @@ async def api_bili_login_status(session_id: str):
         _BILI_LOGIN_SESSIONS.pop(session_id, None)
         return {"state": "timeout"}
 
-    if state == login_v2.QrCodeLoginEvents.SCANNED:
+    if state == login_v2.QrCodeLoginEvents.SCAN:
         sess["state"] = "scanned"
         return {"state": "scanned"}
 
-    if state == login_v2.QrCodeLoginEvents.CONFIRMED:
+    if state == login_v2.QrCodeLoginEvents.CONF:
         sess["state"] = "done"
         return {"state": "done"}
 
