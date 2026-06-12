@@ -62,6 +62,7 @@ class LiveRobot:
         self._chat_contexts: dict[int, list[dict[str, str]]] = {}
 
         self._admin_uids: set[int] = set()
+        self._periodic_task: Optional[asyncio.Task[None]] = None
         self._keyword_reply_cooldown_ts: dict[int, float] = {}
 
         # 从配置读取唤醒词
@@ -71,6 +72,7 @@ class LiveRobot:
     async def run(self) -> None:
         self.logger.info("robot started, room=%s", self.config.room_display_id)
         self._msg_worker_task = asyncio.create_task(self._message_worker())
+        self._periodic_task = asyncio.create_task(self._periodic_message_loop())
 
         try:
             while True:
@@ -90,6 +92,10 @@ class LiveRobot:
             self._msg_worker_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._msg_worker_task
+        if self._periodic_task:
+            self._periodic_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._periodic_task
         self.store.close()
 
     async def _is_room_live(self) -> bool:
@@ -153,6 +159,24 @@ class LiveRobot:
 
         self._danmaku = None
         self._danmaku_task = None
+
+    async def _periodic_message_loop(self) -> None:
+        """定时发送提醒消息."""
+        if not self.config.features.periodic_message_enabled:
+            return
+        interval = max(self.config.features.periodic_message_interval_seconds, 30)
+        template = self.config.features.periodic_message_template
+        if not template:
+            self.logger.info("periodic message disabled: no template configured")
+            return
+        self.logger.info("periodic message loop started: interval=%ds template=%s", interval, template)
+        while True:
+            await asyncio.sleep(interval)
+            if self._danmaku is None:
+                continue  # 不在直播，跳过
+            self._pending_texts.discard(template)
+            self._pending_texts.add(template)
+            await self._msg_queue.put(OutboundMessage(text=template, reply_uid=None))
 
     async def _message_worker(self) -> None:
         min_interval = max(self.config.rate_limit.send_interval_seconds, 0.1)

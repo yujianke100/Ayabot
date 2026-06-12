@@ -40,6 +40,9 @@ class FeatureConfig:
     keyword_reply: KeywordReplyConfig
     connected_message: str
     connected_message_enabled: bool
+    periodic_message_enabled: bool = True
+    periodic_message_interval_seconds: int = 600
+    periodic_message_template: str = ""
 
 
 @dataclass(slots=True)
@@ -99,6 +102,7 @@ class WebUIConfig:
     password: str
     session_timeout: int
     title: str
+    bot_name: str = "bilibot"
 
 
 @dataclass(slots=True)
@@ -215,6 +219,9 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             keyword_reply=_parse_keyword_reply(features.get("keyword_reply", {})),
             connected_message=str(features.get("connected_message", "")),
             connected_message_enabled=bool(features.get("connected_message_enabled", True)),
+            periodic_message_enabled=bool(features.get("periodic_message_enabled", True)),
+            periodic_message_interval_seconds=int(features.get("periodic_message_interval_seconds", 600)),
+            periodic_message_template=str(features.get("periodic_message_template", "")),
         ),
         cooldown=CooldownConfig(
             welcome_user_seconds=int(cooldown.get("welcome_user_seconds", 600)),
@@ -246,6 +253,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             password=str(web_ui.get("password", "admin")),
             session_timeout=int(web_ui.get("session_timeout", 3600)),
             title=str(web_ui.get("title", "BILIBILI-LIVE-ROBOT")),
+            bot_name=str(web_ui.get("bot_name", "bilibot")),
         ),
         llm=LLMConfig(
             enabled=bool(llm.get("enabled", False)),
@@ -287,6 +295,7 @@ def _parse_anchor_reply(raw: Any) -> list[AnchorExclusiveRule]:
 def config_to_dict(config: AppConfig) -> dict[str, Any]:
     """将 AppConfig 序列化为 dict, 用于 Web UI 前端展示."""
     return {
+        "bot_name": config.web_ui.bot_name,
         "room_display_id": config.room_display_id,
         "anchor_uid": config.anchor_uid,
         "cooldown": {
@@ -312,6 +321,9 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "guard_thanks_template_default": config.features.guard_thanks_template_default,
             "connected_message": config.features.connected_message,
             "connected_message_enabled": config.features.connected_message_enabled,
+            "periodic_message_enabled": config.features.periodic_message_enabled,
+            "periodic_message_interval_seconds": config.features.periodic_message_interval_seconds,
+            "periodic_message_template": config.features.periodic_message_template,
         },
     }
 

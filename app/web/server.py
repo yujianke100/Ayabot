@@ -622,7 +622,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>文文喵~</title>
+<title>{{ botName }}喵~</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
@@ -739,7 +739,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <!-- ══════ 登录页 ══════ -->
 <div v-if="!loggedIn" class="flex items-center justify-center min-h-[80vh]">
     <div class="bg-white p-8 rounded-xl shadow-md w-80">
-        <h1 class="text-xl font-bold text-center text-blue-600 mb-6">文文喵~</h1>
+        <h1 class="text-xl font-bold text-center text-blue-600 mb-6">{{ botName }}喵~</h1>
         <div class="space-y-4">
             <input v-model="loginUser" placeholder="账号" class="border p-2 rounded w-full text-sm" @keyup.enter="doLogin">
             <input v-model="loginPass" type="password" placeholder="密码" class="border p-2 rounded w-full text-sm" @keyup.enter="doLogin">
@@ -752,7 +752,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <!-- ══════ 主界面 ══════ -->
 <div v-if="loggedIn">
 <header class="mb-6 flex justify-between items-center bg-white p-4 rounded-xl shadow-sm">
-    <h1 class="text-xl font-bold text-blue-600">🎯 文文喵~</h1>
+    <h1 class="text-xl font-bold text-blue-600">🎯 {{ botName }}喵~</h1>
     <div class="flex items-center gap-4 text-sm">
         <button @click="tab='ranking'" :class="tab==='ranking'?'text-blue-600 font-bold border-b-2 border-blue-600':''">送礼排行</button>
         <button @click="tab='export'"  :class="tab==='export' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">精美导出</button>
@@ -982,7 +982,26 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <input type="text" v-model="cfgGuardDefault" placeholder="感谢{uname}开通大航海！" class="border p-2 rounded w-full text-sm mt-1">
             </label>
             <label class="text-xs text-gray-500 block">连接消息
-                <input type="text" v-model="cfgConnMsg" placeholder="文文来了喵~" class="border p-2 rounded w-full text-sm mt-1">
+                <input type="text" v-model="cfgConnMsg" placeholder="来了喵~" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+        </div>
+
+        <hr>
+        <h3 class="text-sm font-bold">⏰ 定时消息</h3>
+        <div class="space-y-3">
+            <label class="flex items-center gap-2 text-sm">
+                <input type="checkbox" v-model="cfgPeriodicOn" class="w-4 h-4">
+                启用定时消息（仅在开播时发送）
+            </label>
+            <div class="grid grid-cols-2 gap-4">
+                <label class="text-xs text-gray-500">间隔（秒）
+                    <input type="number" v-model.number="cfgPeriodicInterval" min="30" max="86400" class="border p-2 rounded w-full text-sm mt-1">
+                    <span class="text-xs text-gray-400">默认 600 秒（10 分钟）</span>
+                </label>
+            </div>
+            <label class="text-xs text-gray-500 block">消息内容
+                <input type="text" v-model="cfgPeriodicTmpl" placeholder="欢迎关注直播间~点个关注不迷路！" class="border p-2 rounded w-full text-sm mt-1">
+                <span class="text-xs text-gray-400">留空则不发送定时消息</span>
             </label>
         </div>
 
@@ -1002,7 +1021,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <div v-if="tab==='llm'" class="max-w-2xl mx-auto">
     <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
         <h2 class="text-lg font-bold">🤖 AI 回复设置</h2>
-        <p class="text-xs text-gray-400">用户发送 <code class="bg-gray-100 px-1 rounded">#文文 你好</code> 时调用 LLM API 自动回复。</p>
+        <p class="text-xs text-gray-400">用户发送 <code class="bg-gray-100 px-1 rounded">#{{ llmWakeWord || 'bilibot' }} 你好</code> 时调用 LLM API 自动回复。</p>
 
         <label class="flex items-center gap-2 text-sm">
             <input type="checkbox" v-model="llmEnabled" class="w-4 h-4">
@@ -1248,6 +1267,7 @@ createApp({
         const ctxMaxMsg = ref(10);
 
         // General Config
+        const botName = ref('bilibot');
         const cfgRoomId = ref(0);
         const cfgAnchorUid = ref(0);
         const cfgWelcomeCd = ref(600);
@@ -1268,6 +1288,9 @@ createApp({
         const cfgGuardGovernor = ref('');
         const cfgGuardDefault = ref('');
         const cfgConnMsg = ref('');
+        const cfgPeriodicOn = ref(true);
+        const cfgPeriodicInterval = ref(600);
+        const cfgPeriodicTmpl = ref('');
         const cfgSaveMsg = ref('');
         const cfgSaveOk = ref(false);
         const restartMsg = ref('');
@@ -1534,6 +1557,7 @@ createApp({
                 if (!res.ok) return;
                 const data = await res.json();
                 if (data.error) return;
+                botName.value = data.bot_name || 'bilibot';
                 cfgRoomId.value = data.room_display_id || 0;
                 cfgAnchorUid.value = data.anchor_uid || 0;
                 cfgWelcomeCd.value = data.cooldown?.welcome_user_seconds ?? 600;
@@ -1554,6 +1578,9 @@ createApp({
                 cfgGuardGovernor.value = data.features?.guard_thanks_template_governor || '';
                 cfgGuardDefault.value = data.features?.guard_thanks_template_default || '';
                 cfgConnMsg.value = data.features?.connected_message || '';
+                cfgPeriodicOn.value = data.features?.periodic_message_enabled ?? true;
+                cfgPeriodicInterval.value = data.features?.periodic_message_interval_seconds ?? 600;
+                cfgPeriodicTmpl.value = data.features?.periodic_message_template || '';
             } catch(e) { /* ignore */ }
         }
         async function saveGeneralConfig() {
@@ -1587,6 +1614,9 @@ createApp({
                             guard_thanks_template_default: cfgGuardDefault.value,
                             connected_message: cfgConnMsg.value,
                             connected_message_enabled: cfgConnectedMsg.value,
+                            periodic_message_enabled: cfgPeriodicOn.value,
+                            periodic_message_interval_seconds: cfgPeriodicInterval.value,
+                            periodic_message_template: cfgPeriodicTmpl.value,
                         },
                     }),
                 });
@@ -1648,6 +1678,8 @@ createApp({
                 cfgSendInterval, cfgRetry, cfgMaxQueue, cfgReplyDelay,
                 cfgWelcomeOn, cfgThanksOn, cfgBlindboxOn, cfgGuardOn, cfgConnectedMsg,
                 cfgWelcomeTmpl, cfgThanksTmpl, cfgGuardCaptain, cfgGuardCommander, cfgGuardGovernor, cfgGuardDefault, cfgConnMsg,
+                cfgPeriodicOn, cfgPeriodicInterval, cfgPeriodicTmpl,
+                botName,
                 cfgSaveMsg, cfgSaveOk, loadGeneralConfig, saveGeneralConfig,
                 restartMsg, restartOk, restartService};
     }
