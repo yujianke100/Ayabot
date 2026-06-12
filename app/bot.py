@@ -22,6 +22,7 @@ from .storage import GiftEvent, StatsStore
 class OutboundMessage:
     text: str
     reply_uid: Optional[int]
+    retry_count: int = 0
 
 
 class LiveRobot:
@@ -43,7 +44,8 @@ class LiveRobot:
 
         self.store = StatsStore(config.storage.sqlite_path)
 
-        self._msg_queue: asyncio.Queue[OutboundMessage] = asyncio.Queue()
+        max_queue = getattr(config.rate_limit, 'max_queue_size', 50)
+        self._msg_queue: asyncio.Queue[OutboundMessage] = asyncio.Queue(maxsize=max_queue)
         self._msg_worker_task: Optional[asyncio.Task[None]] = None
 
         self._danmaku: Optional[live.LiveDanmaku] = None
@@ -147,7 +149,12 @@ class LiveRobot:
 
     async def _message_worker(self) -> None:
         min_interval = max(self.config.rate_limit.send_interval_seconds, 0.1)
+        max_queue = getattr(self.config.rate_limit, 'max_queue_size', 50)
+        max_retries_per_msg = 3
         last_sent = 0.0
+        consecutive_fails = 0
+        current_interval = min_interval
+        log_counter = 0
 
         while True:
             msg = await self._msg_queue.get()
@@ -160,11 +167,21 @@ class LiveRobot:
                 )
                 msg.text = msg.text[:MAX_TEXT_LEN]
 
-            self.logger.debug("message dequeued: reply_uid=%s text=%s", msg.reply_uid, msg.text)
-            wait_s = min_interval - (time.time() - last_sent)
+            # Wait for rate limit interval
+            wait_s = current_interval - (time.time() - last_sent)
             if wait_s > 0:
                 await asyncio.sleep(wait_s)
 
+            # Periodically log queue stats
+            log_counter += 1
+            if log_counter % 20 == 0:
+                self.logger.info(
+                    "queue stats: depth=%d, interval=%.1fs, consec_fails=%d",
+                    self._msg_queue.qsize(), current_interval, consecutive_fails,
+                )
+
+            # Attempt to send
+            success = False
             try:
                 danmaku = Danmaku(text=msg.text)
                 retries = self.config.rate_limit.retry_count
@@ -172,23 +189,42 @@ class LiveRobot:
                     try:
                         resp = await self.live_room.send_danmaku(danmaku=danmaku, reply_mid=msg.reply_uid)
                     except Exception as exc:  # noqa: BLE001
+                        err_str = str(exc)
+                        # Rate-limited or server error → back off
                         if attempt < retries:
-                            self.logger.debug(
-                                "send danmaku retry %d/%d: reply_uid=%s err=%s",
-                                attempt + 1, retries, msg.reply_uid, exc,
+                            backoff = 1.0 * (attempt + 1) + random.uniform(0, 0.5)
+                            self.logger.warning(
+                                "send danmaku retry %d/%d: reply_uid=%s wait=%.1fs err=%s",
+                                attempt + 1, retries, msg.reply_uid, backoff, err_str[:120],
                             )
-                            await asyncio.sleep(1.0 * (attempt + 1))
+                            await asyncio.sleep(backoff)
                             continue
-                        self.logger.warning(
-                            "send danmaku failed after %d retries: reply_uid=%s text=%s err=%s",
-                            retries, msg.reply_uid, msg.text, exc,
-                        )
+                        # All retries exhausted → re-queue or drop
+                        if msg.retry_count < max_retries_per_msg:
+                            msg.retry_count += 1
+                            self.logger.warning(
+                                "send danmaku failed, re-queued (retry %d/%d): reply_uid=%s err=%s",
+                                msg.retry_count, max_retries_per_msg, msg.reply_uid, err_str[:120],
+                            )
+                            try:
+                                self._msg_queue.put_nowait(msg)
+                            except asyncio.QueueFull:
+                                self.logger.warning("queue full, dropping message: reply_uid=%s", msg.reply_uid)
+                        else:
+                            self.logger.warning(
+                                "send danmaku dropped after %d retries: reply_uid=%s text=%s err=%s",
+                                max_retries_per_msg, msg.reply_uid, msg.text, err_str[:120],
+                            )
                         break
                     else:
                         last_sent = time.time()
+                        success = True
+                        consecutive_fails = 0
+                        # Gradually reduce interval back to min after success
+                        if current_interval > min_interval:
+                            current_interval = max(min_interval, current_interval * 0.8)
                         self.logger.debug(
-                            "send danmaku success: reply_uid=%s text=%s resp=%s",
-                            msg.reply_uid, msg.text, resp,
+                            "send danmaku success: reply_uid=%s text=%s", msg.reply_uid, msg.text,
                         )
                         break
             except Exception as exc:  # noqa: BLE001
@@ -196,6 +232,16 @@ class LiveRobot:
                     "send danmaku unexpected error: reply_uid=%s err=%s",
                     msg.reply_uid, exc,
                 )
+
+            if not success:
+                consecutive_fails += 1
+                # Adaptive rate limiting: back off on consecutive failures
+                if consecutive_fails >= 3:
+                    current_interval = min(current_interval * 1.5, 10.0)
+                    self.logger.info(
+                        "rate limit backoff: interval increased to %.1fs (consec_fails=%d)",
+                        current_interval, consecutive_fails,
+                    )
 
     async def _on_room_admins(self, event: dict[str, Any]) -> None:
         payload = event.get("data", {})
@@ -529,8 +575,10 @@ class LiveRobot:
         return moderator_hint
 
     async def _enqueue_message(self, text: str, reply_uid: Optional[int]) -> None:
-        self.logger.debug("message enqueued: reply_uid=%s text=%s", reply_uid, text)
-        await self._msg_queue.put(OutboundMessage(text=text, reply_uid=reply_uid))
+        try:
+            self._msg_queue.put_nowait(OutboundMessage(text=text, reply_uid=reply_uid))
+        except asyncio.QueueFull:
+            self.logger.warning("queue full, cannot enqueue: reply_uid=%s text=%s", reply_uid, text)
 
 
 def _safe_int(value: Any) -> int:

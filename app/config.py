@@ -51,6 +51,7 @@ class CooldownConfig:
 class RateLimitConfig:
     send_interval_seconds: float
     retry_count: int
+    max_queue_size: int = 50
 
 
 @dataclass(slots=True)
