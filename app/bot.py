@@ -498,6 +498,18 @@ class LiveRobot:
             await self._enqueue_reply(text=text_out, reply_uid=uid)
             return
 
+        if name == "help":
+            self.logger.info("help requested: uid=%s", uid)
+            await self._enqueue_reply(
+                text="#签到 #抽签 #今日盲盒 #本月盲盒",
+                reply_uid=uid,
+            )
+            await self._enqueue_reply(
+                text="#盲盒统计:名 #欢迎:开/关 #欢迎词",
+                reply_uid=uid,
+            )
+            return
+
         if name == "checkin":
             self.logger.info("checkin command: uid=%s uname=%s", uid, uname)
             days, rank, already = self.store.user_checkin(uid, uname)
@@ -835,6 +847,10 @@ def _parse_command(text: str) -> Optional[tuple[str, str]]:
     
     # Create a normalized compact version for simple commands
     compact = "".join(s.split()).replace("：", ":")
+
+    # Command: #帮助
+    if compact in ("#帮助", "#help"):
+        return "help", ""
 
     # Command: #签到
     if compact == "#签到":
