@@ -421,13 +421,14 @@ class LiveRobot:
         if name == "checkin":
             days, rank, already = self.store.user_checkin(uid, uname)
             if already:
-                msg = f"{uname}今天已经签到了哦！连续签到{days}天，目前排名第{rank}。继续坚持喵~"
+                msg = f"今天已经签到了哦！连续签到{days}天，排名第{rank}。继续坚持喵~"
             else:
-                msg = f"感谢{uname}签到！连续签到{days}天，目前排名第{rank}。继续坚持喵~"
+                msg = f"签到成功！连续签到{days}天，排名第{rank}。继续坚持喵~"
             await self._enqueue_message(text=msg, reply_uid=uid)
             return
 
         if name == "fortune":
+            self.logger.info("fortune drawn: uid=%s", uid)
             fortunes = [
                 ("大吉", ["今天运气爆棚，做什么都顺风顺水！", "主播都被你的欧气惊到了！"]),
                 ("中吉", ["运势不错，是个适合发财的好日子。", "心情舒畅，会有好事发生哦。"]),
