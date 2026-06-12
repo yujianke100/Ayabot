@@ -127,6 +127,8 @@ class LiveRobot:
 
         self._danmaku_task = asyncio.create_task(_run_connect())
         self.logger.info("danmaku connected")
+        # 记录开播日期
+        self.store.record_stream_date(datetime.now().strftime("%Y-%m-%d"))
 
     async def _stop_danmaku(self) -> None:
         if self._danmaku is not None:

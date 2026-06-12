@@ -6,4 +6,5 @@ config.yaml
 *.log
 data/*.db
 data/credential.json
-config.yaml
+*.bak
+data/

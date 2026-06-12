@@ -90,6 +90,10 @@ class StatsStore:
                 continuous_days INTEGER NOT NULL DEFAULT 1,
                 total_days INTEGER NOT NULL DEFAULT 1
             );
+
+            CREATE TABLE IF NOT EXISTS anchor_stream_dates (
+                date TEXT PRIMARY KEY
+            );
             """
         )
         self._conn.commit()
@@ -241,10 +245,24 @@ class StatsStore:
             return 0, 0, 0, 0
         return int(row[0]), int(row[1]), int(row[2]), int(row[3])
 
+    def record_stream_date(self, date: str) -> None:
+        self._conn.execute(
+            "INSERT OR IGNORE INTO anchor_stream_dates (date) VALUES (?)",
+            (date,),
+        )
+        self._conn.commit()
+
+    def _get_previous_stream_date(self, today: str) -> Optional[str]:
+        row = self._conn.execute(
+            "SELECT date FROM anchor_stream_dates WHERE date < ? ORDER BY date DESC LIMIT 1",
+            (today,),
+        ).fetchone()
+        return row[0] if row else None
+
     def user_checkin(self, uid: int, uname: str) -> tuple[int, int]:
         """ 返回 (连续签到天数, 连续天数排名) """
         today = datetime.now().strftime("%Y-%m-%d")
-        yesterday = (datetime.now().fromtimestamp(time.time() - 86400)).strftime("%Y-%m-%d")
+        prev_stream_date = self._get_previous_stream_date(today)
 
         # 获取当前签到状态
         row = self._conn.execute(
@@ -256,15 +274,15 @@ class StatsStore:
             if last_date == today:
                 # 今天已经签到过了，直接返回当前数据
                 pass
-            elif last_date == yesterday:
-                # 昨天签到过，连续天数+1
+            elif prev_stream_date and last_date == prev_stream_date:
+                # 上次签到是上一次开播日期，直播场场不落，续签
                 continuous += 1
                 self._conn.execute(
                     "UPDATE user_checkin SET last_checkin_date = ?, continuous_days = ?, total_days = total_days + 1, uname = ? WHERE uid = ?",
                     (today, continuous, uname, uid),
                 )
             else:
-                # 断签了，重置为1
+                # 漏了某场直播（或不存在上一次开播记录）-> 断签
                 continuous = 1
                 self._conn.execute(
                     "UPDATE user_checkin SET last_checkin_date = ?, continuous_days = ?, total_days = total_days + 1, uname = ? WHERE uid = ?",
