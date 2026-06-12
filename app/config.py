@@ -120,6 +120,7 @@ class LLMConfig:
     temperature: float = 0.7
     top_p: float = 0.9
     max_tokens: int = 150
+    context_window: int = 4096
     system_prompt: str = "你是文文，一个可爱温柔的虚拟主播助手。"
     context: LLMContextConfig = None    # type: ignore[assignment]
 
@@ -257,6 +258,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             temperature=float(llm.get("temperature", 0.7)),
             top_p=float(llm.get("top_p", 0.9)),
             max_tokens=int(llm.get("max_tokens", 150)),
+            context_window=int(llm.get("context_window", 4096)),
             system_prompt=str(llm.get("system_prompt", "你是文文，一个可爱温柔的虚拟主播助手。")),
             context=LLMContextConfig(
                 enabled=bool(llm_ctx.get("enabled", True)),

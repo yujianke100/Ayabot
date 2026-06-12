@@ -74,6 +74,7 @@ def init_app(config: Any = None) -> None:
         "temperature": config.llm.temperature,
         "top_p": config.llm.top_p,
         "max_tokens": config.llm.max_tokens,
+        "context_window": config.llm.context_window,
         "system_prompt": config.llm.system_prompt,
         "context": {
             "enabled": config.llm.context.enabled,
@@ -478,6 +479,7 @@ async def api_get_llm_config():
         "temperature": _LLM_CONFIG_DICT.get("temperature", 0.7),
         "top_p": _LLM_CONFIG_DICT.get("top_p", 0.9),
         "max_tokens": _LLM_CONFIG_DICT.get("max_tokens", 150),
+        "context_window": _LLM_CONFIG_DICT.get("context_window", 4096),
         "system_prompt": _LLM_CONFIG_DICT.get("system_prompt", ""),
         "context": {
             "enabled": ctx.get("enabled", True),
@@ -497,7 +499,7 @@ async def api_save_llm_config(request: Request):
         return JSONResponse({"error": "bad request"}, status_code=400)
 
     # 更新内存中的配置
-    for key in ("enabled", "provider", "api_key", "base_url", "model", "wake_word", "temperature", "top_p", "max_tokens", "system_prompt"):
+    for key in ("enabled", "provider", "api_key", "base_url", "model", "wake_word", "temperature", "top_p", "max_tokens", "context_window", "system_prompt"):
         if key in body:
             _LLM_CONFIG_DICT[key] = body[key]
     if "context" in body and isinstance(body["context"], dict):
@@ -521,6 +523,7 @@ async def api_save_llm_config(request: Request):
         llm_section["temperature"] = _LLM_CONFIG_DICT.get("temperature", 0.7)
         llm_section["top_p"] = _LLM_CONFIG_DICT.get("top_p", 0.9)
         llm_section["max_tokens"] = _LLM_CONFIG_DICT.get("max_tokens", 150)
+        llm_section["context_window"] = _LLM_CONFIG_DICT.get("context_window", 4096)
         llm_section["system_prompt"] = _LLM_CONFIG_DICT.get("system_prompt", "")
         llm_section["context"] = {
             "enabled": _LLM_CONFIG_DICT.get("context", {}).get("enabled", True),
@@ -559,6 +562,33 @@ async def api_llm_test(request: Request):
     text = body.get("text", "")
     reply = await client.chat(user_text=text, uname="测试")
     return {"reply": reply or "(无回复)"}
+
+
+import subprocess
+
+
+@app.post("/api/restart")
+async def api_restart():
+    """重启 B站 Bot 服务 (systemctl restart bili-live-bot.service)."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "restart", "bili-live-bot.service"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            logger.warning("restart failed: %s", result.stderr.strip())
+            return JSONResponse(
+                {"ok": False, "error": result.stderr.strip() or "restart failed"},
+                status_code=500,
+            )
+        logger.info("bot service restarted successfully")
+        return {"ok": True, "message": "服务已重启"}
+    except FileNotFoundError:
+        return JSONResponse({"ok": False, "error": "systemctl not found"}, status_code=500)
+    except subprocess.TimeoutExpired:
+        return JSONResponse({"ok": False, "error": "restart timed out"}, status_code=500)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -942,6 +972,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <span v-if="cfgSaveMsg" class="text-sm" :class="cfgSaveOk ? 'text-green-600' : 'text-red-500'">{{ cfgSaveMsg }}</span>
             <button @click="loadGeneralConfig" class="text-gray-500 hover:text-gray-700 underline text-sm">刷新</button>
         </div>
+        <div class="flex items-center gap-4 mt-2 border-t pt-4">
+            <button @click="restartService" class="bg-red-500 hover:bg-red-600 text-white px-6 py-2 rounded text-sm">🔄 重启服务</button>
+            <span v-if="restartMsg" class="text-sm" :class="restartOk ? 'text-green-600' : 'text-red-500'">{{ restartMsg }}</span>
+        </div>
     </div>
 </div>
 
@@ -967,7 +1001,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <input type="text" v-model="llmModel" placeholder="gpt-4o-mini" class="border p-2 rounded w-full text-sm mt-1">
             </label>
             <label class="text-xs text-gray-500">唤醒词
-                <input type="text" v-model="llmWakeWord" placeholder="文文" class="border p-2 rounded w-full text-sm mt-1">
+                <div class="flex items-center mt-1">
+                    <span class="bg-gray-200 px-2 py-[7px] rounded-l text-sm font-mono text-gray-500">#</span>
+                    <input type="text" v-model="llmWakeWord" placeholder="文文" class="border p-2 rounded-r w-full text-sm flex-1">
+                </div>
+                <span class="text-xs text-gray-400">用户发送 <code>#{{ llmWakeWord || '文文' }} 你好</code> 触发</span>
             </label>
             <label class="text-xs text-gray-500">温度 (temperature)
                 <input type="number" v-model="llmTemp" step="0.1" min="0" max="2" class="border p-2 rounded w-full text-sm mt-1">
@@ -977,6 +1015,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
             </label>
             <label class="text-xs text-gray-500">最大 Token
                 <input type="number" v-model.number="llmMaxTokens" min="1" max="2000" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500">模型上下文窗口
+                <input type="number" v-model.number="llmCtxWindow" min="1024" max="1048576" step="1024" class="border p-2 rounded w-full text-sm mt-1">
+                <span class="text-xs text-gray-400">如 4096, 8192, 32768, 128000</span>
             </label>
         </div>
 
@@ -1125,6 +1167,7 @@ createApp({
         const llmTemp = ref(0.7);
         const llmTopP = ref(0.9);
         const llmMaxTokens = ref(150);
+        const llmCtxWindow = ref(4096);
         const llmPrompt = ref('');
         const llmSaveMsg = ref('');
         const llmSaveOk = ref(false);
@@ -1153,6 +1196,8 @@ createApp({
         const cfgConnectedMsg = ref(false);
         const cfgSaveMsg = ref('');
         const cfgSaveOk = ref(false);
+        const restartMsg = ref('');
+        const restartOk = ref(false);
 
         let chartInst = null;
 
@@ -1320,6 +1365,7 @@ createApp({
                 llmTemp.value = data.temperature ?? 0.7;
                 llmTopP.value = data.top_p ?? 0.9;
                 llmMaxTokens.value = data.max_tokens ?? 150;
+                llmCtxWindow.value = data.context_window ?? 4096;
                 llmPrompt.value = data.system_prompt;
                 if (data.has_api_key) {
                     llmApiKey.value = '********';
@@ -1343,6 +1389,7 @@ createApp({
                 temperature: llmTemp.value,
                 top_p: llmTopP.value,
                 max_tokens: llmMaxTokens.value,
+                context_window: llmCtxWindow.value,
                 system_prompt: llmPrompt.value,
                 context: {
                     enabled: ctxEnabled.value,
@@ -1471,6 +1518,32 @@ createApp({
             }
         }
 
+        // ── Restart ──
+        async function restartService() {
+            restartMsg.value = '';
+            restartOk.value = false;
+            try {
+                const res = await fetch('/api/restart', {
+                    method: 'POST',
+                    credentials: 'include',
+                });
+                if (res.status === 401) { loggedIn.value = false; return; }
+                const data = await res.json();
+                if (data.ok) {
+                    restartMsg.value = '服务正在重启...';
+                    restartOk.value = true;
+                    // 重启后自动登出（web 也重启了）
+                    setTimeout(() => { loggedIn.value = false; }, 2000);
+                } else {
+                    restartMsg.value = data.error || '重启失败';
+                    restartOk.value = false;
+                }
+            } catch(e) {
+                restartMsg.value = '重启失败: ' + e.message;
+                restartOk.value = false;
+            }
+        }
+
         return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
                 tab, rStart, rEnd, rType, ranking, errRanking, loadRanking,
                 eUid, eName, eDate, eType, ePerCol, eColWidth, exportList, exportDates, exportCols, errExport,
@@ -1479,14 +1552,15 @@ createApp({
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
                 llmEnabled, llmProvider, llmApiKey, llmBaseUrl, llmModel, llmPrompt,
-                llmWakeWord, llmTemp, llmTopP, llmMaxTokens,
+                llmWakeWord, llmTemp, llmTopP, llmMaxTokens, llmCtxWindow,
                 llmSaveMsg, llmSaveOk, llmTestText, llmTestResp,
                 ctxEnabled, ctxMode, ctxContent, ctxMaxMsg,
                 saveLlmConfig, testLlm,
                 cfgRoomId, cfgAnchorUid, cfgWelcomeCd, cfgThanksCd,
                 cfgSendInterval, cfgRetry, cfgMaxQueue, cfgReplyDelay,
                 cfgWelcomeOn, cfgThanksOn, cfgBlindboxOn, cfgGuardOn, cfgConnectedMsg,
-                cfgSaveMsg, cfgSaveOk, loadGeneralConfig, saveGeneralConfig};
+                cfgSaveMsg, cfgSaveOk, loadGeneralConfig, saveGeneralConfig,
+                restartMsg, restartOk, restartService};
     }
 }).mount('#app');
 </script>
