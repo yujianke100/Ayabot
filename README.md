@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/yujianke100/ayabot/releases"><img src="https://img.shields.io/github/v/release/yujianke100/ayabot" alt="Release"></a>
-  <a href="https://hub.docker.com/r/yujianke100/ayabot"><img src="https://img.shields.io/docker/pulls/yujianke100/ayabot" alt="Docker Pulls"></a>
+  <a href="https://github.com/yujianke100/ayabot/pkgs/container/ayabot"><img src="https://img.shields.io/badge/docker-ghcr.io-blue?logo=github" alt="ghcr.io"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow" alt="License"></a>
 </p>
 
@@ -33,15 +33,14 @@ docker run -d \
   -v ./config.yaml:/app/config.yaml \
   -v ./data:/app/data \
   -p 8000:8000 \
-  yujianke100/ayabot:latest
+  ghcr.io/yujianke100/ayabot:latest
 ```
 
 启动后浏览器打开 `http://你的IP:8000` 就能看到 Web 后台了。
 
 第一次启动时，机器人会在终端打印一个二维码，用 B 站 App 扫码登录。之后会自动保存凭据，下次重启不用再扫。
 
-> **国内拉取镜像慢？** 试试用镜像站：`docker pull hub-mirror.c.163.com/yujianke100/ayabot:latest`
-> 最新可用镜像站查询 → [demo.kentxxq.com/app/mirror](https://demo.kentxxq.com/app/mirror)
+> **国内拉取镜像慢？** 见下方[镜像加速](#-docker-镜像)章节。
 
 ### 或用 Python 直接跑
 
@@ -111,21 +110,31 @@ llm:
 
 ## 🐳 Docker 镜像
 
-自动构建推送到：
-
-| 地址 | 方式 |
-|------|------|
-| `yujianke100/ayabot:latest` | Docker Hub，**主镜像**，国内可用镜像站加速 |
-| `ghcr.io/yujianke100/ayabot:latest` | GitHub Container Registry，备选 |
-
-国内加速：
+自动构建推送到 GitHub Container Registry（ghcr.io）：
 
 ```bash
-docker pull hub-mirror.c.163.com/yujianke100/ayabot:latest
-docker pull docker.mirrors.ustc.edu.cn/yujianke100/ayabot:latest
+docker pull ghcr.io/yujianke100/ayabot:latest     # 最新版
+docker pull ghcr.io/yujianke100/ayabot:<sha>       # 指定版本（在 Actions 构建日志里看）
 ```
 
-或配置 Docker 全局镜像加速（编辑 `/etc/docker/daemon.json`）：
+也支持 Docker Hub（需在 GitHub Secrets 中配置 `DOCKER_USERNAME` + `DOCKER_PASSWORD` 后才会推送）：
+
+```bash
+# ⚠️ 需要管理员在 GitHub 仓库 Settings → Secrets 配好 Docker Hub 凭据才会推送
+docker pull yujianke100/ayabot:latest
+```
+
+如果你在 GitHub 上，可以直接点 badge 去看镜像包：
+
+[![ghcr.io](https://img.shields.io/badge/docker-ghcr.io-blue?logo=github)](https://github.com/yujianke100/ayabot/pkgs/container/ayabot)
+
+### 🇨🇳 国内镜像加速
+
+ghcr.io 国内拉取可能很慢，推荐以下方式：
+
+**方式一：配置 Docker 全局镜像加速**（改镜像源为国内源）
+
+编辑 `/etc/docker/daemon.json`：
 
 ```json
 {
@@ -135,6 +144,21 @@ docker pull docker.mirrors.ustc.edu.cn/yujianke100/ayabot:latest
   ]
 }
 ```
+
+> ⚠️ 注意：registry-mirrors 只对 Docker Hub（`docker.io`）生效，对 `ghcr.io` 无效。ghcr.io 国内加速见下方。
+
+**方式二：通过 ghcr.io 镜像站拉取**
+
+```bash
+# 中科大 ghcr.io 镜像
+docker pull docker.mirrors.ustc.edu.cn/ghcr.io/yujianke100/ayabot:latest
+
+# 网易 ghcr.io 镜像
+docker pull hub-mirror.c.163.com/ghcr.io/yujianke100/ayabot:latest
+```
+
+**方式三：查询最新可用镜像站**
+→ [demo.kentxxq.com/app/mirror](https://demo.kentxxq.com/app/mirror)（实时检测国内各镜像站可用性）
 
 ---
 
