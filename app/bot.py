@@ -417,7 +417,7 @@ class LiveRobot:
 
                 if triggered:
                     self.logger.debug("anchor exclusive reply triggered: uid=%s text=%s reply=%s", uid, text, rule.reply_template)
-                    await self._enqueue_message(text=rule.reply_template, reply_uid=uid)
+                    await self._enqueue_reply(text=rule.reply_template, reply_uid=uid)
                     return
 
         command = _parse_command(text)
@@ -434,7 +434,7 @@ class LiveRobot:
                     if now - last >= kr.cooldown_seconds:
                         self._keyword_reply_cooldown_ts[uid] = now
                         self.logger.debug("keyword reply matched: uid=%s text=%s reply=%s", uid, text, reply)
-                        await self._enqueue_message(text=reply, reply_uid=uid)
+                        await self._enqueue_reply(text=reply, reply_uid=uid)
             return
 
         name, arg = command
@@ -447,7 +447,7 @@ class LiveRobot:
             if arg:
                 result = self.store.get_user_monthly_blindbox_by_uname(month=month_key, uname=arg)
                 if result is None:
-                    await self._enqueue_message(text=f"未找到{arg}的盲盒记录", reply_uid=uid)
+                    await self._enqueue_reply(text=f"未找到{arg}的盲盒记录", reply_uid=uid)
                     return
                 _uid, blind_count, cost_total, actual_total, profit_total = result
                 text_out = f"{month_label}{arg}盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
@@ -462,11 +462,11 @@ class LiveRobot:
                     if row is None:
                         gift_event_count, _ = self.store.get_user_monthly_gift_activity(month=month_key, uid=uid)
                         text_out = f"{month_label} 暂无盲盒记录" if gift_event_count > 0 else f"{month_label} 无送礼记录"
-                        await self._enqueue_message(text=text_out, reply_uid=uid)
+                        await self._enqueue_reply(text=text_out, reply_uid=uid)
                         return
                     blind_count, cost_total, actual_total, profit_total = row
                     text_out = f"{month_label}盲盒{blind_count}个，支出{cost_total}，收益{profit_total}"
-            await self._enqueue_message(text=text_out, reply_uid=uid)
+            await self._enqueue_reply(text=text_out, reply_uid=uid)
             return
 
         if name == "today_blindbox":
@@ -477,7 +477,7 @@ class LiveRobot:
             if arg:
                 result = self.store.get_today_user_blindbox_by_uname(today_start, today_end, arg)
                 if result is None:
-                    await self._enqueue_message(text=f"未找到{arg}今日的盲盒记录", reply_uid=uid)
+                    await self._enqueue_reply(text=f"未找到{arg}今日的盲盒记录", reply_uid=uid)
                     return
                 _uid, blind_count, cost_total, actual_total, profit_total = result
                 text_out = f"今日{arg}盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
@@ -491,11 +491,11 @@ class LiveRobot:
                     if row is None:
                         gift_event_count, _ = self.store.get_today_user_gift_activity(today_start, today_end, uid)
                         text_out = "今日暂无盲盒记录" if gift_event_count > 0 else "今日无送礼记录"
-                        await self._enqueue_message(text=text_out, reply_uid=uid)
+                        await self._enqueue_reply(text=text_out, reply_uid=uid)
                         return
                     blind_count, cost_total, actual_total, profit_total = row
                     text_out = f"今日盲盒{blind_count}个，支出{cost_total}，收益{profit_total}"
-            await self._enqueue_message(text=text_out, reply_uid=uid)
+            await self._enqueue_reply(text=text_out, reply_uid=uid)
             return
 
         if name == "checkin":
@@ -505,7 +505,7 @@ class LiveRobot:
                 msg = f"今天已经签到了哦！连续签到{days}天，排名第{rank}。继续坚持喵~"
             else:
                 msg = f"签到成功！连续签到{days}天，排名第{rank}。继续坚持喵~"
-            await self._enqueue_message(text=msg, reply_uid=uid)
+            await self._enqueue_reply(text=msg, reply_uid=uid)
             return
 
         if name == "fortune":
@@ -521,7 +521,7 @@ class LiveRobot:
             f_type, jokes = random.choice(fortunes)
             joke = random.choice(jokes)
             msg = f"抽签结果：【{f_type}】！{joke}"
-            await self._enqueue_message(text=msg, reply_uid=uid)
+            await self._enqueue_reply(text=msg, reply_uid=uid)
             return
 
         if not self._has_control_permission(uid, moderator_hint):
@@ -535,20 +535,20 @@ class LiveRobot:
 
         if name == "welcome_on":
             self._welcome_enabled = True
-            await self._enqueue_message(text="已开启欢迎", reply_uid=uid)
+            await self._enqueue_reply(text="已开启欢迎", reply_uid=uid)
             return
 
         if name == "welcome_off":
             self._welcome_enabled = False
-            await self._enqueue_message(text="已关闭欢迎", reply_uid=uid)
+            await self._enqueue_reply(text="已关闭欢迎", reply_uid=uid)
             return
 
         if name == "welcome_text":
             if not arg:
-                await self._enqueue_message(text="用法：#欢迎 词 <欢迎词模板>", reply_uid=uid)
+                await self._enqueue_reply(text="用法：#欢迎 词 <欢迎词模板>", reply_uid=uid)
                 return
             self._welcome_template = arg
-            await self._enqueue_message(text="欢迎词已更新", reply_uid=uid)
+            await self._enqueue_reply(text="欢迎词已更新", reply_uid=uid)
             return
 
     async def _on_all_events(self, event: dict[str, Any]) -> None:
@@ -619,6 +619,15 @@ class LiveRobot:
         except asyncio.QueueFull:
             self._pending_texts.discard(text)
             self.logger.warning("queue full, cannot enqueue: reply_uid=%s text=%s", reply_uid, text)
+
+    async def _enqueue_reply(self, text: str, reply_uid: Optional[int]) -> None:
+        """Enqueue a command reply with a configurable delay before queueing.
+        This gives B站 time to process the previous message before the next one
+        enters the outbound queue, reducing the chance of server-side rate limiting."""
+        delay = getattr(self.config.rate_limit, 'reply_delay_seconds', 3.0)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        await self._enqueue_message(text=text, reply_uid=reply_uid)
 
 
 def _safe_int(value: Any) -> int:

@@ -52,6 +52,7 @@ class RateLimitConfig:
     send_interval_seconds: float
     retry_count: int
     max_queue_size: int = 50
+    reply_delay_seconds: float = 3.0
 
 
 @dataclass(slots=True)

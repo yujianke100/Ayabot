@@ -47,6 +47,7 @@ rate_limit:
   send_interval_seconds: 1.2
   retry_count: 2
   max_queue_size: 50
+  reply_delay_seconds: 3.0
 
 runtime:
   poll_interval_seconds: 20
