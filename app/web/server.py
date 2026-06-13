@@ -110,14 +110,27 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
 
 
 def _fallback_read_config() -> None:
-    global _DB_PATH
+    global _DB_PATH, AUTH_USER, AUTH_PASS
     _cfg_path = Path("config.yaml")
     if _cfg_path.exists():
         _raw = yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
         _DB_PATH = str(_raw.get("storage", {}).get("sqlite_path", "data/bot.db"))
         if not os.path.isabs(_DB_PATH):
             _DB_PATH = str(_cfg_path.parent / _DB_PATH)
+        web_ui = _raw.get("web_ui", {}) or {}
+        if web_ui.get("username"):
+            AUTH_USER = web_ui["username"]
+        if web_ui.get("password"):
+            AUTH_PASS = web_ui["password"]
     logger.info("webui using db (fallback): %s", os.path.abspath(_DB_PATH))
+
+    # 同步 admin 凭据到 auth/users.json
+    users = _load_users()
+    if AUTH_USER not in users:
+        users[AUTH_USER] = {"password": AUTH_PASS, "role": "admin", "rooms": []}
+    elif users[AUTH_USER].get("password") != AUTH_PASS:
+        users[AUTH_USER]["password"] = AUTH_PASS
+    _save_users(users)
 
 
 app = FastAPI(title="BiliRobot Manager")
