@@ -50,8 +50,13 @@ def get_llm_config() -> dict[str, Any]:
     return _LLM_CONFIG_DICT
 
 
-def init_app(config: Any = None) -> None:
-    """从 AppConfig 初始化 WebUI 配置."""
+def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
+    """从 AppConfig 初始化 WebUI 配置.
+    
+    Args:
+        config: AppConfig 对象
+        config_path: 配置文件的实际路径（用于解析相对路径）
+    """
     global AUTH_USER, AUTH_PASS, _SESSION_TIMEOUT, _HTTP_HOST, _HTTP_PORT, _DB_PATH, _LLM_CONFIG_DICT, _CONFIG_YAML_PATH
     if config is None:
         _fallback_read_config()
@@ -63,7 +68,7 @@ def init_app(config: Any = None) -> None:
     _HTTP_PORT = config.web_ui.port
     _DB_PATH = config.storage.sqlite_path
     if not os.path.isabs(_DB_PATH):
-        _DB_PATH = str(Path("config.yaml").parent / _DB_PATH)
+        _DB_PATH = str(Path(config_path).parent / _DB_PATH)
     _LLM_CONFIG_DICT.update({
         "enabled": config.llm.enabled,
         "provider": config.llm.provider,
@@ -82,7 +87,7 @@ def init_app(config: Any = None) -> None:
             "max_messages": config.llm.context.max_messages,
         },
     })
-    _CONFIG_YAML_PATH = "config.yaml"
+    _CONFIG_YAML_PATH = config_path
     logger.info("webui configured: host=%s port=%s db=%s", _HTTP_HOST, _HTTP_PORT, os.path.abspath(_DB_PATH))
 
 

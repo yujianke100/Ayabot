@@ -152,11 +152,19 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_config(path: str = "config.yaml") -> AppConfig:
+    """加载配置文件，path 相对于项目根目录或绝对路径.
+
+    Args:
+        path: 配置文件路径。返回的 AppConfig 中，所有相对路径
+              (storage.sqlite_path, auth.credential_store_path)
+              会被解析为基于配置文件所在目录的绝对路径。
+    """
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"Config file not found: {path}. Copy config.example.yaml to config.yaml")
 
     raw = _read_yaml(p)
+    cfg_dir = p.resolve().parent
 
     credential = raw.get("credential", {})
     features = raw.get("features", {})
@@ -168,6 +176,15 @@ def load_config(path: str = "config.yaml") -> AppConfig:
     web_ui = raw.get("web_ui", {})
     llm = raw.get("llm", {})
     llm_ctx = llm.get("context", {})
+
+    # 解析相对路径 → 基于配置文件的绝对路径
+    sqlite_path = str(storage.get("sqlite_path", "data/bot.db"))
+    if not Path(sqlite_path).is_absolute():
+        sqlite_path = str(cfg_dir / sqlite_path)
+
+    cred_store_path = str(auth.get("credential_store_path", "data/credential.json"))
+    if not Path(cred_store_path).is_absolute():
+        cred_store_path = str(cfg_dir / cred_store_path)
 
     return AppConfig(
         room_display_id=int(raw["room_display_id"]),
@@ -395,3 +412,69 @@ def _parse_keyword_reply(raw: Any) -> KeywordReplyConfig:
         cooldown_seconds=cooldown,
         rules=rules,
     )
+
+
+# ── 房间隔离支持 ──
+
+DEFAULT_ROOMS_DIR = "rooms"
+
+
+def get_room_path(room_id: str | int, base_dir: str | Path | None = None) -> Path:
+    """返回房间目录路径: <base_dir>/rooms/<room_id>/"""
+    base = Path(base_dir or ".").resolve()
+    return base / DEFAULT_ROOMS_DIR / str(room_id)
+
+
+def load_room_config(room_id: str | int, base_dir: str | Path | None = None) -> AppConfig:
+    """按房间加载配置: rooms/<room_id>/config.yaml"""
+    room_dir = get_room_path(room_id, base_dir)
+    cfg_path = room_dir / "config.yaml"
+    if not cfg_path.exists():
+        raise FileNotFoundError(
+            f"Room config not found: {cfg_path}. "
+            f"Create room config first or use '--room init'."
+        )
+    return load_config(str(cfg_path))
+
+
+def ensure_room_dirs(room_id: str | int, base_dir: str | Path | None = None) -> Path:
+    """
+    确保房间目录结构存在，返回房间目录 Path。
+
+    目录结构:
+        rooms/<room_id>/
+            config.yaml     ← 房间配置（由外部或模板创建）
+            data/
+                bot.db      ← 房间专用数据库
+                credential.json
+    """
+    room_dir = get_room_path(room_id, base_dir)
+    (room_dir / "data").mkdir(parents=True, exist_ok=True)
+    return room_dir
+
+
+def migrate_legacy_data(room_id: str | int, base_dir: str | Path | None = None) -> bool:
+    """
+    如果检测到旧的 data/bot.db，自动迁移到 rooms/<room_id>/data/bot.db。
+    返回 True 表示执行了迁移。
+    """
+    base = Path(base_dir or ".").resolve()
+    old_db = base / "data" / "bot.db"
+    old_credential = base / "data" / "credential.json"
+    target_dir = get_room_path(room_id, base) / "data"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    migrated = False
+    if old_db.exists() and not (target_dir / "bot.db").exists():
+        import shutil
+        shutil.move(str(old_db), str(target_dir / "bot.db"))
+        logging.getLogger("config").info("migrated data/bot.db → %s", target_dir / "bot.db")
+        migrated = True
+
+    if old_credential.exists() and not (target_dir / "credential.json").exists():
+        import shutil
+        shutil.move(str(old_credential), str(target_dir / "credential.json"))
+        logging.getLogger("config").info("migrated data/credential.json → %s", target_dir / "credential.json")
+        migrated = True
+
+    return migrated
