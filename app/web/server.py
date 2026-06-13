@@ -2495,6 +2495,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.thanks_enabled" class="w-4 h-4"> 感谢</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.blindbox_enabled" class="w-4 h-4"> 盲盒统计</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.guard_thanks_enabled" class="w-4 h-4"> 大航海感谢</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.share_thanks_enabled" class="w-4 h-4"> 分享感谢</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.like_thanks_enabled" class="w-4 h-4"> 点赞感谢</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.connected_message_enabled" class="w-4 h-4"> 连接消息</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.danmaku_log_enabled" class="w-4 h-4"> 弹幕记录</label>
                 </div>
@@ -2524,6 +2526,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     </label>
                     <label class="text-xs text-gray-500 block">大航海 - 默认
                         <input type="text" v-model="roomConfig.features.guard_thanks_template_default" placeholder="感谢{uname}开通大航海！" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500 block">分享感谢
+                        <input type="text" v-model="roomConfig.features.share_template" placeholder="感谢分享直播间~" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500 block">点赞感谢（达到50点赞触发一次）
+                        <input type="text" v-model="roomConfig.features.like_template" placeholder="感谢50个点赞~" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
 
                     <h4 class="text-xs font-bold text-gray-600 mt-2">大航海欢迎（优先级高于默认欢迎模板）</h4>

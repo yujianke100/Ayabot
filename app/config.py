@@ -47,6 +47,10 @@ class FeatureConfig:
     guard_welcome_templates: dict[str, str] | None = None     # captain/commander/governor -> template
     danmaku_log_enabled: bool = False
     danmaku_log_max_entries: int = 1000
+    share_thanks_enabled: bool = True
+    share_template: str = "感谢分享直播间~"
+    like_thanks_enabled: bool = True
+    like_template: str = "感谢50个点赞~"
 
 
 @dataclass(slots=True)
@@ -251,6 +255,10 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             guard_welcome_templates=features.get("guard_welcome_templates", None) or None,
             danmaku_log_enabled=bool(features.get("danmaku_log_enabled", False)),
             danmaku_log_max_entries=int(features.get("danmaku_log_max_entries", 1000)),
+            share_thanks_enabled=bool(features.get("share_thanks_enabled", True)),
+            share_template=str(features.get("share_template", "感谢分享直播间~")),
+            like_thanks_enabled=bool(features.get("like_thanks_enabled", True)),
+            like_template=str(features.get("like_template", "感谢50个点赞~")),
         ),
         cooldown=CooldownConfig(
             welcome_user_seconds=int(cooldown.get("welcome_user_seconds", 600)),
@@ -358,6 +366,10 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "guard_welcome_templates": config.features.guard_welcome_templates,
             "danmaku_log_enabled": config.features.danmaku_log_enabled,
             "danmaku_log_max_entries": config.features.danmaku_log_max_entries,
+            "share_thanks_enabled": config.features.share_thanks_enabled,
+            "share_template": config.features.share_template,
+            "like_thanks_enabled": config.features.like_thanks_enabled,
+            "like_template": config.features.like_template,
         },
         "web_ui": {
             "host": config.web_ui.host,

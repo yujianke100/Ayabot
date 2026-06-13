@@ -19,6 +19,10 @@ features:
   guard_thanks_template_commander: "感谢 {uname} 开通提督 x{months}"
   guard_thanks_template_governor: "感谢 {uname} 开通总督 x{months}"
   guard_thanks_template_default: "感谢 {uname} 的大航海 ({guard_type}) x{months}"
+  share_thanks_enabled: true
+  share_template: "感谢分享直播间~"
+  like_thanks_enabled: true
+  like_template: "感谢50个点赞~"
   connected_message: "机器人已上线~"
   connected_message_enabled: true
   anchor_exclusive_reply: []

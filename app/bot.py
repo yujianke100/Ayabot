@@ -65,6 +65,11 @@ class LiveRobot:
         self._periodic_task: Optional[asyncio.Task[None]] = None
         self._keyword_reply_cooldown_ts: dict[int, float] = {}
 
+        self._like_counts: dict[int, int] = {}
+        self._like_thanked: set[int] = set()
+        self._share_template = config.features.share_template
+        self._like_template = config.features.like_template
+
         # 从配置读取唤醒词
         wake = getattr(config.llm, 'wake_word', 'ayabot')
         _set_wake_word(wake)
@@ -128,6 +133,8 @@ class LiveRobot:
 
         self._danmaku.on("ROOM_ADMINS")(self._on_room_admins)
         self._danmaku.on("DANMU_MSG")(self._on_danmaku)
+
+        self._danmaku.on("LIKE_INFO_V3_CLICK")(self._on_like)
 
         # Log all events for debugging blindbox and unknown event types
         self._danmaku.on("ALL")(self._on_all_events)
@@ -294,11 +301,17 @@ class LiveRobot:
         self._admin_uids = parsed
 
     async def _on_enter_room(self, event: dict[str, Any]) -> None:
-        if not self._welcome_enabled:
-            return
-
         uid, uname = _extract_enter_uid_uname(event)
         if uid <= 0 or not uname:
+            return
+
+        data = event.get("data", {})
+        msg_type = data.get("msg_type") if isinstance(data, dict) else None
+        if msg_type == 3:
+            await self._on_share(uid, uname)
+            return
+
+        if not self._welcome_enabled:
             return
 
         now = time.time()
@@ -747,6 +760,30 @@ class LiveRobot:
 
     async def _on_connected(self, event: dict[str, Any]) -> None:
         await self._enqueue_message(text=self.config.features.connected_message, reply_uid=None)
+
+    async def _on_share(self, uid: int, uname: str) -> None:
+        if not self.config.features.share_thanks_enabled:
+            return
+        text = self._share_template.replace("{uname}", uname)
+        await self._enqueue_message(text=text, reply_uid=uid)
+
+    async def _on_like(self, event: dict[str, Any]) -> None:
+        if not self.config.features.like_thanks_enabled:
+            return
+        data = event.get("data", {})
+        if not isinstance(data, dict):
+            return
+        uid = _safe_int(data.get("uid") or 0)
+        uname = str(data.get("uname", ""))
+        if uid <= 0 or not uname:
+            return
+        if uid in self._like_thanked:
+            return
+        self._like_counts[uid] = self._like_counts.get(uid, 0) + 1
+        if self._like_counts[uid] >= 50:
+            text = self._like_template.replace("{uname}", uname)
+            await self._enqueue_message(text=text, reply_uid=uid)
+            self._like_thanked.add(uid)
 
     def _has_control_permission(self, uid: int, moderator_hint: bool) -> bool:
         if uid == self.config.anchor_uid:
