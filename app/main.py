@@ -39,6 +39,9 @@ async def _run(config_path: str) -> None:
     config = load_config(config_path)
     _setup_logging(config.runtime.log_level)
 
+    from app.web.server import init_app  # noqa: PLC0415
+    init_app(config, config_path=config_path)
+
     auth = AuthManager(config)
     credential = await auth.prepare_credential()
     auth.start_refresh_loop(credential)
