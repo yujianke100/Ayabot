@@ -1462,6 +1462,10 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
             where_clauses.append("is_blind_box = 1")
 
         where_sql = " AND ".join(where_clauses)
+        if where_clauses:
+            where_sql += " AND event_type = 'SEND_GIFT'"
+        else:
+            where_sql = "event_type = 'SEND_GIFT'"
 
         cur.execute(f"""
             SELECT uid, uname,
@@ -1502,7 +1506,7 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
         cur.execute(f"""
             SELECT uid, uname, gift_name, gift_num, actual_value, ts, is_blind_box, id, raw_json
             FROM gift_events
-            WHERE uid = ? AND date(ts, 'unixepoch') = date(?){where_extra}
+            WHERE uid = ? AND date(ts, 'unixepoch') = date(?) AND event_type = 'SEND_GIFT'{where_extra}
             ORDER BY ts
         """, (uid, date))
         rows = cur.fetchall()
