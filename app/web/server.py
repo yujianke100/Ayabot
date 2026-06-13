@@ -1877,6 +1877,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <option v-for="a in accounts" :key="a.uid" :value="a.uid">{{ a.nickname || 'UID:'+a.uid }}</option>
                 </select>
                 <button @click="assignAccountToRoom" class="bg-blue-500 hover:bg-blue-600 text-white px-2 py-0.5 rounded text-xs">保存</button>
+                <button @click="assignAccountAndRestart" class="bg-green-600 hover:bg-green-700 text-white px-2 py-0.5 rounded text-xs" :disabled="accountRestarting">{{ accountRestarting ? '重启中...' : '保存并重启' }}</button>
                 <span v-if="accountAssignMsg" class="text-xs" :class="accountAssignOk ? 'text-green-600' : 'text-red-500'">{{ accountAssignMsg }}</span>
             </div>
         </div>
@@ -2480,6 +2481,7 @@ createApp({
         const selectedRoomAccount = ref('');
         const accountAssignMsg = ref('');
         const accountAssignOk = ref(false);
+        const accountRestarting = ref(false);
 
         // Accounts management
         const accounts = ref([]);
@@ -2740,6 +2742,39 @@ createApp({
             } catch(e) {
                 accountAssignMsg.value = '❌ 保存失败';
                 accountAssignOk.value = false;
+            }
+        }
+        async function assignAccountAndRestart() {
+            const rid = selectedRoom.value?.room_id;
+            if (!rid) return;
+            accountAssignMsg.value = '';
+            accountRestarting.value = true;
+            try {
+                // 先保存账号
+                const res = await fetch(`/api/rooms/${rid}/config`, {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    credentials: 'include',
+                    body: JSON.stringify({account_uid: selectedRoomAccount.value || ''}),
+                });
+                const data = await res.json();
+                if (!data.ok) throw new Error('保存失败');
+                // 再重启 bot
+                const restartRes = await fetch(`/api/rooms/${rid}/restart`, {
+                    method: 'POST', credentials: 'include',
+                });
+                if (!restartRes.ok) throw new Error('重启失败');
+                accountAssignMsg.value = '✅ 已保存并重启';
+                accountAssignOk.value = true;
+                selectedRoom.value.account_uid = selectedRoomAccount.value;
+                selectedRoom.value.status = 'running';
+                await loadRooms();
+                await loadAccounts();
+            } catch(e) {
+                accountAssignMsg.value = '❌ ' + e.message;
+                accountAssignOk.value = false;
+            } finally {
+                accountRestarting.value = false;
             }
         }
 
@@ -3574,7 +3609,7 @@ createApp({
                 restartMsg, restartOk, restartService,
                 selectedRoom, roomSubTab, roomSubTabs, newRoomAccount, selectedRoomAccount,
                 selectRoom, assignAccountToRoom, toggleCreateRoom, toggleNewAccount,
-                selectRoomSubTab, accountAssignMsg, accountAssignOk,
+                selectRoomSubTab, accountAssignMsg, accountAssignOk, accountRestarting, assignAccountAndRestart,
                 startEditRoomName, saveRoomName, editingRoomName, roomNameEdit,
                 rooms, showCreateRoom, newRoomUid, newRoomName, newRoomPort, newRoomDisplayId,
                 creatingRoom, createRoomMsg, createRoomOk, createRoom,
