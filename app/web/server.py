@@ -2019,7 +2019,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                 </div>
                                 <div class="flex items-center gap-1.5 mt-0.5 flex-wrap">
                                     <span class="text-xs text-white/80">投喂了 {{ item.gift_name }} × {{ item.gift_num }}</span>
-                                    <span class="gift-value" v-if="item.price">¥{{ (item.price / 1000).toFixed(1) }}</span>
+                                    <span class="gift-value" v-if="item.actual_value">¥{{ Number(item.actual_value).toFixed(1) }}</span>
                                     <span class="gift-time" v-if="item.ts">{{ fmtTime(item.ts) }}</span>
                                 </div>
                             </div>
