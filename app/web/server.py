@@ -100,6 +100,14 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
         _ROOMS_BASE_DIR = str(cfg_parent.resolve())
     logger.info("webui configured: host=%s port=%s db=%s", _HTTP_HOST, _HTTP_PORT, os.path.abspath(_DB_PATH))
 
+    # 同步 admin 凭据到 auth/users.json（确保 config.yaml 修改的密码也能登录）
+    users = _load_users()
+    if AUTH_USER not in users:
+        users[AUTH_USER] = {"password": AUTH_PASS, "role": "admin", "rooms": []}
+    elif users[AUTH_USER].get("password") != AUTH_PASS:
+        users[AUTH_USER]["password"] = AUTH_PASS
+    _save_users(users)
+
 
 def _fallback_read_config() -> None:
     global _DB_PATH
@@ -938,6 +946,9 @@ def _list_rooms_from_disk() -> list[dict[str, Any]]:
             "bot_name": cfg.get("web_ui", {}).get("bot_name", ""),
             "status": _room_status(room_id),
             "port": cfg.get("web_ui", {}).get("port", 8000),
+            "account_uid": cfg.get("account_uid", ""),
+            "account_nick": "",
+            "room_name": cfg.get("room_name", ""),
         })
     return rooms
 
@@ -946,6 +957,11 @@ def _list_rooms_from_disk() -> list[dict[str, Any]]:
 async def api_list_rooms(request: Request):
     """列出所有房间及状态."""
     rooms = _list_rooms_from_disk()
+    # 补齐 account_nick
+    accounts_map = {a["uid"]: a.get("nickname", "") for a in _list_accounts()}
+    for r in rooms:
+        if r.get("account_uid"):
+            r["account_nick"] = accounts_map.get(str(r["account_uid"]), "")
     # 根据用户角色过滤
     token = request.cookies.get("session", "")
     _, role, allowed = _user_role(token)
@@ -1767,8 +1783,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <div class="flex items-center gap-2">
                         <span class="w-2 h-2 rounded-full inline-block"
                               :class="r.status==='running' ? 'bg-green-500' : 'bg-gray-400'"></span>
-                        <span class="font-bold text-sm">#{{ r.room_id }}</span>
-                        <span class="text-xs text-gray-400">UID: {{ r.anchor_uid }}</span>
+                        <span class="font-bold text-sm">{{ r.room_name || ('#'+r.room_id) }}</span>
+                        <span v-if="r.room_name" class="text-xs text-gray-400">#{{ r.room_id }}</span>
+                        <span class="text-xs text-gray-400 ml-1">UID: {{ r.anchor_uid }}</span>
                     </div>
                     <div class="text-xs text-gray-500 mt-1 flex gap-3">
                         <span>状态: {{ r.status === 'running' ? '🟢 运行中' : '⏹️ 已停止' }}</span>
@@ -1799,7 +1816,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <!-- 房间信息头 -->
         <div class="bg-white p-4 rounded-xl shadow-sm mb-4 flex items-center justify-between">
             <div>
-                <h2 class="text-lg font-bold">📺 房间 #{{ selectedRoom.room_id }}</h2>
+                <h2 class="text-lg font-bold">📺
+                    <template v-if="editingRoomName">
+                        <input type="text" v-model="roomNameEdit" class="border p-1 rounded text-sm w-40" @keyup.enter="saveRoomName" @keyup.escape="editingRoomName=false">
+                        <button @click="saveRoomName" class="text-blue-500 text-xs ml-1">保存</button>
+                        <button @click="editingRoomName=false" class="text-gray-400 text-xs ml-1">取消</button>
+                    </template>
+                    <template v-else>
+                        {{ selectedRoom.room_name || ('房间 #'+selectedRoom.room_id) }}
+                        <button @click="startEditRoomName" class="text-gray-400 hover:text-blue-500 text-xs ml-1">✏️</button>
+                    </template>
+                </h2>
                 <div class="text-xs text-gray-500 mt-1">
                     主播 UID: {{ selectedRoom.anchor_uid }}
                     | 状态: {{ selectedRoom.status === 'running' ? '🟢 运行中' : '⏹️ 已停止' }}
@@ -2472,6 +2499,8 @@ createApp({
         const roomConfig = ref(null);
         const roomSaveMsg = ref('');
         const roomSaveOk = ref(false);
+        const editingRoomName = ref(false);
+        const roomNameEdit = ref('');
 
         // LLM Config
         const llmEnabled = ref(false);
@@ -2595,6 +2624,27 @@ createApp({
             roomSubTab.value = 'ranking';
             selectedRoomAccount.value = r.account_uid || '';
         }
+        function startEditRoomName() {
+            roomNameEdit.value = selectedRoom.value?.room_name || '';
+            editingRoomName.value = true;
+        }
+        async function saveRoomName() {
+            const name = roomNameEdit.value?.trim() || '';
+            const rid = selectedRoom.value?.room_id;
+            if (!rid) return;
+            editingRoomName.value = false;
+            try {
+                const res = await fetch(`/api/rooms/${rid}/config`, {
+                    method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include',
+                    body: JSON.stringify({room_name: name}),
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    selectedRoom.value.room_name = name;
+                    await loadRooms();
+                }
+            } catch(e) { /* ignore */ }
+        }
         function selectRoomSubTab(key) {
             roomSubTab.value = key;
             if (key === 'config' && selectedRoom.value) {
@@ -2620,6 +2670,7 @@ createApp({
                     accountAssignOk.value = true;
                     selectedRoom.value.account_uid = selectedRoomAccount.value;
                     await loadRooms();
+                    await loadAccounts();
                 } else {
                     accountAssignMsg.value = '❌ 保存失败';
                     accountAssignOk.value = false;
@@ -3440,6 +3491,7 @@ createApp({
                 selectedRoom, roomSubTab, roomSubTabs, newRoomAccount, selectedRoomAccount,
                 selectRoom, assignAccountToRoom, toggleCreateRoom, toggleNewAccount,
                 selectRoomSubTab, accountAssignMsg, accountAssignOk,
+                startEditRoomName, saveRoomName, editingRoomName, roomNameEdit,
                 rooms, showCreateRoom, newRoomUid, newRoomName, newRoomPort, newRoomDisplayId,
                 creatingRoom, createRoomMsg, createRoomOk, createRoom,
                 startRoom, stopRoom, deleteRoom, editRoomConfig, saveRoomConfig, editingRoom, roomConfig,
