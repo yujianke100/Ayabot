@@ -110,7 +110,7 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
 
 
 def _fallback_read_config() -> None:
-    global _DB_PATH, AUTH_USER, AUTH_PASS
+    global _DB_PATH, AUTH_USER, AUTH_PASS, _CONFIG_YAML_PATH, _LLM_CONFIG_DICT
     _cfg_path = Path("config.yaml")
     if _cfg_path.exists():
         _raw = yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
@@ -122,6 +122,27 @@ def _fallback_read_config() -> None:
             AUTH_USER = web_ui["username"]
         if web_ui.get("password"):
             AUTH_PASS = web_ui["password"]
+    _CONFIG_YAML_PATH = str(_cfg_path.resolve())
+    # 加载 LLM 配置到内存
+    llm_raw = _raw.get("llm", {}) if _cfg_path.exists() else {}
+    _LLM_CONFIG_DICT.update({
+        "enabled": llm_raw.get("enabled", False),
+        "provider": llm_raw.get("provider", "openai"),
+        "api_key": llm_raw.get("api_key", ""),
+        "base_url": llm_raw.get("base_url", ""),
+        "model": llm_raw.get("model", ""),
+        "wake_word": llm_raw.get("wake_word", "ayabot"),
+        "temperature": llm_raw.get("temperature", 0.7),
+        "top_p": llm_raw.get("top_p", 0.9),
+        "max_tokens": llm_raw.get("max_tokens", 150),
+        "system_prompt": llm_raw.get("system_prompt", ""),
+        "context": {
+            "enabled": llm_raw.get("context", {}).get("enabled", True),
+            "mode": llm_raw.get("context", {}).get("mode", "isolated"),
+            "content": llm_raw.get("context", {}).get("content", "llm_only"),
+            "max_messages": llm_raw.get("context", {}).get("max_messages", 10),
+        },
+    })
     logger.info("webui using db (fallback): %s", os.path.abspath(_DB_PATH))
 
     # 同步 admin 凭据到 auth/users.json
@@ -903,9 +924,15 @@ _ROOMS_BASE_DIR: str = "."  # 由 init_app 设置
 async def _resolve_room_id(anchor_uid: int) -> int:
     """通过 B站 API 从主播 UID 查询直播间号."""
     url = f"https://api.live.bilibili.com/room/v1/Room/getRoomInfoOld?mid={anchor_uid}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://live.bilibili.com/",
+    }
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as sess:
-            async with sess.get(url) as resp:
+            async with sess.get(url, headers=headers) as resp:
+                if resp.content_type != "application/json":
+                    raise ValueError(f"B站 API 返回非 JSON (content_type={resp.content_type}), 可能被风控")
                 data = await resp.json()
         if data.get("code") == 0 and data.get("data", {}).get("room_id"):
             return int(data["data"]["room_id"])
