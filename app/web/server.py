@@ -1312,32 +1312,31 @@ async def api_account_login_status(session_id: str):
 
     qr = sess["qr"]
 
-    # 生成后至少过 5 秒才认可 SCAN 状态，避免刚生成时的误判
+    # 二维码硬超时：B站二维码有效期通常 180 秒，60 秒后已经不可靠
     import time as _time2
     elapsed = _time2.time() - sess.get("created_at", 0)
+    QR_MAX_AGE = 60  # 60 秒后强制过期
+
+    if elapsed >= QR_MAX_AGE:
+        # 不删除 session，给前端留足够时间看到 "timeout"
+        return {"state": "timeout"}
+
+    # 生成后至少过 5 秒才认可 SCAN 状态，避免刚生成时的误判
+    if elapsed < 5:
+        return {"state": "waiting"}
 
     try:
         if qr.has_done():
-            logger.info("account QR poll: has_done true")
             return {"state": "done"}
 
         state = await qr.check_state()
 
-        logger.info("account QR poll: session=%s.. state=%s elapsed=%.1fs", session_id[:8], state.value if hasattr(state, 'value') else str(state), elapsed)
-
         if state == login_v2.QrCodeLoginEvents.TIMEOUT:
-            _BILI_LOGIN_SESSIONS.pop(session_id, None)
             return {"state": "timeout"}
         if state == login_v2.QrCodeLoginEvents.SCAN:
-            if elapsed >= 5:
-                return {"state": "scanned"}
-            else:
-                return {"state": "waiting"}
+            return {"state": "scanned"}
         if state == login_v2.QrCodeLoginEvents.CONF:
-            if elapsed >= 5:
-                return {"state": "done"}
-            else:
-                return {"state": "scanned"}
+            return {"state": "done"}
 
         return {"state": "waiting"}
     except Exception as exc:
