@@ -1464,8 +1464,9 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
         where_sql = " AND ".join(where_clauses)
 
         cur.execute(f"""
-            SELECT uid, uname, sum(gift_num) as cnt,
-                   sum(actual_value) as total, sum(profit_value) as total_profit
+            SELECT uid, uname,
+                   sum(CASE WHEN is_blind_box=1 THEN actual_value ELSE CAST(json_extract(raw_json, '$.total_coin') AS INTEGER) END) as total,
+                   sum(profit_value) as total_profit
             FROM gift_events WHERE {where_sql}
             GROUP BY uid ORDER BY total DESC LIMIT 50
         """, params)
@@ -1516,10 +1517,17 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
                     raw = _json.loads(r[8])
                 except Exception:
                     raw = {}
-            # 从 raw_json 解析舰长等级、头像、礼物图标
+            # 从 raw_json 解析实际价格、舰长等级、头像、礼物图标
             guard_level = 0
             avatar = ""
             gift_icon = ""
+            actual_value = r[4]  # DB actual_value (for blindbox = item value)
+            is_blind = bool(r[6])
+
+            if not is_blind and raw:
+                # 一般礼物：从 total_coin 取实际价值
+                actual_value = int(raw.get("total_coin", 0) or 0)
+
             if raw:
                 sender_info = raw.get("sender_uinfo", {}) or {}
                 base = sender_info.get("base", {}) or {}
@@ -1532,10 +1540,11 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
                     guard_level = medal.get("guard_level", 0) or 0
                 gift_info = raw.get("gift_info", {}) or {}
                 gift_icon = gift_info.get("img_basic", "") or gift_info.get("webp", "") or ""
+
             results.append({
                 "uid": r[0], "uname": r[1], "gift_name": r[2],
-                "gift_num": r[3], "actual_value": r[4],
-                "ts": r[5], "is_blind_box": bool(r[6]),
+                "gift_num": r[3], "actual_value": actual_value,
+                "ts": r[5], "is_blind_box": is_blind,
                 "id": r[7],
                 "guard_level": guard_level,
                 "avatar": avatar,
@@ -2351,15 +2360,22 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     </label>
                 </div>
                 <label class="text-xs text-gray-500">可查看的房间</label>
-                <div class="flex flex-wrap gap-2">
-                    <label v-for="r in allRooms" :key="r.room_id"
-                           class="flex items-center gap-1 text-xs border rounded px-2 py-1 cursor-pointer select-none"
-                           :class="editStreamerRooms.includes(r.room_id) ? 'bg-blue-100 border-blue-400' : 'bg-white border-gray-200'"
-                           @click="toggleStreamerRoom(r.room_id)">
-                        <input type="checkbox" :checked="editStreamerRooms.includes(r.room_id)" class="w-3 h-3" style="display:none">
-                        {{ r.room_name || ('#'+r.room_id) }}
-                    </label>
-                    <div v-if="!allRooms.length" class="text-xs text-gray-400">暂无房间，请先在房间管理创建直播间</div>
+                <div class="relative">
+                    <button @click="showRoomDropdown = !showRoomDropdown"
+                            class="border rounded w-full text-sm mt-1 p-2 text-left bg-white flex items-center justify-between">
+                        <span v-if="editStreamerRooms.length === 0" class="text-gray-400">选择房间...</span>
+                        <span v-else class="text-gray-700">{{ editStreamerRooms.length }} 个房间已选</span>
+                        <span class="text-gray-400">▼</span>
+                    </button>
+                    <div v-if="showRoomDropdown" class="absolute z-50 mt-1 bg-white border rounded shadow-lg w-full max-h-48 overflow-y-auto">
+                        <div v-for="r in allRooms" :key="r.room_id"
+                             class="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 cursor-pointer text-sm"
+                             @click="toggleStreamerRoom(r.room_id)">
+                            <input type="checkbox" :checked="editStreamerRooms.includes(r.room_id)" class="w-3.5 h-3.5">
+                            <span>{{ r.room_name || ('#'+r.room_id) }}</span>
+                        </div>
+                        <div v-if="!allRooms.length" class="text-xs text-gray-400 px-3 py-2">暂无房间</div>
+                    </div>
                 </div>
                 <div class="flex gap-2 mt-2">
                     <button @click="saveStreamer" :disabled="savingStreamer"
@@ -3435,6 +3451,7 @@ createApp({
         const savingStreamer = ref(false);
         const streamerMsg = ref('');
         const streamerOk = ref(false);
+        const showRoomDropdown = ref(false);
         const adminPass = ref('');
         const adminPassMsg = ref('');
         const adminPassOk = ref(false);
@@ -3552,7 +3569,7 @@ createApp({
                 editingNickname, startEditNickname, saveNickname, verifyAccount,
                 streamers, allRooms, showStreamerForm, editStreamerUser, editStreamerPass,
                 editStreamerRooms, savingStreamer, streamerMsg, streamerOk, adminPass, adminPassMsg, adminPassOk,
-                loadUsers, saveStreamer, editStreamer, deleteStreamer, toggleStreamerRoom, saveAdminPass};
+                loadUsers, saveStreamer, editStreamer, deleteStreamer, toggleStreamerRoom, saveAdminPass, showRoomDropdown};
     }
 }).mount('#app');
 </script>
