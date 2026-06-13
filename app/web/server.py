@@ -1058,6 +1058,16 @@ async def api_stop_room(room_id: str):
     return {"ok": True, "status": "stopped"}
 
 
+@app.post("/api/rooms/{room_id}/restart")
+async def api_restart_room(room_id: str):
+    """重启房间 systemd 服务."""
+    import subprocess as _sp
+    svc = _room_service_name(room_id)
+    _sp.run(["systemctl", "restart", svc], capture_output=True, text=True, timeout=15)
+    logger.info("room restarted: %s", room_id)
+    return {"ok": True, "status": "running"}
+
+
 @app.delete("/api/rooms/{room_id}")
 async def api_delete_room(room_id: str):
     """删除房间（先停止，再删目录）."""
@@ -1876,8 +1886,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <option value="">不关联</option>
                     <option v-for="a in accounts" :key="a.uid" :value="a.uid">{{ a.nickname || 'UID:'+a.uid }}</option>
                 </select>
-                <button @click="assignAccountToRoom" class="bg-blue-500 hover:bg-blue-600 text-white px-2 py-0.5 rounded text-xs">保存</button>
-                <button @click="assignAccountAndRestart" class="bg-green-600 hover:bg-green-700 text-white px-2 py-0.5 rounded text-xs" :disabled="accountRestarting">{{ accountRestarting ? '重启中...' : '保存并重启' }}</button>
+                <button @click="assignAccountAndRestart" class="bg-green-600 hover:bg-green-700 text-white px-2 py-0.5 rounded text-xs" :disabled="accountRestarting">{{ accountRestarting ? '重启中...' : '✅ 保存并重启' }}</button>
                 <span v-if="accountAssignMsg" class="text-xs" :class="accountAssignOk ? 'text-green-600' : 'text-red-500'">{{ accountAssignMsg }}</span>
             </div>
         </div>
