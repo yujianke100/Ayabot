@@ -1552,6 +1552,7 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
 
             if merge_key in merged:
                 merged[merge_key]["gift_num"] += r[3]
+                merged[merge_key]["actual_value"] += actual_value
             else:
                 merged[merge_key] = {
                     "uid": r[0], "uname": r[1], "gift_name": r[2],
@@ -2020,6 +2021,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                 <div class="flex items-center gap-1.5 mt-0.5 flex-wrap">
                                     <span class="text-xs text-white/80">投喂了 {{ item.gift_name }} × {{ item.gift_num }}</span>
                                     <span class="gift-value" v-if="item.actual_value">¥{{ Number(item.actual_value).toFixed(1) }}</span>
+                                    <span class="text-[10px] text-white/60" v-if="item.actual_value && item.gift_num > 1">(¥{{ Number(item.actual_value / item.gift_num).toFixed(2) }}/个)</span>
                                     <span class="gift-time" v-if="item.ts">{{ fmtTime(item.ts) }}</span>
                                 </div>
                             </div>
