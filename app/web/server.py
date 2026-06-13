@@ -1474,7 +1474,7 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
         conn.close()
 
         ranking = [
-            {"uid": r[0], "uname": r[1], "count": r[2], "total": r[3], "total_profit": r[4]}
+            {"uid": r[0], "uname": r[1], "count": 0, "total": r[2], "total_profit": r[3] if len(r) > 3 else 0}
             for r in rows
         ]
         return {"ranking": ranking}
