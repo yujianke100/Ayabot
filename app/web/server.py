@@ -1161,6 +1161,35 @@ async def api_save_account_credential(request: Request):
     }
 
 
+@app.get("/api/bili_accounts/status")
+async def api_account_login_status(session_id: str):
+    """查询账号二维码登录状态."""
+    sess = _BILI_LOGIN_SESSIONS.get(session_id)
+    if not sess:
+        return {"state": "expired"}
+
+    qr = sess["qr"]
+
+    try:
+        if qr.has_done():
+            return {"state": "done"}
+
+        state = await qr.check_state()
+
+        if state == login_v2.QrCodeLoginEvents.TIMEOUT:
+            _BILI_LOGIN_SESSIONS.pop(session_id, None)
+            return {"state": "timeout"}
+        if state == login_v2.QrCodeLoginEvents.SCAN:
+            return {"state": "scanned"}
+        if state == login_v2.QrCodeLoginEvents.CONF:
+            return {"state": "done"}
+
+        return {"state": "waiting"}
+    except Exception as exc:
+        logger.warning("account login status error: %s", exc)
+        return {"state": "error", "message": str(exc)}
+
+
 @app.delete("/api/bili_accounts/{uid}")
 async def api_delete_account(uid: str):
     """删除 B站 账号（解除所有房间的关联）."""
@@ -2009,10 +2038,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     已扫码，请在手机上确认
                 </div>
                 <div v-if="accountQrState === 'done'" class="text-green-600 text-sm font-bold">
-                    ✅ 登录成功
+                    ✅ 登录成功，即将返回...
+                </div>
+                <div v-if="accountQrState === 'timeout' || accountQrState === 'expired'" class="text-red-500 text-sm">
+                    ⏰ 二维码已过期
                 </div>
                 <div v-if="accountQrState === 'error'" class="text-red-500 text-sm">
                     {{ accountQrError }}
+                </div>
+                <div v-if="accountQrState === 'waiting' || accountQrState === 'scanned' || accountQrState === 'timeout' || accountQrState === 'expired'" class="flex gap-2 justify-center">
+                    <button @click="refreshQrCode" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-1.5 rounded text-sm">🔄 刷新二维码</button>
                 </div>
             </div>
         </div>
@@ -2353,6 +2388,7 @@ createApp({
             accountQrState.value = 'loading';
             accountQrError.value = '';
             if (accountsPollTimer) { clearInterval(accountsPollTimer); accountsPollTimer = null; }
+            accountQrImage.value = '';
             try {
                 const res = await fetch('/api/bili_accounts', {
                     method: 'POST',
@@ -2374,10 +2410,19 @@ createApp({
                 accountLoggingIn.value = false;
             }
         }
+        function refreshQrCode() {
+            // 停止旧轮询，重新生成二维码
+            if (accountsPollTimer) { clearInterval(accountsPollTimer); accountsPollTimer = null; }
+            accountSessionId.value = '';
+            accountQrImage.value = '';
+            accountQrState.value = 'idle';
+            accountQrError.value = '';
+            startAccountLogin();
+        }
         async function pollAccountLogin() {
             if (!accountSessionId.value) return;
             try {
-                const res = await fetch('/api/bili_login/status?session_id=' + accountSessionId.value, {
+                const res = await fetch('/api/bili_accounts/status?session_id=' + accountSessionId.value, {
                     credentials: 'include',
                 });
                 if (!res.ok) return;
@@ -2386,6 +2431,13 @@ createApp({
                     accountQrState.value = 'done';
                     if (accountsPollTimer) { clearInterval(accountsPollTimer); accountsPollTimer = null; }
                     await saveAccountLogin();
+                    // 登录成功，自动关闭二维码面板
+                    setTimeout(() => {
+                        showNewAccount.value = false;
+                        accountQrState.value = 'idle';
+                        accountQrImage.value = '';
+                        accountSessionId.value = '';
+                    }, 1500);
                 } else if (data.state === 'scanned') {
                     accountQrState.value = 'scanned';
                 } else if (data.state === 'timeout') {
@@ -2396,6 +2448,7 @@ createApp({
                     accountQrState.value = 'error';
                     if (accountsPollTimer) { clearInterval(accountsPollTimer); accountsPollTimer = null; }
                 }
+                // 不处理 'waiting' - 保持当前状态
             } catch(e) { /* ignore */ }
         }
         async function saveAccountLogin() {
@@ -3030,7 +3083,7 @@ createApp({
                 roomSaveMsg, roomSaveOk,
                 accounts, showNewAccount, newAccountUid, accountLoggingIn, accountQrImage,
                 accountQrState, accountQrError, startAccountLogin, refreshAccount, deleteAccount,
-                loadAccounts, loadRooms};
+                loadAccounts, loadRooms, refreshQrCode};
     }
 }).mount('#app');
 </script>
