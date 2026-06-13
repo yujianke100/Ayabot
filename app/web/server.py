@@ -1238,6 +1238,51 @@ async def api_delete_account(uid: str):
     return {"ok": True}
 
 
+@app.post("/api/bili_accounts/{uid}/nickname")
+async def api_update_account_nickname(uid: str, request: Request):
+    """修改 B站 账号的显示名称."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    nickname = body.get("nickname", "").strip()
+    if not nickname:
+        return JSONResponse({"error": "nickname required"}, status_code=400)
+    meta_path = _get_account_dir(uid) / "meta.yaml"
+    try:
+        meta = yaml.safe_load(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+    except Exception:
+        meta = {}
+    meta["nickname"] = nickname
+    meta_path.write_text(yaml.dump(meta, allow_unicode=True), encoding="utf-8")
+    return {"ok": True, "nickname": nickname}
+
+
+@app.post("/api/bili_accounts/{uid}/verify")
+async def api_verify_account_credential(uid: str):
+    """验证 B站 凭证是否仍然有效."""
+    cred_path = _get_account_dir(uid) / "credential.json"
+    if not cred_path.exists():
+        return {"valid": False, "error": "no credential"}
+    try:
+        cred_data = json.loads(cred_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"valid": False, "error": "corrupted credential"}
+    try:
+        from bilibili_api import Credential  # noqa: PLC0415
+        credential = Credential(
+            sessdata=cred_data.get("SESSDATA", ""),
+            bili_jct=cred_data.get("bili_jct", ""),
+            buvid3=cred_data.get("buvid3", ""),
+            dedeuserid=cred_data.get("DedeUserID", ""),
+            ac_time_value=cred_data.get("ac_time_value", ""),
+        )
+        ok = await credential.check_valid()
+        return {"valid": ok}
+    except Exception as exc:
+        return {"valid": False, "error": str(exc)}
+
+
 # ══════════════════════════════════════════════════════════════
 #  Per-Room 数据 API
 # ══════════════════════════════════════════════════════════════
@@ -2072,7 +2117,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div v-for="a in accounts" :key="a.uid"
              class="border rounded-lg p-4 flex items-center justify-between">
             <div>
-                <div class="font-bold text-sm">{{ a.nickname || '未命名' }}</div>
+                <div class="font-bold text-sm">
+                    <template v-if="editingNickname === a.uid">
+                        <input type="text" v-model="a.editNick" class="border p-1 rounded text-sm w-32" @keyup.enter="saveNickname(a)">
+                        <button @click="saveNickname(a)" class="text-blue-500 text-xs ml-1">保存</button>
+                        <button @click="editingNickname = null" class="text-gray-400 text-xs ml-1">取消</button>
+                    </template>
+                    <template v-else>
+                        <span @click="startEditNickname(a)" class="cursor-pointer hover:text-blue-600">{{ a.nickname || '未命名' }}</span>
+                        <button @click="startEditNickname(a)" class="text-gray-400 hover:text-blue-500 text-xs ml-1">✏️</button>
+                    </template>
+                </div>
                 <div class="text-xs text-gray-500 mt-1">UID: {{ a.uid }}</div>
                 <div v-if="a.linked_rooms && a.linked_rooms.length" class="text-xs text-gray-400 mt-1">
                     关联房间: <span v-for="(lr, li) in a.linked_rooms" :key="lr.room_id">{{ lr.room_id }}<span v-if="li < a.linked_rooms.length-1">, </span></span>
@@ -2080,6 +2135,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <div v-else class="text-xs text-gray-400 mt-1">未关联房间（可在房间详情设置中绑定）</div>
             </div>
             <div class="flex gap-2 items-center">
+                <button @click="verifyAccount(a.uid)" :disabled="a.verifying" class="text-green-500 hover:text-green-700 text-xs underline">
+                    {{ a.verifying ? '验证中...' : (a.credential_ok === true ? '✅ 有效' : (a.credential_ok === false ? '❌ 失效' : '验证')) }}
+                </button>
                 <button @click="deleteAccount(a.uid, a.nickname)"
                         class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
             </div>
@@ -2488,6 +2546,39 @@ createApp({
                 if (!res.ok) throw new Error((await res.text()).slice(0,80));
                 await loadAccounts();
             } catch(e) { alert('删除失败: ' + e.message); }
+        }
+        const editingNickname = ref(null);
+        function startEditNickname(a) {
+            a.editNick = a.nickname || '';
+            editingNickname.value = a.uid;
+        }
+        async function saveNickname(a) {
+            const nick = a.editNick?.trim();
+            if (!nick) return;
+            try {
+                const res = await fetch(`/api/bili_accounts/${a.uid}/nickname`, {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    credentials: 'include',
+                    body: JSON.stringify({nickname: nick}),
+                });
+                if (!res.ok) throw new Error((await res.text()).slice(0,80));
+                a.nickname = nick;
+                editingNickname.value = null;
+            } catch(e) { alert('修改失败: ' + e.message); }
+        }
+        async function verifyAccount(uid) {
+            const acct = accounts.value.find(a => a.uid === uid);
+            if (!acct) return;
+            acct.verifying = true;
+            try {
+                const res = await fetch(`/api/bili_accounts/${uid}/verify`, {
+                    method: 'POST', credentials: 'include',
+                });
+                const data = await res.json();
+                acct.credential_ok = data.valid;
+            } catch(e) { acct.credential_ok = false; }
+            finally { acct.verifying = false; }
         }
 
         // ── Ranking ──
@@ -3096,7 +3187,8 @@ createApp({
                 roomSaveMsg, roomSaveOk,
                 accounts, showNewAccount, newAccountUid, accountLoggingIn, accountQrImage,
                 accountQrState, accountQrError, startAccountLogin, refreshAccount, deleteAccount,
-                loadAccounts, loadRooms, refreshQrCode};
+                loadAccounts, loadRooms, refreshQrCode,
+                editingNickname, startEditNickname, saveNickname, verifyAccount};
     }
 }).mount('#app');
 </script>
