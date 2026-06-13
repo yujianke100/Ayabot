@@ -1237,7 +1237,8 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
         where_sql = " AND ".join(where_clauses)
 
         cur.execute(f"""
-            SELECT uid, uname, sum(gift_num) as cnt, sum(actual_value) as total
+            SELECT uid, uname, sum(gift_num) as cnt,
+                   sum(actual_value) as total, sum(profit_value) as total_profit
             FROM gift_events WHERE {where_sql}
             GROUP BY uid ORDER BY total DESC LIMIT 50
         """, params)
@@ -1245,7 +1246,7 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
         conn.close()
 
         ranking = [
-            {"uid": r[0], "uname": r[1], "count": r[2], "total": r[3]}
+            {"uid": r[0], "uname": r[1], "count": r[2], "total": r[3], "total_profit": r[4]}
             for r in rows
         ]
         return {"ranking": ranking}
@@ -1619,7 +1620,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <!-- 子导航 -->
         <div class="flex gap-1 mb-4 text-sm bg-white rounded-xl shadow-sm p-1">
             <button v-for="st in roomSubTabs" :key="st.key"
-                    @click="roomSubTab = st.key"
+                    @click="selectRoomSubTab(st.key)"
                     class="px-4 py-2 rounded-lg transition"
                     :class="roomSubTab === st.key ? 'bg-blue-500 text-white' : 'text-gray-600 hover:bg-gray-100'">
                 {{ st.label }}
@@ -2322,6 +2323,12 @@ createApp({
             roomSubTab.value = 'ranking';
             selectedRoomAccount.value = r.account_uid || '';
         }
+        function selectRoomSubTab(key) {
+            roomSubTab.value = key;
+            if (key === 'config' && selectedRoom.value) {
+                editRoomConfig(selectedRoom.value.room_id);
+            }
+        }
         function toggleCreateRoom() { showCreateRoom.value = !showCreateRoom.value; }
         function toggleNewAccount() { showNewAccount.value = !showNewAccount.value; }
         async function assignAccountToRoom() {
@@ -2430,12 +2437,18 @@ createApp({
             ranking.value = [];
             const roomId = selectedRoom.value?.room_id;
             if (!roomId) return;
+            // 日期校验：确保 start <= end
+            if (rStart.value && rEnd.value && rStart.value > rEnd.value) {
+                errRanking.value = '起始日期不能晚于终止日期';
+                return;
+            }
             try {
                 const res = await fetch(`/api/rooms/${roomId}/ranking?rStart=${rStart.value}&rEnd=${rEnd.value}&rType=${rType.value}`);
                 if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
                 const data = await res.json();
                 ranking.value = (data.ranking || []).map(u => ({
-                    uid: u.uid, uname: u.uname, total_val: u.total, total_profit: 0
+                    uid: u.uid, uname: u.uname, total_val: u.total,
+                    total_profit: u.total_profit || 0
                 }));
             } catch(e) { errRanking.value = '加载失败: ' + e.message; }
             await nextTick();
@@ -3017,6 +3030,7 @@ createApp({
                 restartMsg, restartOk, restartService,
                 selectedRoom, roomSubTab, roomSubTabs, newRoomAccount, selectedRoomAccount,
                 selectRoom, assignAccountToRoom, toggleCreateRoom, toggleNewAccount,
+                selectRoomSubTab,
                 rooms, showCreateRoom, newRoomUid, newRoomName, newRoomPort, newRoomDisplayId,
                 creatingRoom, createRoomMsg, createRoomOk, createRoom,
                 startRoom, stopRoom, deleteRoom, editRoomConfig, saveRoomConfig, editingRoom, roomConfig,
