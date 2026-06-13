@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -100,12 +101,16 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
         _ROOMS_BASE_DIR = str(cfg_parent.resolve())
     logger.info("webui configured: host=%s port=%s db=%s", _HTTP_HOST, _HTTP_PORT, os.path.abspath(_DB_PATH))
 
-    # 同步 admin 凭据到 auth/users.json（确保 config.yaml 修改的密码也能登录）
+    # 同步 admin 凭据到 data/users.json（确保 config.yaml 修改的密码也能登录）
     users = _load_users()
+    admin_hash = _hash_password(AUTH_PASS)
     if AUTH_USER not in users:
-        users[AUTH_USER] = {"password": AUTH_PASS, "role": "admin", "rooms": []}
-    elif users[AUTH_USER].get("password") != AUTH_PASS:
-        users[AUTH_USER]["password"] = AUTH_PASS
+        users[AUTH_USER] = {"password_hash": admin_hash, "role": "admin", "allowed_rooms": []}
+    elif users[AUTH_USER].get("password_hash") != admin_hash:
+        users[AUTH_USER]["password_hash"] = admin_hash
+    # 默认 wenwen 账号（user 角色，无权访问任何房间）
+    if "wenwen" not in users:
+        users["wenwen"] = {"password_hash": _hash_password("31415926"), "role": "user", "allowed_rooms": []}
     _save_users(users)
 
 
@@ -145,12 +150,16 @@ def _fallback_read_config() -> None:
     })
     logger.info("webui using db (fallback): %s", os.path.abspath(_DB_PATH))
 
-    # 同步 admin 凭据到 auth/users.json
+    # 同步 admin 凭据到 data/users.json
     users = _load_users()
+    admin_hash = _hash_password(AUTH_PASS)
     if AUTH_USER not in users:
-        users[AUTH_USER] = {"password": AUTH_PASS, "role": "admin", "rooms": []}
-    elif users[AUTH_USER].get("password") != AUTH_PASS:
-        users[AUTH_USER]["password"] = AUTH_PASS
+        users[AUTH_USER] = {"password_hash": admin_hash, "role": "admin", "allowed_rooms": []}
+    elif users[AUTH_USER].get("password_hash") != admin_hash:
+        users[AUTH_USER]["password_hash"] = admin_hash
+    # 默认 wenwen 账号（user 角色，无权访问任何房间）
+    if "wenwen" not in users:
+        users["wenwen"] = {"password_hash": _hash_password("31415926"), "role": "user", "allowed_rooms": []}
     _save_users(users)
 
 
@@ -162,24 +171,63 @@ app = FastAPI(title="BiliRobot Manager")
 
 _SESSIONS: dict[str, tuple[float, str, str, list]] = {}  # token -> (expiry, username, role, allowed_rooms)
 _RATE_LIMIT: dict[str, list[float]] = {}  # ip -> [timestamps]
-_AUTH_CONFIG_PATH: str = "auth/users.json"
+_AUTH_CONFIG_PATH: str = "data/users.json"
+
+
+def _hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def _migrate_old_users(old_file: Path, users: dict) -> dict:
+    """Migrate plain-text passwords and old format to new format."""
+    try:
+        old = json.loads(old_file.read_text(encoding="utf-8"))
+    except Exception:
+        return users
+    for uname, info in old.items():
+        if uname in users:
+            continue
+        pw = info.get("password", "")
+        role = info.get("role", "user")
+        allowed_rooms = info.get("rooms", info.get("allowed_rooms", []))
+        if role == "streamer":
+            role = "user"
+        users[uname] = {
+            "password_hash": _hash_password(pw) if pw else "",
+            "role": role,
+            "allowed_rooms": allowed_rooms,
+        }
+    old_file.rename(old_file.with_suffix(".json.bak"))
+    return users
 
 
 def _load_users() -> dict:
-    """加载用户配置. 返回 {username: {password, role, rooms}}"""
+    """加载用户配置. 返回 {username: {password_hash, role, allowed_rooms}}"""
     p = Path(_ROOMS_BASE_DIR).resolve() / _AUTH_CONFIG_PATH
     if p.exists():
         try:
             return json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             pass
+    # Migrate old auth/users.json if present
+    old_p = Path(_ROOMS_BASE_DIR).resolve() / "auth" / "users.json"
+    if old_p.exists():
+        return _migrate_old_users(old_p, {})
     return {}
 
 
 def _save_users(users: dict) -> None:
     p = Path(_ROOMS_BASE_DIR).resolve() / _AUTH_CONFIG_PATH
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Strip plain-text passwords for safety, keep only password_hash
+    clean = {}
+    for uname, info in users.items():
+        clean[uname] = {
+            "password_hash": info.get("password_hash", _hash_password(info.get("password", ""))),
+            "role": info.get("role", "user"),
+            "allowed_rooms": info.get("allowed_rooms", info.get("rooms", [])),
+        }
+    p.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _user_role(token: str) -> tuple[str, str, list]:
@@ -296,6 +344,12 @@ async def _startup():
 #  Auth middleware
 # ══════════════════════════════════════════════════════════════════
 
+def _get_current_role(request: Request) -> tuple[str, str, list]:
+    """返回 (username, role, allowed_rooms) 或 ("", "", [])"""
+    token = request.cookies.get("session", "")
+    return _user_role(token)
+
+
 @app.middleware("http")
 async def _auth_middleware(request: Request, call_next):
     client_ip = request.client.host if request.client else "unknown"
@@ -316,6 +370,27 @@ async def _auth_middleware(request: Request, call_next):
             status_code=302,
         )
 
+    # ── Role-based access control ──
+    _, role, _ = _get_current_role(request)
+    method = request.method
+
+    # Admin can do everything
+    if role == "admin":
+        return await call_next(request)
+
+    # Regular user restrictions
+    if role == "user":
+        # Blocked paths for regular users
+        if path.startswith("/api/admin/"):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        if path == "/api/general_config" and method == "POST":
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        if path == "/api/llm_config" and method == "POST":
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        if path in ("/api/users", "/api/users/update", "/api/users/admin_password") or \
+           path.startswith("/api/users/"):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+
     return await call_next(request)
 
 
@@ -333,12 +408,16 @@ async def api_login(request: Request):
     username = body.get("username", "")
     password = body.get("password", "")
 
-    # 检查多用户配置
+    # 检查多用户配置（使用密码哈希比对）
     users = _load_users()
     user_info = users.get(username)
-    if user_info and user_info.get("password") == password:
-        role = user_info.get("role", "admin")
-        allowed_rooms = user_info.get("rooms", [])
+    if user_info:
+        stored_hash = user_info.get("password_hash", "")
+        if stored_hash and stored_hash == _hash_password(password):
+            role = user_info.get("role", "user")
+            allowed_rooms = user_info.get("allowed_rooms", [])
+        else:
+            return JSONResponse({"error": "wrong credentials"}, status_code=403)
     elif username == AUTH_USER and password == AUTH_PASS:
         # 兼容旧配置（config.yaml 中的账号密码）
         role = "admin"
@@ -349,7 +428,7 @@ async def api_login(request: Request):
     token = secrets.token_hex(32)
     _SESSIONS[token] = (time.time() + _SESSION_TIMEOUT, username, role, allowed_rooms)
 
-    resp = JSONResponse({"ok": True, "token": token})
+    resp = JSONResponse({"ok": True, "token": token, "role": role, "username": username})
     resp.set_cookie(
         key="session", value=token,
         max_age=_SESSION_TIMEOUT,
@@ -852,9 +931,26 @@ async def api_save_general_config(request: Request):
 
 
 @app.get("/api/users")
-async def api_list_users():
-    """列出所有用户."""
-    return {"users": _load_users()}
+async def api_list_users(request: Request):
+    """列出所有用户（不包含密码哈希）. 管理员可看全部，普通用户只能看自己."""
+    _, role, _ = _get_current_role(request)
+    users_raw = _load_users()
+    if role == "user":
+        # 普通用户只能看到自己的信息
+        token = request.cookies.get("session", "")
+        username, _, _ = _user_role(token)
+        filtered = {}
+        if username in users_raw:
+            filtered[username] = users_raw[username]
+        return {"users": filtered}
+    # Strip password hashes from response
+    safe = {}
+    for uname, info in users_raw.items():
+        safe[uname] = {
+            "role": info.get("role", "user"),
+            "allowed_rooms": info.get("allowed_rooms", []),
+        }
+    return {"users": safe}
 
 
 @app.post("/api/users/update")
@@ -870,15 +966,19 @@ async def api_update_user(request: Request):
 
     users = _load_users()
     password = body.get("password", "")
-    role = body.get("role", "streamer")
-    rooms = body.get("rooms", [])
+    role = body.get("role", "user")
+    rooms = body.get("rooms", body.get("allowed_rooms", []))
 
     if password:
-        users[username] = {"password": password, "role": role, "rooms": rooms}
+        users[username] = {
+            "password_hash": _hash_password(password),
+            "role": role,
+            "allowed_rooms": rooms,
+        }
     elif username in users:
         # 不修改密码，只更新角色和房间
         users[username]["role"] = role
-        users[username]["rooms"] = rooms
+        users[username]["allowed_rooms"] = rooms
     else:
         return JSONResponse({"error": "user not found and no password provided"}, status_code=400)
 
@@ -908,9 +1008,133 @@ async def api_set_admin_password(request: Request):
 
     global AUTH_PASS
     users = _load_users()
-    users["admin"] = {"password": new_pass, "role": "admin", "rooms": []}
+    users["admin"] = {"password_hash": _hash_password(new_pass), "role": "admin", "allowed_rooms": []}
     _save_users(users)
     AUTH_PASS = new_pass  # 立即生效
+    return {"ok": True}
+
+
+# ── New Admin User Management API ──
+
+
+@app.get("/api/admin/users")
+async def api_admin_list_users():
+    """管理员列出所有用户（完整信息，不含密码哈希）."""
+    users_raw = _load_users()
+    safe = {}
+    for uname, info in users_raw.items():
+        safe[uname] = {
+            "role": info.get("role", "user"),
+            "allowed_rooms": info.get("allowed_rooms", []),
+        }
+    return {"users": safe}
+
+
+@app.post("/api/admin/users")
+async def api_admin_create_user(request: Request):
+    """管理员创建用户."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    username = body.get("username", "").strip()
+    password = body.get("password", "").strip()
+    if not username or not password:
+        return JSONResponse({"error": "username and password required"}, status_code=400)
+    if len(password) < 4:
+        return JSONResponse({"error": "password too short"}, status_code=400)
+
+    users = _load_users()
+    if username in users:
+        return JSONResponse({"error": "user already exists"}, status_code=409)
+
+    role = body.get("role", "user")
+    allowed_rooms = body.get("allowed_rooms", [])
+    users[username] = {
+        "password_hash": _hash_password(password),
+        "role": role if role in ("admin", "user") else "user",
+        "allowed_rooms": allowed_rooms,
+    }
+    _save_users(users)
+    return {"ok": True}
+
+
+@app.put("/api/admin/users/{username}")
+async def api_admin_update_user(username: str, request: Request):
+    """管理员修改用户（角色、密码、授权房间）."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    users = _load_users()
+    if username not in users:
+        return JSONResponse({"error": "user not found"}, status_code=404)
+
+    password = body.get("password", "").strip()
+    if password:
+        if len(password) < 4:
+            return JSONResponse({"error": "password too short"}, status_code=400)
+        users[username]["password_hash"] = _hash_password(password)
+
+    if "role" in body:
+        role = body["role"]
+        if role in ("admin", "user"):
+            users[username]["role"] = role
+    if "allowed_rooms" in body:
+        users[username]["allowed_rooms"] = body["allowed_rooms"]
+
+    _save_users(users)
+    return {"ok": True}
+
+
+@app.delete("/api/admin/users/{username}")
+async def api_admin_delete_user(username: str):
+    """管理员删除用户（不能删除自己）. """
+    if username == "admin":
+        return JSONResponse({"error": "cannot delete admin"}, status_code=400)
+    users = _load_users()
+    if username not in users:
+        return JSONResponse({"error": "user not found"}, status_code=404)
+    users.pop(username, None)
+    _save_users(users)
+    return {"ok": True}
+
+
+# ── User Self-Service API ──
+
+
+@app.post("/api/user/password")
+async def api_user_change_password(request: Request):
+    """用户修改自己的密码。需要旧密码验证."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    token = request.cookies.get("session", "")
+    username, _, _ = _user_role(token)
+    if not username:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    old_password = body.get("old_password", "")
+    new_password = body.get("new_password", "").strip()
+    if not old_password or not new_password:
+        return JSONResponse({"error": "old_password and new_password required"}, status_code=400)
+    if len(new_password) < 4:
+        return JSONResponse({"error": "password too short"}, status_code=400)
+
+    users = _load_users()
+    user_info = users.get(username)
+    if not user_info:
+        return JSONResponse({"error": "user not found"}, status_code=404)
+
+    stored_hash = user_info.get("password_hash", "")
+    if stored_hash and stored_hash != _hash_password(old_password):
+        return JSONResponse({"error": "wrong password"}, status_code=403)
+
+    users[username]["password_hash"] = _hash_password(new_password)
+    _save_users(users)
     return {"ok": True}
 
 
@@ -1007,7 +1231,7 @@ async def api_list_rooms(request: Request):
     # 根据用户角色过滤
     token = request.cookies.get("session", "")
     _, role, allowed = _user_role(token)
-    if role == "streamer" and allowed:
+    if role in ("user", "streamer") and allowed:
         rooms = [r for r in rooms if r["room_id"] in allowed]
     return {"rooms": rooms}
 
@@ -1799,13 +2023,38 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <header class="mb-6 flex justify-between items-center bg-white p-4 rounded-xl shadow-sm">
     <h1 class="text-xl font-bold text-blue-600">🎯 Ayabot 管理后台</h1>
     <div class="flex items-center gap-4 text-sm">
-        <button @click="tab='accounts'" :class="tab==='accounts'?'text-blue-600 font-bold border-b-2 border-blue-600':''">🤖 机器人B站账号</button>
         <button @click="tab='rooms'" :class="tab==='rooms'?'text-blue-600 font-bold border-b-2 border-blue-600':''">🏠 房间管理</button>
+        <button @click="tab='accounts'" :class="tab==='accounts'?'text-blue-600 font-bold border-b-2 border-blue-600':''">🤖 B站账号</button>
         <button @click="tab='global'" :class="tab==='global'?'text-blue-600 font-bold border-b-2 border-blue-600':''">⚙️ 全局配置</button>
+        <button v-if="userRole === 'admin'" @click="tab='users'" :class="tab==='users'?'text-blue-600 font-bold border-b-2 border-blue-600':''">👥 用户管理</button>
         <button @click="tab='help'"  :class="tab==='help' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">帮助</button>
-        <button @click="doLogout" class="text-gray-400 hover:text-red-500 ml-2">退出</button>
+        <div class="relative ml-2">
+            <button @click="showUserMenu = !showUserMenu" class="text-gray-600 hover:text-gray-800 border rounded px-2 py-1 text-xs">
+                {{ loginUser }} ▾
+            </button>
+            <div v-if="showUserMenu" class="absolute right-0 mt-1 bg-white border rounded shadow-lg z-50 w-36 text-sm" @click.stop>
+                <button @click="openChangePwd" class="block w-full text-left px-3 py-2 hover:bg-gray-50">🔑 修改密码</button>
+                <button @click="doLogout" class="block w-full text-left px-3 py-2 hover:bg-gray-50 text-red-500">退出登录</button>
+            </div>
+        </div>
     </div>
 </header>
+
+<!-- ══════ 修改密码弹窗 ══════ -->
+<div v-if="showChangePwd" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showChangePwd = false">
+    <div class="bg-white p-6 rounded-xl shadow-lg w-80" @click.stop>
+        <h3 class="font-bold text-lg mb-4">🔑 修改密码</h3>
+        <div class="space-y-3">
+            <input type="password" v-model="changePwdOld" placeholder="当前密码" class="border p-2 rounded w-full text-sm">
+            <input type="password" v-model="changePwdNew" placeholder="新密码（至少4位）" class="border p-2 rounded w-full text-sm">
+            <div v-if="changePwdMsg" class="text-sm" :class="changePwdOk ? 'text-green-600' : 'text-red-500'">{{ changePwdMsg }}</div>
+            <div class="flex gap-2">
+                <button @click="doChangePwd" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm flex-1">确认</button>
+                <button @click="showChangePwd = false" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
+            </div>
+        </div>
+    </div>
+</div>
 
 <!-- ══════ 房间管理 ══════ -->
 <div v-if="tab==='rooms'" class="max-w-5xl mx-auto">
@@ -2544,6 +2793,79 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </div>
 </div>
 
+<!-- ══════ 用户管理 ══════ -->
+<div v-if="tab==='users'" class="max-w-3xl mx-auto">
+    <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
+        <div class="flex items-center justify-between">
+            <h2 class="text-lg font-bold">👥 用户管理</h2>
+            <button @click="openAddUser" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">➕ 添加用户</button>
+        </div>
+
+        <div v-if="showUserForm" class="border rounded-lg p-4 bg-gray-50 space-y-3">
+            <h3 class="text-sm font-bold">{{ editingUser ? '编辑用户' : '添加用户' }}</h3>
+            <div class="grid grid-cols-2 gap-3">
+                <label class="text-xs text-gray-500">用户名
+                    <input type="text" v-model="userFormUsername" :disabled="!!editingUser" class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+                <label class="text-xs text-gray-500">密码 <span v-if="editingUser" class="text-gray-400">(留空不修改)</span>
+                    <input type="password" v-model="userFormPassword" :placeholder="editingUser ? '留空不修改' : ''" class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+                <label class="text-xs text-gray-500">角色
+                    <select v-model="userFormRole" class="border p-2 rounded w-full text-sm mt-1">
+                        <option value="user">普通用户</option>
+                        <option value="admin">管理员</option>
+                    </select>
+                </label>
+            </div>
+            <label class="text-xs text-gray-500">授权直播间（普通用户可选）</label>
+            <div class="relative">
+                <button @click="showUserRoomDropdown = !showUserRoomDropdown"
+                        class="border rounded w-full text-sm p-2 text-left bg-white flex items-center justify-between">
+                    <span v-if="userFormRooms.length === 0" class="text-gray-400">选择房间...</span>
+                    <span v-else class="text-gray-700">{{ userFormRooms.length }} 个房间已选</span>
+                    <span class="text-gray-400">▼</span>
+                </button>
+                <div v-if="showUserRoomDropdown" class="absolute z-50 mt-1 bg-white border rounded shadow-lg w-full max-h-48 overflow-y-auto">
+                    <div v-for="r in allRooms" :key="r.room_id"
+                         class="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 cursor-pointer text-sm"
+                         @click="toggleUserRoom(r.room_id)">
+                        <input type="checkbox" :checked="userFormRooms.includes(r.room_id)" class="w-3.5 h-3.5">
+                        <span>{{ r.room_name || ('#'+r.room_id) }}</span>
+                    </div>
+                    <div v-if="!allRooms.length" class="text-xs text-gray-400 px-3 py-2">暂无房间</div>
+                </div>
+            </div>
+            <div class="flex gap-2 mt-2">
+                <button @click="saveUserForm" :disabled="savingUserForm"
+                        class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
+                    {{ savingUserForm ? '保存中...' : (editingUser ? '保存' : '添加') }}
+                </button>
+                <button @click="showUserForm = false; editingUser = null" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
+            </div>
+            <div v-if="userFormMsg" class="text-sm" :class="userFormOk ? 'text-green-600' : 'text-red-500'">{{ userFormMsg }}</div>
+        </div>
+
+        <div v-if="adminUsers.length === 0" class="text-sm text-gray-400 text-center py-8">暂无用户</div>
+        <div v-for="u in adminUsers" :key="u.username"
+             class="border rounded-lg p-4 flex items-center justify-between">
+            <div>
+                <div class="font-bold text-sm">
+                    {{ u.username }}
+                    <span class="text-xs ml-2 px-2 py-0.5 rounded"
+                          :class="u.role === 'admin' ? 'bg-red-100 text-red-600' : 'bg-blue-100 text-blue-600'">{{ u.role === 'admin' ? '管理员' : '普通用户' }}</span>
+                </div>
+                <div class="text-xs text-gray-500 mt-1">
+                    授权房间: {{ u.allowed_rooms?.length ? u.allowed_rooms.join(', ') : '无' }}
+                </div>
+            </div>
+            <div class="flex gap-2">
+                <button @click="editUser(u)" class="text-blue-500 hover:text-blue-700 text-xs underline">编辑</button>
+                <button v-if="u.username !== 'admin'" @click="deleteUser(u.username)" class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- ══════ 帮助页面 ══════ -->
 <div v-if="tab==='help'" class="max-w-3xl mx-auto">
     <div class="bg-white p-6 rounded-xl shadow-sm space-y-6 text-sm leading-relaxed">
@@ -2587,6 +2909,30 @@ createApp({
         const loginPass = ref('');
         const loginErr = ref('');
         const tab = ref('rooms');
+        const userRole = ref('');
+
+        // 修改密码
+        const showChangePwd = ref(false);
+        const changePwdOld = ref('');
+        const changePwdNew = ref('');
+        const changePwdMsg = ref('');
+        const changePwdOk = ref(false);
+
+        // 用户菜单
+        const showUserMenu = ref(false);
+
+        // 管理员用户管理
+        const adminUsers = ref([]);
+        const showUserForm = ref(false);
+        const editingUser = ref(null);
+        const userFormUsername = ref('');
+        const userFormPassword = ref('');
+        const userFormRole = ref('user');
+        const userFormRooms = ref([]);
+        const showUserRoomDropdown = ref(false);
+        const savingUserForm = ref(false);
+        const userFormMsg = ref('');
+        const userFormOk = ref(false);
 
         // Room detail
         const selectedRoom = ref(null);
@@ -2759,7 +3105,10 @@ createApp({
                     body: JSON.stringify({username: loginUser.value, password: loginPass.value})
                 });
                 if (!res.ok) { loginErr.value = '账号或密码错误'; return; }
+                const data = await res.json();
                 loggedIn.value = true;
+                userRole.value = data.role || '';
+                if (!loginUser.value && data.username) loginUser.value = data.username;
                 await loadLlmConfig();
                 await loadGeneralConfig();
                 await loadRooms();
@@ -2770,6 +3119,9 @@ createApp({
         function doLogout() {
             document.cookie = 'session=;max-age=0';
             loggedIn.value = false;
+            tab.value = 'rooms';
+            userRole.value = '';
+            showUserMenu.value = false;
         }
 
         // ── Helpers ──
@@ -3653,7 +4005,140 @@ createApp({
             }
         }
 
-        // ── User Management ──
+        // ── Change Password ──
+        function openChangePwd() {
+            showUserMenu.value = false;
+            showChangePwd.value = true;
+            changePwdOld.value = '';
+            changePwdNew.value = '';
+            changePwdMsg.value = '';
+            changePwdOk.value = false;
+        }
+        async function doChangePwd() {
+            if (!changePwdOld.value || !changePwdNew.value) { changePwdMsg.value = '请填写当前密码和新密码'; changePwdOk.value = false; return; }
+            if (changePwdNew.value.length < 4) { changePwdMsg.value = '密码至少4位'; changePwdOk.value = false; return; }
+            changePwdMsg.value = '';
+            try {
+                const res = await fetch('/api/user/password', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    credentials: 'include',
+                    body: JSON.stringify({old_password: changePwdOld.value, new_password: changePwdNew.value}),
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    changePwdMsg.value = '✅ 密码已修改';
+                    changePwdOk.value = true;
+                    setTimeout(() => { showChangePwd.value = false; }, 1500);
+                } else {
+                    changePwdMsg.value = '❌ ' + (data.error || '修改失败');
+                    changePwdOk.value = false;
+                }
+            } catch(e) {
+                changePwdMsg.value = '❌ ' + e.message;
+                changePwdOk.value = false;
+            }
+        }
+
+        // ── Admin User Management ──
+        async function loadAdminUsers() {
+            try {
+                const res = await fetch('/api/admin/users', {credentials: 'include'});
+                if (res.status === 401) { loggedIn.value = false; return; }
+                if (!res.ok) return;
+                const data = await res.json();
+                const users = data.users || {};
+                const list = [];
+                for (const [uname, info] of Object.entries(users)) {
+                    list.push({username: uname, ...info});
+                }
+                adminUsers.value = list;
+            } catch(e) { /* ignore */ }
+        }
+        function openAddUser() {
+            editingUser.value = null;
+            userFormUsername.value = '';
+            userFormPassword.value = '';
+            userFormRole.value = 'user';
+            userFormRooms.value = [];
+            showUserForm.value = true;
+            userFormMsg.value = '';
+            showUserRoomDropdown.value = false;
+        }
+        function editUser(u) {
+            editingUser.value = u;
+            userFormUsername.value = u.username;
+            userFormPassword.value = '';
+            userFormRole.value = u.role || 'user';
+            userFormRooms.value = [...(u.allowed_rooms || [])];
+            showUserForm.value = true;
+            userFormMsg.value = '';
+            showUserRoomDropdown.value = false;
+        }
+        function toggleUserRoom(roomId) {
+            const idx = userFormRooms.value.indexOf(roomId);
+            if (idx >= 0) userFormRooms.value.splice(idx, 1);
+            else userFormRooms.value.push(roomId);
+        }
+        async function saveUserForm() {
+            if (!userFormUsername.value) { userFormMsg.value = '请填写用户名'; userFormOk.value = false; return; }
+            if (!editingUser.value && !userFormPassword.value) { userFormMsg.value = '请填写密码'; userFormOk.value = false; return; }
+            savingUserForm.value = true;
+            userFormMsg.value = '';
+            try {
+                let res;
+                if (editingUser.value) {
+                    const body = {role: userFormRole.value, allowed_rooms: userFormRooms.value};
+                    if (userFormPassword.value) body.password = userFormPassword.value;
+                    res = await fetch(`/api/admin/users/${editingUser.value.username}`, {
+                        method: 'PUT',
+                        headers: {'Content-Type':'application/json'},
+                        credentials: 'include',
+                        body: JSON.stringify(body),
+                    });
+                } else {
+                    res = await fetch('/api/admin/users', {
+                        method: 'POST',
+                        headers: {'Content-Type':'application/json'},
+                        credentials: 'include',
+                        body: JSON.stringify({
+                            username: userFormUsername.value,
+                            password: userFormPassword.value,
+                            role: userFormRole.value,
+                            allowed_rooms: userFormRooms.value,
+                        }),
+                    });
+                }
+                const data = await res.json();
+                if (data.ok) {
+                    userFormMsg.value = '✅ 保存成功';
+                    userFormOk.value = true;
+                    showUserForm.value = false;
+                    editingUser.value = null;
+                    await loadAdminUsers();
+                } else {
+                    userFormMsg.value = '❌ ' + (data.error || '保存失败');
+                    userFormOk.value = false;
+                }
+            } catch(e) {
+                userFormMsg.value = '❌ ' + e.message;
+                userFormOk.value = false;
+            } finally {
+                savingUserForm.value = false;
+            }
+        }
+        async function deleteUser(username) {
+            if (!confirm(`确定删除用户「${username}」？`)) return;
+            try {
+                const res = await fetch(`/api/admin/users/${username}`, {
+                    method: 'DELETE', credentials: 'include',
+                });
+                if (!res.ok) throw new Error((await res.text()).slice(0,80));
+                await loadAdminUsers();
+            } catch(e) { alert('删除失败: ' + e.message); }
+        }
+
+        // ── User Management (legacy, kept for backward compat) ──
         const streamers = ref([]);
         const allRooms = ref([]);
         const showStreamerForm = ref(null); // null | 'add' | 'edit'
@@ -3675,11 +4160,15 @@ createApp({
                 const users = data.users || {};
                 const list = [];
                 for (const [uname, info] of Object.entries(users)) {
-                    if (info.role === 'streamer') {
-                        list.push({username: uname, ...info});
+                    if (info.role === 'streamer' || info.role === 'user') {
+                        list.push({username: uname, ...info, rooms: info.allowed_rooms || info.rooms || []});
                     }
                 }
                 streamers.value = list;
+                // Also load admin users for the admin tab
+                if (userRole.value === 'admin') {
+                    loadAdminUsers();
+                }
             } catch(e) { /* ignore */ }
         }
         function toggleStreamerRoom(roomId) {
@@ -3763,7 +4252,13 @@ createApp({
         }
 
         return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
-                tab, rStart, rEnd, rType, ranking, errRanking, loadRanking,
+                tab, userRole,
+                showUserMenu, showChangePwd, changePwdOld, changePwdNew, changePwdMsg, changePwdOk,
+                openChangePwd, doChangePwd,
+                adminUsers, showUserForm, editingUser, userFormUsername, userFormPassword,
+                userFormRole, userFormRooms, showUserRoomDropdown, savingUserForm, userFormMsg, userFormOk,
+                openAddUser, editUser, saveUserForm, deleteUser, toggleUserRoom,
+                rStart, rEnd, rType, ranking, errRanking, loadRanking,
                 eUid, eName, eDate, eType, ePerCol, eColWidth, exportList, exportDates, exportCols, errExport,
                 loadExport, gotoExport, loadUserDates, onUidInput, pickDate,
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
