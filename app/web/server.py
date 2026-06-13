@@ -1191,7 +1191,7 @@ async def api_bili_login_account(request: Request):
     except Exception:
         return JSONResponse({"error": "bilibili_api not available"}, status_code=500)
 
-    qr = login_v2.QrCodeLogin()
+    qr = login_v2.QrCodeLogin(platform=login_v2.QrCodeLoginChannel.WEB)
     await qr.generate_qrcode()
     qr_pic = qr.get_qrcode_picture()
     session_id = str(uuid.uuid4())
@@ -1321,10 +1321,6 @@ async def api_account_login_status(session_id: str):
         # 不删除 session，给前端留足够时间看到 "timeout"
         return {"state": "timeout"}
 
-    # 生成后至少过 5 秒才认可 SCAN 状态，避免刚生成时的误判
-    if elapsed < 5:
-        return {"state": "waiting"}
-
     try:
         if qr.has_done():
             return {"state": "done"}
@@ -1333,10 +1329,12 @@ async def api_account_login_status(session_id: str):
 
         if state == login_v2.QrCodeLoginEvents.TIMEOUT:
             return {"state": "timeout"}
+        # 注意：bilibili_api 的 SCAN = 86101 = 还没被扫（二维码有效等待扫码）
+        # CONF = 86090 = 已扫码等待确认
         if state == login_v2.QrCodeLoginEvents.SCAN:
-            return {"state": "scanned"}
+            return {"state": "waiting"}
         if state == login_v2.QrCodeLoginEvents.CONF:
-            return {"state": "done"}
+            return {"state": "scanned"}
 
         return {"state": "waiting"}
     except Exception as exc:
