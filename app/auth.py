@@ -66,9 +66,9 @@ class AuthManager:
         if uid:
             # 从 credential_store_path 反推项目根目录
             # credential_store_path = /root/ayabot/rooms/<id>/data/credential.json
-            # 项目根 = 上3级 = /root/ayabot/
+            # 项目根 = 上4级 = /root/ayabot/
             store_path = Path(self.config.auth.credential_store_path)
-            project_root = store_path.parent.parent.parent if store_path.is_absolute() else Path()
+            project_root = store_path.parent.parent.parent.parent if store_path.is_absolute() else Path()
             accounts_path = project_root / "accounts" / uid / "credential.json"
             if accounts_path.exists():
                 return self._load_credential_file(accounts_path)
