@@ -1500,7 +1500,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
             <div class="flex items-center justify-between">
                 <h2 class="text-lg font-bold">🏠 房间管理</h2>
-                <button @click="showCreateRoom = !showCreateRoom"
+                <button @click="toggleCreateRoom"
                         class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">
                     {{ showCreateRoom ? '取消' : '➕ 新建房间' }}
                 </button>
@@ -1976,7 +1976,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
         <div class="flex items-center justify-between">
             <h2 class="text-lg font-bold">👤 B站账号管理</h2>
-            <button @click="showNewAccount = !showNewAccount"
+            <button @click="toggleNewAccount"
                     class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
                 {{ showNewAccount ? '取消' : '📱 扫码登录新账号' }}
             </button>
@@ -2086,6 +2086,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </div>
 </div>
 </div><!-- /loggedIn -->
+</div>
 
 <script>
 const {createApp, ref, computed, nextTick} = Vue;
@@ -2312,6 +2313,8 @@ createApp({
             roomSubTab.value = 'ranking';
             selectedRoomAccount.value = r.account_uid || '';
         }
+        function toggleCreateRoom() { showCreateRoom.value = !showCreateRoom.value; }
+        function toggleNewAccount() { showNewAccount.value = !showNewAccount.value; }
         async function assignAccountToRoom() {
             const rid = selectedRoom.value?.room_id;
             if (!rid) return;
@@ -2487,14 +2490,15 @@ createApp({
                 const res = await fetch(`/api/rooms/${roomId}/user_gifts?uid=${eUid.value}&date=${eDate.value}&gift_type=${eType.value}`);
                 if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
                 const data = await res.json();
-                exportList.value = (data || []).map(item => ({
+                exportList.value = (data || []).map((item, idx) => ({
                     ...item,
+                    id: item.id || idx,
                     gift_num: item.gift_count,
                     price: item.actual_amount,
                     ts: item.created_at ? new Date(item.created_at).getTime() / 1000 : 0,
-                    avatar: '',
-                    guard_level: 0,
-                    gift_icon: '',
+                    avatar: item.avatar || '',
+                    guard_level: item.guard_level || 0,
+                    gift_icon: item.gift_icon || '',
                 }));
                 if (exportList.value.length) {
                     eName.value = exportList.value[0].uname || '';
@@ -2632,6 +2636,7 @@ createApp({
         loadLlmConfig();
         loadGeneralConfig();
         loadRooms();
+        loadAccounts();
 
         // ── 动态标题 ──
         document.title = 'Ayabot 直播间机器人';
@@ -2956,6 +2961,31 @@ createApp({
             }
         }
 
+        async function saveGlobalConfig() {
+            cfgSaveMsg.value = '';
+            try {
+                const res = await fetch('/api/general_config', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    credentials: 'include',
+                    body: JSON.stringify({web_ui: {host: cfgHost.value, port: cfgPort.value}}),
+                });
+                if (res.status === 401) { loggedIn.value = false; return; }
+                if (!res.ok) throw new Error((await res.text()).slice(0,80));
+                const data = await res.json();
+                if (data.ok) {
+                    cfgSaveMsg.value = '已保存';
+                    cfgSaveOk.value = true;
+                } else {
+                    cfgSaveMsg.value = '保存失败';
+                    cfgSaveOk.value = false;
+                }
+            } catch(e) {
+                cfgSaveMsg.value = '保存失败: ' + e.message;
+                cfgSaveOk.value = false;
+            }
+        }
+
         return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
                 tab, rStart, rEnd, rType, ranking, errRanking, loadRanking,
                 eUid, eName, eDate, eType, ePerCol, eColWidth, exportList, exportDates, exportCols, errExport,
@@ -2974,10 +3004,17 @@ createApp({
                 cfgWelcomeTmpl, cfgThanksTmpl, cfgGuardCaptain, cfgGuardCommander, cfgGuardGovernor, cfgGuardDefault, cfgConnMsg,
                 cfgPeriodicOn, cfgPeriodicInterval, cfgPeriodicTmpl,
                 cfgHost, cfgPort,
-                cfgSaveMsg, cfgSaveOk, loadGeneralConfig, saveGeneralConfig,
+                cfgSaveMsg, cfgSaveOk, loadGeneralConfig, saveGlobalConfig,
                 restartMsg, restartOk, restartService,
-                biliLoginState, biliQrImage, biliLoginError,
-                startBiliLogin, saveBiliLogin};
+                selectedRoom, roomSubTab, roomSubTabs, newRoomAccount, selectedRoomAccount,
+                selectRoom, assignAccountToRoom, toggleCreateRoom, toggleNewAccount,
+                rooms, showCreateRoom, newRoomUid, newRoomName, newRoomPort, newRoomDisplayId,
+                creatingRoom, createRoomMsg, createRoomOk, createRoom,
+                startRoom, stopRoom, deleteRoom, editRoomConfig, saveRoomConfig, editingRoom, roomConfig,
+                roomSaveMsg, roomSaveOk,
+                accounts, showNewAccount, newAccountUid, accountLoggingIn, accountQrImage,
+                accountQrState, accountQrError, startAccountLogin, refreshAccount, deleteAccount,
+                loadAccounts, loadRooms};
     }
 }).mount('#app');
 </script>
