@@ -1050,14 +1050,14 @@ async def api_bili_login_account(request: Request):
         return JSONResponse({"error": "bilibili_api not available"}, status_code=500)
 
     qr = login_v2.QrCodeLogin()
-    qr.generate_qrcode()
+    await qr.generate_qrcode()
     qr_pic = qr.get_qrcode_picture()
     session_id = str(uuid.uuid4())
 
     # 直接使用 bilibili_api 生成的二维码图片
     import base64  # noqa: PLC0415
 
-    img_b64 = base64.b64encode(qr_pic).decode("ascii")
+    img_b64 = base64.b64encode(qr_pic.content).decode("ascii")
 
     _BILI_LOGIN_SESSIONS[session_id] = {
         "qr": qr,
