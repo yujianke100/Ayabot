@@ -1045,24 +1045,19 @@ async def api_bili_login_account(request: Request):
 
     # 生成二维码
     try:
-        from bilibili_api import login as bili_login  # noqa: PLC0415
-        login_v2 = bili_login
+        from bilibili_api import login_v2  # noqa: PLC0415
     except Exception:
         return JSONResponse({"error": "bilibili_api not available"}, status_code=500)
 
     qr = login_v2.QrCodeLogin()
-    qr_url = qr.get_qrcode_url()
+    await qr.generate_qrcode()
+    qr_pic = await qr.get_qrcode_picture()
     session_id = str(uuid.uuid4())
 
-    # 生成 base64 二维码图片
-    import base64, io  # noqa: PLC0415
-    from PIL import Image  # noqa: PLC0415
-    import qrcode  # noqa: PLC0415
+    # 直接使用 bilibili_api 生成的二维码图片
+    import base64  # noqa: PLC0415
 
-    qr_img = qrcode.make(qr_url)
-    buf = io.BytesIO()
-    qr_img.save(buf, format="PNG")
-    img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    img_b64 = base64.b64encode(qr_pic).decode("ascii")
 
     _BILI_LOGIN_SESSIONS[session_id] = {
         "qr": qr,
@@ -1075,7 +1070,6 @@ async def api_bili_login_account(request: Request):
         "ok": True,
         "session_id": session_id,
         "qr_image": f"data:image/png;base64,{img_b64}",
-        "qr_url": qr_url,
     }
 
 
