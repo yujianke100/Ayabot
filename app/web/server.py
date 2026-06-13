@@ -1223,22 +1223,22 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
         params: list[Any] = []
 
         if rStart:
-            where_clauses.append("date(created_at) >= date(?)")
+            where_clauses.append("date(ts, 'unixepoch') >= date(?)")
             params.append(rStart)
         if rEnd:
-            where_clauses.append("date(created_at) <= date(?)")
+            where_clauses.append("date(ts, 'unixepoch') <= date(?)")
             params.append(rEnd)
 
         if rType == "gift":
-            where_clauses.append("blindbox = 0")
+            where_clauses.append("is_blind_box = 0")
         elif rType == "blindbox":
-            where_clauses.append("blindbox = 1")
+            where_clauses.append("is_blind_box = 1")
 
         where_sql = " AND ".join(where_clauses)
 
         cur.execute(f"""
-            SELECT uid, uname, sum(gift_count) as cnt, sum(actual_amount) as total
-            FROM gift_logs WHERE {where_sql}
+            SELECT uid, uname, sum(gift_num) as cnt, sum(actual_value) as total
+            FROM gift_events WHERE {where_sql}
             GROUP BY uid ORDER BY total DESC LIMIT 50
         """, params)
         rows = cur.fetchall()
@@ -1266,15 +1266,15 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
 
         where_extra = ""
         if gift_type == "gift":
-            where_extra = " AND blindbox = 0"
+            where_extra = " AND is_blind_box = 0"
         elif gift_type == "blindbox":
-            where_extra = " AND blindbox = 1"
+            where_extra = " AND is_blind_box = 1"
 
         cur.execute(f"""
-            SELECT uid, uname, gift_name, gift_count, actual_amount, created_at, blindbox, gift_id
-            FROM gift_logs
-            WHERE uid = ? AND date(created_at) = date(?){where_extra}
-            ORDER BY created_at
+            SELECT uid, uname, gift_name, gift_num, actual_value, ts, is_blind_box, id
+            FROM gift_events
+            WHERE uid = ? AND date(ts, 'unixepoch') = date(?){where_extra}
+            ORDER BY ts
         """, (uid, date))
         rows = cur.fetchall()
         conn.close()
@@ -1282,9 +1282,9 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
         return [
             {
                 "uid": r[0], "uname": r[1], "gift_name": r[2],
-                "gift_count": r[3], "actual_amount": r[4],
-                "created_at": r[5], "blindbox": bool(r[6]),
-                "gift_id": r[7],
+                "gift_num": r[3], "actual_value": r[4],
+                "ts": r[5], "is_blind_box": bool(r[6]),
+                "id": r[7],
             }
             for r in rows
         ]
@@ -1303,7 +1303,7 @@ async def api_room_user_dates(room_id: str, uid: int = 0):
         conn = sqlite3.connect(str(db_path))
         cur = conn.cursor()
         cur.execute(
-            "SELECT DISTINCT date(created_at) FROM gift_logs WHERE uid = ? ORDER BY date(created_at)",
+            "SELECT DISTINCT date(ts, 'unixepoch') FROM gift_events WHERE uid = ? ORDER BY date(ts, 'unixepoch')",
             (uid,),
         )
         dates = [r[0] for r in cur.fetchall()]
@@ -1332,13 +1332,11 @@ async def api_room_delete_old(room_id: str, request: Request):
     try:
         conn = sqlite3.connect(str(db_path))
         cur = conn.cursor()
-        cur.execute("DELETE FROM event_logs WHERE date(created_at) <= date(?)", (date_str,))
-        deleted_events = cur.rowcount
-        cur.execute("DELETE FROM gift_logs WHERE date(created_at) <= date(?)", (date_str,))
-        deleted_gifts = cur.rowcount
+        cur.execute("DELETE FROM gift_events WHERE date(ts, 'unixepoch') <= date(?)", (date_str,))
+        deleted = cur.rowcount
         conn.commit()
         conn.close()
-        return {"deleted_events": deleted_events, "deleted_gifts": deleted_gifts}
+        return {"deleted_events": 0, "deleted_gifts": deleted}
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
@@ -1844,22 +1842,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div v-if="roomSubTab==='config'" class="max-w-2xl mx-auto">
             <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
                 <h2 class="text-lg font-bold">⚙️ 机器人配置</h2>
+                <p class="text-xs text-gray-500">配置保存后需重启对应房间服务才能生效。</p>
 
                 <div class="grid grid-cols-2 gap-4">
-                    <label class="text-xs text-gray-500">Web 端口
-                        <input type="number" v-model.number="cfgPort" min="1024" max="65535" class="border p-2 rounded w-full text-sm mt-1">
-                    </label>
-                    <label class="text-xs text-gray-500">监听地址
-                        <input type="text" v-model="cfgHost" class="border p-2 rounded w-full text-sm mt-1" placeholder="0.0.0.0">
-                    </label>
-                </div>
-
-                <div class="grid grid-cols-2 gap-4">
-                    <label class="text-xs text-gray-500">直播间 ID
-                        <input type="number" v-model.number="cfgRoomId" class="border p-2 rounded w-full text-sm mt-1">
-                    </label>
                     <label class="text-xs text-gray-500">主播 UID
-                        <input type="number" v-model.number="cfgAnchorUid" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="number" v-model.number="roomConfig.anchor_uid" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                 </div>
 
@@ -1867,10 +1854,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <h3 class="text-sm font-bold">⏱️ 冷却时间（秒）</h3>
                 <div class="grid grid-cols-2 gap-4">
                     <label class="text-xs text-gray-500">欢迎同用户间隔
-                        <input type="number" v-model.number="cfgWelcomeCd" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="number" v-model.number="roomConfig.cooldown.welcome_user_seconds" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                     <label class="text-xs text-gray-500">感谢同用户间隔
-                        <input type="number" v-model.number="cfgThanksCd" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="number" v-model.number="roomConfig.cooldown.thanks_user_seconds" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                 </div>
 
@@ -1878,52 +1865,52 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <h3 class="text-sm font-bold">🚦 限流</h3>
                 <div class="grid grid-cols-2 gap-4">
                     <label class="text-xs text-gray-500">弹幕发送间隔(秒)
-                        <input type="number" v-model="cfgSendInterval" step="0.1" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="number" v-model="roomConfig.rate_limit.send_interval_seconds" step="0.1" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                     <label class="text-xs text-gray-500">重试次数
-                        <input type="number" v-model.number="cfgRetry" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="number" v-model.number="roomConfig.rate_limit.retry_count" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                     <label class="text-xs text-gray-500">队列上限
-                        <input type="number" v-model.number="cfgMaxQueue" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="number" v-model.number="roomConfig.rate_limit.max_queue_size" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                     <label class="text-xs text-gray-500">回复延迟(秒)
-                        <input type="number" v-model="cfgReplyDelay" step="0.1" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="number" v-model="roomConfig.rate_limit.reply_delay_seconds" step="0.1" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                 </div>
 
                 <hr>
                 <h3 class="text-sm font-bold">🎛️ 功能开关</h3>
                 <div class="grid grid-cols-2 gap-2 text-sm">
-                    <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgWelcomeOn" class="w-4 h-4"> 欢迎</label>
-                    <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgThanksOn" class="w-4 h-4"> 感谢</label>
-                    <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgBlindboxOn" class="w-4 h-4"> 盲盒统计</label>
-                    <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgGuardOn" class="w-4 h-4"> 大航海感谢</label>
-                    <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgConnectedMsg" class="w-4 h-4"> 连接消息</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.welcome_enabled" class="w-4 h-4"> 欢迎</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.thanks_enabled" class="w-4 h-4"> 感谢</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.blindbox_enabled" class="w-4 h-4"> 盲盒统计</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.guard_thanks_enabled" class="w-4 h-4"> 大航海感谢</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.connected_message_enabled" class="w-4 h-4"> 连接消息</label>
                 </div>
 
                 <hr>
                 <h3 class="text-sm font-bold">📝 回复模板</h3>
                 <div class="space-y-3">
                     <label class="text-xs text-gray-500 block">欢迎模板
-                        <input type="text" v-model="cfgWelcomeTmpl" placeholder="欢迎{uname}来到直播间" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="text" v-model="roomConfig.features.welcome_template" placeholder="欢迎{uname}来到直播间" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                     <label class="text-xs text-gray-500 block">感谢模板
-                        <input type="text" v-model="cfgThanksTmpl" placeholder="感谢{uname}的{gift_name}x{gift_num}!" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="text" v-model="roomConfig.features.thanks_template" placeholder="感谢{uname}的{gift_name}x{gift_num}!" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                     <label class="text-xs text-gray-500 block">大航海 - 舰长
-                        <input type="text" v-model="cfgGuardCaptain" placeholder="感谢{uname}上舰！" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="text" v-model="roomConfig.features.guard_thanks_template_captain" placeholder="感谢{uname}上舰！" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                     <label class="text-xs text-gray-500 block">大航海 - 提督
-                        <input type="text" v-model="cfgGuardCommander" placeholder="感谢{uname}支持！" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="text" v-model="roomConfig.features.guard_thanks_template_commander" placeholder="感谢{uname}支持！" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                     <label class="text-xs text-gray-500 block">大航海 - 总督
-                        <input type="text" v-model="cfgGuardGovernor" placeholder="感谢{uname}支持！" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="text" v-model="roomConfig.features.guard_thanks_template_governor" placeholder="感谢{uname}支持！" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                     <label class="text-xs text-gray-500 block">大航海 - 默认
-                        <input type="text" v-model="cfgGuardDefault" placeholder="感谢{uname}开通大航海！" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="text" v-model="roomConfig.features.guard_thanks_template_default" placeholder="感谢{uname}开通大航海！" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                     <label class="text-xs text-gray-500 block">连接消息
-                        <input type="text" v-model="cfgConnMsg" placeholder="来了喵~" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="text" v-model="roomConfig.features.connected_message" placeholder="来了喵~" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                 </div>
 
@@ -1931,29 +1918,25 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <h3 class="text-sm font-bold">⏰ 定时消息</h3>
                 <div class="space-y-3">
                     <label class="flex items-center gap-2 text-sm">
-                        <input type="checkbox" v-model="cfgPeriodicOn" class="w-4 h-4">
+                        <input type="checkbox" v-model="roomConfig.features.periodic_message_enabled" class="w-4 h-4">
                         启用定时消息（仅在开播时发送）
                     </label>
                     <div class="grid grid-cols-2 gap-4">
                         <label class="text-xs text-gray-500">间隔（秒）
-                            <input type="number" v-model.number="cfgPeriodicInterval" min="30" max="86400" class="border p-2 rounded w-full text-sm mt-1">
+                            <input type="number" v-model.number="roomConfig.features.periodic_message_interval_seconds" min="30" max="86400" class="border p-2 rounded w-full text-sm mt-1">
                             <span class="text-xs text-gray-400">默认 600 秒（10 分钟）</span>
                         </label>
                     </div>
                     <label class="text-xs text-gray-500 block">消息内容
-                        <input type="text" v-model="cfgPeriodicTmpl" placeholder="欢迎关注直播间~点个关注不迷路！" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="text" v-model="roomConfig.features.periodic_message_template" placeholder="欢迎关注直播间~点个关注不迷路！" class="border p-2 rounded w-full text-sm mt-1">
                         <span class="text-xs text-gray-400">留空则不发送定时消息</span>
                     </label>
                 </div>
 
                 <div class="flex items-center gap-4 mt-4">
-                    <button @click="saveGeneralConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
-                    <span v-if="cfgSaveMsg" class="text-sm" :class="cfgSaveOk ? 'text-green-600' : 'text-red-500'">{{ cfgSaveMsg }}</span>
-                    <button @click="loadGeneralConfig" class="text-gray-500 hover:text-gray-700 underline text-sm">刷新</button>
-                </div>
-                <div class="flex items-center gap-4 mt-2 border-t pt-4">
-                    <button @click="restartService" class="bg-red-500 hover:bg-red-600 text-white px-6 py-2 rounded text-sm">🔄 重启服务</button>
-                    <span v-if="restartMsg" class="text-sm" :class="restartOk ? 'text-green-600' : 'text-red-500'">{{ restartMsg }}</span>
+                    <button @click="saveRoomConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
+                    <span v-if="roomSaveMsg" class="text-sm" :class="roomSaveOk ? 'text-green-600' : 'text-red-500'">{{ roomSaveMsg }}</span>
+                    <button @click="editRoomConfig(selectedRoom?.room_id)" class="text-gray-500 hover:text-gray-700 underline text-sm">刷新</button>
                 </div>
             </div>
         </div>
@@ -2493,9 +2476,9 @@ createApp({
                 exportList.value = (data || []).map((item, idx) => ({
                     ...item,
                     id: item.id || idx,
-                    gift_num: item.gift_count,
-                    price: item.actual_amount,
-                    ts: item.created_at ? new Date(item.created_at).getTime() / 1000 : 0,
+                    gift_num: item.gift_num || 0,
+                    price: item.actual_value || 0,
+                    ts: typeof item.ts === 'number' ? item.ts : 0,
                     avatar: item.avatar || '',
                     guard_level: item.guard_level || 0,
                     gift_icon: item.gift_icon || '',
