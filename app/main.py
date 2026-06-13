@@ -33,36 +33,20 @@ def _setup_logging(level: str) -> None:
 
 async def _run(config_path: str) -> None:
     # 按需导入（避免 init 操作时触发 bilibili_api 等依赖）
-    import uvicorn  # noqa: PLC0415
     from .auth import AuthManager  # noqa: PLC0415
     from .bot import LiveRobot  # noqa: PLC0415
-    from .web.server import app as fastapi_app, init_app, _HTTP_HOST, _HTTP_PORT  # noqa: PLC0415
 
     config = load_config(config_path)
     _setup_logging(config.runtime.log_level)
-
-    init_app(config, config_path=config_path)
 
     auth = AuthManager(config)
     credential = await auth.prepare_credential()
     auth.start_refresh_loop(credential)
 
     robot = LiveRobot(config=config, credential=credential)
-
-    async def _run_web() -> None:
-        cfg = uvicorn.Config(fastapi_app, host=_HTTP_HOST, port=_HTTP_PORT, log_level="info")
-        server = uvicorn.Server(cfg)
-        await server.serve()
-
-    web_task = asyncio.create_task(_run_web())
     try:
         await robot.run()
     finally:
-        web_task.cancel()
-        try:
-            await web_task
-        except asyncio.CancelledError:
-            pass
         await auth.stop()
 
 

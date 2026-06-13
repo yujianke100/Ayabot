@@ -1,0 +1,14 @@
+[Unit]
+Description=Ayabot Bot - Room %i
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/ayabot/.venv/bin/python -m app.main --room %i
+WorkingDirectory=%h/ayabot
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
