@@ -1706,7 +1706,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </div>
 
 <script>
-const {createApp, ref, computed, nextTick} = Vue;
+const {createApp, ref, computed, nextTick, watch} = Vue;
 createApp({
     setup() {
         const loggedIn = ref(document.cookie.includes('session='));
