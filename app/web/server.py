@@ -3735,7 +3735,8 @@ createApp({
                 editingNickname, startEditNickname, saveNickname, verifyAccount,
                 streamers, allRooms, showStreamerForm, editStreamerUser, editStreamerPass,
                 editStreamerRooms, savingStreamer, streamerMsg, streamerOk, adminPass, adminPassMsg, adminPassOk,
-                loadUsers, saveStreamer, editStreamer, deleteStreamer, toggleStreamerRoom, saveAdminPass, showRoomDropdown};
+                loadUsers, saveStreamer, editStreamer, deleteStreamer, toggleStreamerRoom, saveAdminPass, showRoomDropdown,
+                addKeywordRule, removeKeywordRule};
     }
 }).mount('#app');
 </script>
