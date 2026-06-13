@@ -1465,8 +1465,8 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
 
         cur.execute(f"""
             SELECT uid, uname,
-                   ROUND(CAST(SUM(CASE WHEN is_blind_box=1 THEN actual_value ELSE CAST(json_extract(raw_json, '$.total_coin') AS INTEGER) END) AS REAL) / 100.0, 2) as total,
-                   ROUND(CAST(SUM(profit_value) AS REAL) / 100.0, 2) as total_profit
+                   ROUND(SUM(CASE WHEN is_blind_box=1 THEN CAST(actual_value AS REAL) / 10.0 ELSE CAST(json_extract(raw_json, '$.total_coin') AS REAL) / 100.0 END), 2) as total,
+                   ROUND(SUM(CAST(profit_value AS REAL) / 10.0), 2) as total_profit
             FROM gift_events WHERE {where_sql}
             GROUP BY uid ORDER BY total DESC LIMIT 50
         """, params)
@@ -1474,7 +1474,7 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
         conn.close()
 
         ranking = [
-            {"uid": r[0], "uname": r[1], "count": 0, "total": r[2], "total_profit": r[3] if len(r) > 3 else 0}
+            {"uid": r[0], "uname": r[1], "count": 0, "total": r[2] or 0, "total_profit": r[3] or 0}
             for r in rows
         ]
         return {"ranking": ranking}
@@ -1527,11 +1527,11 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
             is_blind = bool(r[6])
 
             if not is_blind and raw:
-                # 一般礼物：从 total_coin 取实际价值，转为元
+                # 一般礼物：total_coin 单位是分，/100 转元
                 actual_value = round(int(raw.get("total_coin", 0) or 0) / 100.0, 2)
             else:
-                # 盲盒：DB actual_value 已经是分，转为元
-                actual_value = round(actual_value / 100.0, 2)
+                # 盲盒：DB actual_value 单位是角，/10 转元
+                actual_value = round(actual_value / 10.0, 2)
 
             if raw:
                 sender_info = raw.get("sender_uinfo", {}) or {}
