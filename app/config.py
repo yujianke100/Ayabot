@@ -293,7 +293,6 @@ def load_config(path: str = "config.yaml") -> AppConfig:
                 max_messages=int(llm_ctx.get("max_messages", 10)),
             ),
         ),
-        account_uid=str(raw.get("account_uid", "")),
         custom_fortunes=raw.get("custom_fortunes", {}),
     )
 
