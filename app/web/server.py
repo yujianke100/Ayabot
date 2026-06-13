@@ -91,10 +91,10 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
     })
     _CONFIG_YAML_PATH = config_path
     # 房间管理的基础目录 = 项目根目录（rooms/ 所在位置）
-    # 当 config 在 rooms/<id>/ 下时，往上一级到项目根
+    # 当 config 在 rooms/<id>/config.yaml 时，往上两级到项目根
     cfg_parent = Path(_CONFIG_YAML_PATH).parent if _CONFIG_YAML_PATH else Path.cwd()
-    if cfg_parent.name == DEFAULT_ROOMS_DIR or cfg_parent.parent.name == DEFAULT_ROOMS_DIR:
-        _ROOMS_BASE_DIR = str(cfg_parent.parent.resolve())
+    if cfg_parent.parent.name == DEFAULT_ROOMS_DIR:
+        _ROOMS_BASE_DIR = str(cfg_parent.parent.parent.resolve())
     else:
         _ROOMS_BASE_DIR = str(cfg_parent.resolve())
     logger.info("webui configured: host=%s port=%s db=%s", _HTTP_HOST, _HTTP_PORT, os.path.abspath(_DB_PATH))
