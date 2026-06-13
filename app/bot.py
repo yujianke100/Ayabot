@@ -307,7 +307,29 @@ class LiveRobot:
             return
 
         self._last_welcome_ts[uid] = now
-        text = self._welcome_template.replace("{uname}", uname)
+
+        # Resolve template: uid-specific -> guard-level -> default
+        template = None
+        wtfu = self.config.features.welcome_templates_for_uids
+        if wtfu and uid in wtfu:
+            template = wtfu[uid]
+
+        if template is None:
+            guard_level = self._get_guard_level(event)
+            if guard_level > 0:
+                gwt = self.config.features.guard_welcome_templates
+                if gwt:
+                    if guard_level == 3:
+                        template = gwt.get("captain")
+                    elif guard_level == 2:
+                        template = gwt.get("commander")
+                    elif guard_level == 1:
+                        template = gwt.get("governor")
+
+        if not template:
+            template = self._welcome_template
+
+        text = template.replace("{uname}", uname)
         await self._enqueue_message(text=text, reply_uid=uid)
 
     async def _on_gift(self, event: dict[str, Any]) -> None:
@@ -456,7 +478,7 @@ class LiveRobot:
             kr = self.config.features.keyword_reply
             self.logger.debug("keyword_reply config: enabled=%s rules_count=%s", kr.enabled, len(kr.rules))
             if kr.enabled and kr.rules:
-                reply = _match_keyword_rule(text, kr.rules)
+                reply = _match_keyword_rule(text, kr.rules, uid=uid)
                 if reply:
                     now = time.time()
                     last = self._keyword_reply_cooldown_ts.get(uid, 0.0)
@@ -746,6 +768,19 @@ class LiveRobot:
         if delay > 0:
             await asyncio.sleep(delay)
         await self._enqueue_message(text=text, reply_uid=reply_uid)
+
+    def _get_guard_level(self, event: dict[str, Any]) -> int:
+        """Extract guard level from welcome event. 0=none, 3=captain, 2=commander, 1=governor."""
+        event_type = event.get("type", "")
+        if event_type == "WELCOME_GUARD":
+            data = event.get("data", {})
+            if isinstance(data, dict):
+                nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+                gl = _safe_int(data.get("guard_level") or nested.get("guard_level") or 0)
+                if gl in (1, 2, 3):
+                    return gl
+                return 3
+        return 0
 
     def _record_chat_context(self, text: str, uname: str, uid: int) -> None:
         """记录弹幕到上下文缓存（当配置为 all 时）. """
@@ -1081,8 +1116,10 @@ def _set_wake_word(word: str) -> None:
     _CURRENT_WAKE_WORD = word
 
 
-def _match_keyword_rule(text: str, rules: list[KeywordRule]) -> Optional[str]:
+def _match_keyword_rule(text: str, rules: list[KeywordRule], uid: int = 0) -> Optional[str]:
     for rule in rules:
+        if rule.allowed_uids and uid not in rule.allowed_uids:
+            continue
         for keyword in rule.keywords:
             if rule.match_mode == "exact":
                 if text == keyword:

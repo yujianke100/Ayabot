@@ -2239,6 +2239,18 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="text-xs text-gray-500 block">大航海 - 默认
                         <input type="text" v-model="roomConfig.features.guard_thanks_template_default" placeholder="感谢{uname}开通大航海！" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
+
+                    <h4 class="text-xs font-bold text-gray-600 mt-2">大航海欢迎（优先级高于默认欢迎模板）</h4>
+                    <label class="text-xs text-gray-500 block">舰长欢迎
+                        <input type="text" v-model="roomConfig.features.guard_welcome_templates.captain" placeholder="欢迎舰长{uname}！" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500 block">提督欢迎
+                        <input type="text" v-model="roomConfig.features.guard_welcome_templates.commander" placeholder="欢迎提督{uname}！" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500 block">总督欢迎
+                        <input type="text" v-model="roomConfig.features.guard_welcome_templates.governor" placeholder="欢迎总督{uname}！" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+
                     <label class="text-xs text-gray-500 block">连接消息
                         <input type="text" v-model="roomConfig.features.connected_message" placeholder="来了喵~" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
@@ -2264,6 +2276,25 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <hr>
+                <h3 class="text-sm font-bold">👤 UID特定欢迎模板</h3>
+                <p class="text-xs text-gray-500">为特定UID的用户设置专属欢迎词（优先级高于默认和大航海欢迎）。</p>
+                <div v-for="(wt, wti) in roomConfig.features.welcome_templates_for_uids_entries" :key="wti" class="border rounded p-3 bg-gray-50 space-y-2">
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-bold">UID欢迎 #{{ wti+1 }}</span>
+                        <button @click="removeUidWelcomeTemplate(wti)" class="text-red-400 text-xs underline">删除</button>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2">
+                        <label class="text-xs text-gray-500">UID
+                            <input type="number" v-model.number="wt.uid" class="border p-1 rounded w-full text-sm mt-1" placeholder="用户UID">
+                        </label>
+                        <label class="text-xs text-gray-500">欢迎模板
+                            <input type="text" v-model="wt.template" class="border p-1 rounded w-full text-sm mt-1" placeholder="欢迎{uname}！">
+                        </label>
+                    </div>
+                </div>
+                <button @click="addUidWelcomeTemplate" class="text-blue-500 text-xs underline">➕ 添加UID欢迎模板</button>
+
+                <hr>
                 <h3 class="text-sm font-bold">🔑 关键词回复</h3>
                 <label class="flex items-center gap-2 text-xs">
                     <input type="checkbox" v-model="roomConfig.keyword_reply.enabled" class="w-4 h-4"> 启用
@@ -2287,6 +2318,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
                             <option value="contains">包含</option>
                             <option value="exact">精确</option>
                         </select>
+                    </label>
+                    <label class="text-xs text-gray-500">限制UID（逗号分隔，留空=全部用户）
+                        <input type="text" v-model="rule.allowedUidsStr" class="border p-1 rounded w-full text-sm mt-1" placeholder="12345, 67890">
                     </label>
                 </div>
                 <button @click="addKeywordRule" class="text-blue-500 text-xs underline">➕ 添加规则</button>
@@ -3437,10 +3471,19 @@ createApp({
                 }
                 roomConfig.value.keyword_reply.rules = (roomConfig.value.keyword_reply.rules || []).map(r => ({
                     ...r,
-                    keywordsStr: (r.keywords || []).join(", ")
+                    keywordsStr: (r.keywords || []).join(", "),
+                    allowedUidsStr: (r.allowed_uids || []).join(", "),
                 }));
                 if (!roomConfig.value.custom_fortunes) {
                     roomConfig.value.custom_fortunes = {daiji: "", zhongji: "", xiaoji: "", moji: "", xiong: "", daxiong: ""};
+                }
+                if (!roomConfig.value.features) roomConfig.value.features = {};
+                // 转换 UID 欢迎模板 dict → entries 数组
+                const wtfu = roomConfig.value.features.welcome_templates_for_uids || {};
+                roomConfig.value.features.welcome_templates_for_uids_entries = Object.entries(wtfu).map(([uid, tmpl]) => ({uid: Number(uid), template: tmpl}));
+                // 确保大航海欢迎模板存在
+                if (!roomConfig.value.features.guard_welcome_templates) {
+                    roomConfig.value.features.guard_welcome_templates = {captain: "", commander: "", governor: ""};
                 }
             } catch(e) { alert('加载配置失败: ' + e.message); }
         }
@@ -3453,7 +3496,18 @@ createApp({
                     ...r,
                     keywords: r.keywordsStr ? r.keywordsStr.split(/[,，]\s*/).filter(Boolean) : [],
                     keywordsStr: undefined,
+                    allowed_uids: r.allowedUidsStr ? r.allowedUidsStr.split(/[,，]\s*/).map(s => Number(s.trim())).filter(n => !isNaN(n)) : null,
+                    allowedUidsStr: undefined,
                 }));
+            }
+            // 转换 UID 欢迎 entries → dict
+            if (body.features && body.features.welcome_templates_for_uids_entries) {
+                const wtfu = {};
+                for (const entry of body.features.welcome_templates_for_uids_entries) {
+                    if (entry.uid && entry.template) wtfu[entry.uid] = entry.template;
+                }
+                body.features.welcome_templates_for_uids = Object.keys(wtfu).length ? wtfu : null;
+                delete body.features.welcome_templates_for_uids_entries;
             }
             try {
                 const res = await fetch(`/api/rooms/${editingRoom.value}/config`, {
@@ -3695,10 +3749,17 @@ createApp({
 
         function addKeywordRule() {
             if (!roomConfig.value.keyword_reply.rules) roomConfig.value.keyword_reply.rules = [];
-            roomConfig.value.keyword_reply.rules.push({keywords: [], keywordsStr: "", reply: "", match_mode: "contains"});
+            roomConfig.value.keyword_reply.rules.push({keywords: [], keywordsStr: "", reply: "", match_mode: "contains", allowedUidsStr: ""});
         }
         function removeKeywordRule(idx) {
             roomConfig.value.keyword_reply.rules.splice(idx, 1);
+        }
+        function addUidWelcomeTemplate() {
+            if (!roomConfig.value.features.welcome_templates_for_uids_entries) roomConfig.value.features.welcome_templates_for_uids_entries = [];
+            roomConfig.value.features.welcome_templates_for_uids_entries.push({uid: 0, template: ""});
+        }
+        function removeUidWelcomeTemplate(idx) {
+            roomConfig.value.features.welcome_templates_for_uids_entries.splice(idx, 1);
         }
 
         return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
@@ -3736,7 +3797,8 @@ createApp({
                 streamers, allRooms, showStreamerForm, editStreamerUser, editStreamerPass,
                 editStreamerRooms, savingStreamer, streamerMsg, streamerOk, adminPass, adminPassMsg, adminPassOk,
                 loadUsers, saveStreamer, editStreamer, deleteStreamer, toggleStreamerRoom, saveAdminPass, showRoomDropdown,
-                addKeywordRule, removeKeywordRule};
+                addKeywordRule, removeKeywordRule,
+                addUidWelcomeTemplate, removeUidWelcomeTemplate};
     }
 }).mount('#app');
 </script>

@@ -43,6 +43,8 @@ class FeatureConfig:
     periodic_message_enabled: bool = True
     periodic_message_interval_seconds: int = 600
     periodic_message_template: str = ""
+    welcome_templates_for_uids: dict[int, str] | None = None  # uid -> template
+    guard_welcome_templates: dict[str, str] | None = None     # captain/commander/governor -> template
 
 
 @dataclass(slots=True)
@@ -64,6 +66,7 @@ class KeywordRule:
     keywords: list[str]
     reply: str
     match_mode: str = "contains"
+    allowed_uids: list[int] | None = None  # None = all users
 
 
 @dataclass(slots=True)
@@ -242,6 +245,8 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             periodic_message_enabled=bool(features.get("periodic_message_enabled", True)),
             periodic_message_interval_seconds=int(features.get("periodic_message_interval_seconds", 600)),
             periodic_message_template=str(features.get("periodic_message_template", "")),
+            welcome_templates_for_uids=features.get("welcome_templates_for_uids", None) or None,
+            guard_welcome_templates=features.get("guard_welcome_templates", None) or None,
         ),
         cooldown=CooldownConfig(
             welcome_user_seconds=int(cooldown.get("welcome_user_seconds", 600)),
@@ -345,6 +350,8 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "periodic_message_enabled": config.features.periodic_message_enabled,
             "periodic_message_interval_seconds": config.features.periodic_message_interval_seconds,
             "periodic_message_template": config.features.periodic_message_template,
+            "welcome_templates_for_uids": config.features.welcome_templates_for_uids,
+            "guard_welcome_templates": config.features.guard_welcome_templates,
         },
         "web_ui": {
             "host": config.web_ui.host,
@@ -414,10 +421,15 @@ def _parse_keyword_reply(raw: Any) -> KeywordReplyConfig:
             reply = str(item.get("reply", ""))
             if not reply:
                 continue
+            allowed_raw = item.get("allowed_uids")
+            allowed_uids = None
+            if isinstance(allowed_raw, list):
+                allowed_uids = [int(u) for u in allowed_raw if isinstance(u, (int, str)) and str(u).isdigit()]
             rules.append(KeywordRule(
                 keywords=[str(k) for k in keywords],
                 reply=reply,
                 match_mode=str(item.get("match_mode", "contains")),
+                allowed_uids=allowed_uids,
             ))
     return KeywordReplyConfig(
         enabled=enabled,
