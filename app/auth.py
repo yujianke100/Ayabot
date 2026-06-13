@@ -61,10 +61,26 @@ class AuthManager:
         )
 
     def _load_stored_credential(self) -> Optional[Credential]:
-        path = Path(self.config.auth.credential_store_path)
-        if not path.exists():
-            return None
+        # 优先从统一的 accounts/<uid>/credential.json 加载
+        uid = self.config.account_uid
+        if uid:
+            # 从 credential_store_path 反推项目根目录
+            # credential_store_path = /root/ayabot/rooms/<id>/data/credential.json
+            # 项目根 = 上3级 = /root/ayabot/
+            store_path = Path(self.config.auth.credential_store_path)
+            project_root = store_path.parent.parent.parent if store_path.is_absolute() else Path()
+            accounts_path = project_root / "accounts" / uid / "credential.json"
+            if accounts_path.exists():
+                return self._load_credential_file(accounts_path)
+            self.logger.info("account_uid=%s but no credential at %s, fallback", uid, accounts_path)
 
+        # 降级到旧的 per-room 路径
+        path = Path(self.config.auth.credential_store_path)
+        if path.exists():
+            return self._load_credential_file(path)
+        return None
+
+    def _load_credential_file(self, path: Path) -> Optional[Credential]:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):

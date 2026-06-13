@@ -141,6 +141,7 @@ class AppConfig:
     auth: AuthConfig
     web_ui: WebUIConfig
     llm: LLMConfig
+    account_uid: str = ""
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -189,6 +190,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
     return AppConfig(
         room_display_id=int(raw["room_display_id"]),
         anchor_uid=int(raw["anchor_uid"]),
+        account_uid=str(raw.get("account_uid", "")),
         credential=CredentialConfig(
             sessdata=str(credential.get("sessdata", "")),
             bili_jct=str(credential.get("bili_jct", "")),

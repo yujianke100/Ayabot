@@ -1145,18 +1145,6 @@ async def api_save_room_config(room_id: str, request: Request):
         return JSONResponse({"error": "room not found"}, status_code=404)
     from app.config import update_config_from_dict
     ok = update_config_from_dict(body, str(cfg_path))
-    if ok and "account_uid" in body:
-        uid = str(body["account_uid"]) if body["account_uid"] else ""
-        if uid:
-            # 同步 credential 到该房间
-            src_cred = _get_account_dir(uid) / "credential.json"
-            if src_cred.exists():
-                room_data_dir = cfg_path.parent / "data"
-                room_data_dir.mkdir(parents=True, exist_ok=True)
-                (room_data_dir / "credential.json").write_text(
-                    src_cred.read_text(encoding="utf-8"), encoding="utf-8"
-                )
-                logger.info("credential synced to room %s from account %s", room_id, uid)
     return {"ok": ok}
 
 
@@ -1322,14 +1310,7 @@ async def api_save_account_credential(request: Request):
     }
     cred_json = json.dumps(cred_data, ensure_ascii=False, indent=2)
     (acc_dir / "credential.json").write_text(cred_json, encoding="utf-8")
-
-    # 同步 credential 到所有关联该账号的房间
-    linked = _get_account_rooms(target_uid)
-    for room in linked:
-        room_data_dir = Path(_ROOMS_BASE_DIR).resolve() / DEFAULT_ROOMS_DIR / room["room_id"] / "data"
-        room_data_dir.mkdir(parents=True, exist_ok=True)
-        (room_data_dir / "credential.json").write_text(cred_json, encoding="utf-8")
-        logger.info("credential synced to room %s for account %s", room["room_id"], target_uid)
+    logger.info("credential saved for account %s", target_uid)
 
     # 查询用户昵称
     nickname = ""
