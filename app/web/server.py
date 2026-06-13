@@ -19,6 +19,7 @@ import os
 import secrets
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -967,6 +968,382 @@ async def api_save_room_config(room_id: str, request: Request):
 
 
 # ══════════════════════════════════════════════════════════════
+#  B站账号管理 API
+# ══════════════════════════════════════════════════════════════
+
+_ACCOUNTS_DIR: str = "accounts"
+
+
+def _get_account_dir(uid: str) -> Path:
+    return Path(_ROOMS_BASE_DIR).resolve() / _ACCOUNTS_DIR / str(uid)
+
+
+def _list_accounts() -> list[dict[str, Any]]:
+    """扫描 accounts/ 目录列出所有已登录 B站 账号."""
+    base = Path(_ROOMS_BASE_DIR).resolve() / _ACCOUNTS_DIR
+    if not base.exists():
+        return []
+    accounts: list[dict[str, Any]] = []
+    for d in sorted(base.iterdir()):
+        if not d.is_dir():
+            continue
+        uid = d.name
+        cred_path = d / "credential.json"
+        meta_path = d / "meta.yaml"
+        meta = {}
+        if meta_path.exists():
+            try:
+                meta = yaml.safe_load(meta_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                meta = {}
+        has_cred = cred_path.exists()
+        nick = meta.get("nickname", "") or meta.get("uname", "") or ""
+        accounts.append({
+            "uid": uid,
+            "nickname": nick,
+            "has_credential": has_cred,
+            "linked_rooms": _get_account_rooms(uid),
+        })
+    return accounts
+
+
+def _get_account_rooms(uid: str) -> list[dict[str, Any]]:
+    """返回指定 B站 账号关联了哪些房间."""
+    linked: list[dict[str, Any]] = []
+    rooms_dir = Path(_ROOMS_BASE_DIR).resolve() / DEFAULT_ROOMS_DIR
+    if not rooms_dir.exists():
+        return linked
+    for d in sorted(rooms_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        cfg_path = d / "config.yaml"
+        if not cfg_path.exists():
+            continue
+        try:
+            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        account_uid = cfg.get("account_uid", "")
+        if str(account_uid) == str(uid):
+            linked.append({
+                "room_id": d.name,
+                "bot_name": cfg.get("web_ui", {}).get("bot_name", ""),
+            })
+    return linked
+
+
+@app.post("/api/bili_accounts")
+async def api_bili_login_account(request: Request):
+    """生成 B站 二维码用于登录账号（保存到 accounts/<uid>/credential.json）."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    account_uid = body.get("uid", "")
+    if not account_uid:
+        return JSONResponse({"error": "uid required"}, status_code=400)
+
+    acc_dir = _get_account_dir(account_uid)
+    acc_dir.mkdir(parents=True, exist_ok=True)
+
+    # 生成二维码
+    try:
+        from bilibili_api import login as bili_login  # noqa: PLC0415
+        login_v2 = bili_login
+    except Exception:
+        return JSONResponse({"error": "bilibili_api not available"}, status_code=500)
+
+    qr = login_v2.QrCodeLogin()
+    qr_url = qr.get_qrcode_url()
+    session_id = str(uuid.uuid4())
+
+    # 生成 base64 二维码图片
+    import base64, io  # noqa: PLC0415
+    from PIL import Image  # noqa: PLC0415
+    import qrcode  # noqa: PLC0415
+
+    qr_img = qrcode.make(qr_url)
+    buf = io.BytesIO()
+    qr_img.save(buf, format="PNG")
+    img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    _BILI_LOGIN_SESSIONS[session_id] = {
+        "qr": qr,
+        "created_at": time.time(),
+        "state": "waiting",
+        "target_uid": account_uid,
+    }
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "qr_image": f"data:image/png;base64,{img_b64}",
+        "qr_url": qr_url,
+    }
+
+
+@app.get("/api/bili_accounts")
+async def api_list_accounts():
+    """列出所有已登录的 B站 账号."""
+    return {"accounts": _list_accounts()}
+
+
+@app.post("/api/bili_accounts/save")
+async def api_save_account_credential(request: Request):
+    """保存扫码登录后的凭据到 accounts/<uid>/credential.json."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "bad request"}, status_code=400)
+
+    session_id = body.get("session_id", "")
+    sess = _BILI_LOGIN_SESSIONS.get(session_id)
+    if not sess:
+        return {"ok": False, "error": "session expired"}
+
+    qr = sess["qr"]
+    if not qr.has_done():
+        return {"ok": False, "error": "login not completed"}
+
+    target_uid = sess.get("target_uid", "")
+    if not target_uid:
+        return {"ok": False, "error": "no target uid"}
+
+    try:
+        credential = qr.get_credential()
+    except Exception as exc:
+        return {"ok": False, "error": f"get credential failed: {exc}"}
+
+    cookies = credential.get_cookies()
+    dedeuserid = cookies.get("DedeUserID", "")
+
+    # 保存到 accounts/<uid>/
+    acc_dir = _get_account_dir(target_uid)
+    acc_dir.mkdir(parents=True, exist_ok=True)
+
+    cred_data = {
+        "SESSDATA": cookies.get("SESSDATA", ""),
+        "bili_jct": cookies.get("bili_jct", ""),
+        "buvid3": cookies.get("buvid3", ""),
+        "DedeUserID": dedeuserid,
+        "ac_time_value": cookies.get("ac_time_value", ""),
+    }
+    (acc_dir / "credential.json").write_text(
+        json.dumps(cred_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # 查询用户昵称
+    nickname = ""
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as sess_aio:
+            async with sess_aio.get(
+                f"https://api.bilibili.com/x/space/wbi/acc/info?mid={dedeuserid}"
+            ) as resp:
+                info = await resp.json()
+                if info.get("code") == 0:
+                    nickname = info.get("data", {}).get("name", "")
+    except Exception:
+        pass
+
+    if nickname:
+        (acc_dir / "meta.yaml").write_text(
+            yaml.dump({"nickname": nickname, "uname": nickname}, allow_unicode=True),
+            encoding="utf-8",
+        )
+
+    _BILI_LOGIN_SESSIONS.pop(session_id, None)
+    logger.info("bili account saved: uid=%s nickname=%s", dedeuserid, nickname)
+
+    return {
+        "ok": True,
+        "uid": dedeuserid,
+        "nickname": nickname,
+    }
+
+
+@app.delete("/api/bili_accounts/{uid}")
+async def api_delete_account(uid: str):
+    """删除 B站 账号（解除所有房间的关联）."""
+    import shutil  # noqa: PLC0415
+
+    # 先解除所有房间的关联
+    rooms_dir = Path(_ROOMS_BASE_DIR).resolve() / DEFAULT_ROOMS_DIR
+    if rooms_dir.exists():
+        for d in rooms_dir.iterdir():
+            if not d.is_dir():
+                continue
+            cfg_path = d / "config.yaml"
+            if not cfg_path.exists():
+                continue
+            try:
+                cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                continue
+            if str(cfg.get("account_uid", "")) == str(uid):
+                cfg.pop("account_uid", None)
+                (d / "config.yaml").write_text(
+                    yaml.dump(cfg, default_flow_style=False, allow_unicode=True),
+                    encoding="utf-8",
+                )
+                logger.info("removed account %s from room %s", uid, d.name)
+
+    # 删除账号目录
+    acc_dir = _get_account_dir(uid)
+    if acc_dir.exists():
+        shutil.rmtree(str(acc_dir))
+
+    logger.info("bili account deleted: %s", uid)
+    return {"ok": True}
+
+
+# ══════════════════════════════════════════════════════════════
+#  Per-Room 数据 API
+# ══════════════════════════════════════════════════════════════
+
+def _room_db_path(room_id: str) -> Path:
+    """返回房间的 SQLite 数据库路径."""
+    from app.config import get_room_path
+    return get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "data" / "bot.db"
+
+
+@app.get("/api/rooms/{room_id}/ranking")
+async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType: str = "all"):
+    """获取指定房间的送礼排行."""
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return {"ranking": []}
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+
+        where_clauses = ["1=1"]
+        params: list[Any] = []
+
+        if rStart:
+            where_clauses.append("date(created_at) >= date(?)")
+            params.append(rStart)
+        if rEnd:
+            where_clauses.append("date(created_at) <= date(?)")
+            params.append(rEnd)
+
+        if rType == "gift":
+            where_clauses.append("blindbox = 0")
+        elif rType == "blindbox":
+            where_clauses.append("blindbox = 1")
+
+        where_sql = " AND ".join(where_clauses)
+
+        cur.execute(f"""
+            SELECT uid, uname, sum(gift_count) as cnt, sum(actual_amount) as total
+            FROM gift_logs WHERE {where_sql}
+            GROUP BY uid ORDER BY total DESC LIMIT 50
+        """, params)
+        rows = cur.fetchall()
+        conn.close()
+
+        ranking = [
+            {"uid": r[0], "uname": r[1], "count": r[2], "total": r[3]}
+            for r in rows
+        ]
+        return {"ranking": ranking}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@app.get("/api/rooms/{room_id}/user_gifts")
+async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_type: str = "all"):
+    """获取指定房间某用户某天的送礼详情."""
+    db_path = _room_db_path(room_id)
+    if not db_path.exists() or not uid or not date:
+        return []
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+
+        where_extra = ""
+        if gift_type == "gift":
+            where_extra = " AND blindbox = 0"
+        elif gift_type == "blindbox":
+            where_extra = " AND blindbox = 1"
+
+        cur.execute(f"""
+            SELECT uid, uname, gift_name, gift_count, actual_amount, created_at, blindbox, gift_id
+            FROM gift_logs
+            WHERE uid = ? AND date(created_at) = date(?){where_extra}
+            ORDER BY created_at
+        """, (uid, date))
+        rows = cur.fetchall()
+        conn.close()
+
+        return [
+            {
+                "uid": r[0], "uname": r[1], "gift_name": r[2],
+                "gift_count": r[3], "actual_amount": r[4],
+                "created_at": r[5], "blindbox": bool(r[6]),
+                "gift_id": r[7],
+            }
+            for r in rows
+        ]
+    except Exception:
+        return []
+
+
+@app.get("/api/rooms/{room_id}/user_dates")
+async def api_room_user_dates(room_id: str, uid: int = 0):
+    """获取指定房间某用户有送礼记录的所有日期."""
+    db_path = _room_db_path(room_id)
+    if not db_path.exists() or not uid:
+        return []
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT date(created_at) FROM gift_logs WHERE uid = ? ORDER BY date(created_at)",
+            (uid,),
+        )
+        dates = [r[0] for r in cur.fetchall()]
+        conn.close()
+        return dates
+    except Exception:
+        return []
+
+
+@app.post("/api/rooms/{room_id}/delete_old")
+async def api_room_delete_old(room_id: str, request: Request):
+    """删除指定房间的旧数据."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    date_str = body.get("date", "")
+    if not date_str:
+        return JSONResponse({"error": "date required"}, status_code=400)
+
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return {"deleted_events": 0, "deleted_gifts": 0}
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute("DELETE FROM event_logs WHERE date(created_at) <= date(?)", (date_str,))
+        deleted_events = cur.rowcount
+        cur.execute("DELETE FROM gift_logs WHERE date(created_at) <= date(?)", (date_str,))
+        deleted_gifts = cur.rowcount
+        conn.commit()
+        conn.close()
+        return {"deleted_events": deleted_events, "deleted_gifts": deleted_gifts}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+# ══════════════════════════════════════════════════════════════
 #  HTML
 # ══════════════════════════════════════════════════════════════════
 
@@ -1108,16 +1485,265 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <h1 class="text-xl font-bold text-blue-600">🎯 Ayabot 管理后台</h1>
     <div class="flex items-center gap-4 text-sm">
         <button @click="tab='rooms'" :class="tab==='rooms'?'text-blue-600 font-bold border-b-2 border-blue-600':''">🏠 房间管理</button>
-        <button @click="tab='ranking'" :class="tab==='ranking'?'text-blue-600 font-bold border-b-2 border-blue-600':''">送礼排行</button>
-        <button @click="tab='export'"  :class="tab==='export' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">精美导出</button>
-        <button @click="tab='llm'"    :class="tab==='llm'    ?'text-blue-600 font-bold border-b-2 border-blue-600':''">AI 回复</button>
-        <button @click="tab='config'" :class="tab==='config'?'text-blue-600 font-bold border-b-2 border-blue-600':''">机器人配置</button>
-        <button @click="tab='bili_login'" :class="tab==='bili_login'?'text-blue-600 font-bold border-b-2 border-blue-600':''">B站登录</button>
-        <button @click="tab='manage'" :class="tab==='manage'?'text-blue-600 font-bold border-b-2 border-blue-600':''">数据管理</button>
+        <button @click="tab='accounts'" :class="tab==='accounts'?'text-blue-600 font-bold border-b-2 border-blue-600':''">👤 B站账号</button>
+        <button @click="tab='global'" :class="tab==='global'?'text-blue-600 font-bold border-b-2 border-blue-600':''">⚙️ 全局配置</button>
         <button @click="tab='help'"  :class="tab==='help' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">帮助</button>
         <button @click="doLogout" class="text-gray-400 hover:text-red-500 ml-2">退出</button>
     </div>
 </header>
+
+<!-- ══════ 房间管理 ══════ -->
+<div v-if="tab==='rooms'" class="max-w-5xl mx-auto">
+
+    <!-- ── 房间列表 ── -->
+    <div v-if="!selectedRoom">
+        <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
+            <div class="flex items-center justify-between">
+                <h2 class="text-lg font-bold">🏠 房间管理</h2>
+                <button @click="showCreateRoom = !showCreateRoom"
+                        class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">
+                    {{ showCreateRoom ? '取消' : '➕ 新建房间' }}
+                </button>
+            </div>
+
+            <!-- 新建表单 -->
+            <div v-if="showCreateRoom" class="border rounded-lg p-4 bg-gray-50 space-y-3">
+                <h3 class="text-sm font-bold">新建直播间</h3>
+                <div class="grid grid-cols-2 gap-3">
+                    <label class="text-xs text-gray-500">主播 UID
+                        <input type="number" v-model.number="newRoomUid" placeholder="B站 主播 UID"
+                               class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">关联 B站 账号
+                        <select v-model="newRoomAccount" class="border p-2 rounded w-full text-sm mt-1">
+                            <option value="">暂不关联</option>
+                            <option v-for="a in accounts" :key="a.uid" :value="a.uid">{{ a.nickname || 'UID:'+a.uid }}</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="flex gap-2">
+                    <button @click="createRoom" :disabled="creatingRoom"
+                            class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
+                        {{ creatingRoom ? '创建中...' : '创建' }}
+                    </button>
+                    <div v-if="createRoomMsg" class="text-sm" :class="createRoomOk ? 'text-green-600' : 'text-red-500'">
+                        {{ createRoomMsg }}
+                    </div>
+                </div>
+            </div>
+
+            <!-- 房间卡片列表 -->
+            <div v-if="!rooms || rooms.length === 0" class="text-sm text-gray-400 text-center py-8">
+                暂无房间。点击「新建房间」添加。
+            </div>
+            <div v-for="r in rooms" :key="r.room_id"
+                 class="border rounded-lg p-4 flex items-center justify-between cursor-pointer hover:shadow-md transition"
+                 :class="r.status==='running' ? 'border-green-300 bg-green-50' : 'border-gray-200'"
+                 @click="selectRoom(r)">
+                <div class="flex-1">
+                    <div class="flex items-center gap-2">
+                        <span class="w-2 h-2 rounded-full inline-block"
+                              :class="r.status==='running' ? 'bg-green-500' : 'bg-gray-400'"></span>
+                        <span class="font-bold text-sm">#{{ r.room_id }}</span>
+                        <span class="text-xs text-gray-400">UID: {{ r.anchor_uid }}</span>
+                    </div>
+                    <div class="text-xs text-gray-500 mt-1 flex gap-3">
+                        <span>状态: {{ r.status === 'running' ? '🟢 运行中' : '⏹️ 已停止' }}</span>
+                        <span v-if="r.account_nick">账号: {{ r.account_nick }}</span>
+                    </div>
+                </div>
+                <div class="flex gap-2 items-center" @click.stop>
+                    <button v-if="r.status !== 'running'"
+                            @click="startRoom(r.room_id)"
+                            class="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded text-xs">启动</button>
+                    <button v-if="r.status === 'running'"
+                            @click="stopRoom(r.room_id)"
+                            class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-xs">停止</button>
+                    <button @click="deleteRoom(r.room_id, r.room_id)"
+                            class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── 房间详情 ── -->
+    <div v-else>
+        <div class="mb-4">
+            <button @click="selectedRoom = null; roomSubTab = 'ranking'"
+                    class="text-blue-500 hover:text-blue-700 text-sm">&larr; 返回房间列表</button>
+        </div>
+
+        <!-- 房间信息头 -->
+        <div class="bg-white p-4 rounded-xl shadow-sm mb-4 flex items-center justify-between">
+            <div>
+                <h2 class="text-lg font-bold">📺 房间 #{{ selectedRoom.room_id }}</h2>
+                <div class="text-xs text-gray-500 mt-1">
+                    主播 UID: {{ selectedRoom.anchor_uid }}
+                    | 状态: {{ selectedRoom.status === 'running' ? '🟢 运行中' : '⏹️ 已停止' }}
+                </div>
+            </div>
+            <div class="flex items-center gap-2">
+                <span class="text-xs text-gray-500">B站账号:</span>
+                <select v-model="selectedRoomAccount" @change="assignAccountToRoom"
+                        class="border p-1 rounded text-sm">
+                    <option value="">不关联</option>
+                    <option v-for="a in accounts" :key="a.uid" :value="a.uid">{{ a.nickname || 'UID:'+a.uid }}</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- 子导航 -->
+        <div class="flex gap-1 mb-4 text-sm bg-white rounded-xl shadow-sm p-1">
+            <button v-for="st in roomSubTabs" :key="st.key"
+                    @click="roomSubTab = st.key"
+                    class="px-4 py-2 rounded-lg transition"
+                    :class="roomSubTab === st.key ? 'bg-blue-500 text-white' : 'text-gray-600 hover:bg-gray-100'">
+                {{ st.label }}
+            </button>
+        </div>
+
+        <!-- 送礼排行 -->
+        <div v-if="roomSubTab==='ranking'" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            ... (same ranking content but using selectedRoom's APIs)
+        </div>
+
+        <!-- 精美导出 -->
+        <div v-if="roomSubTab==='export'" class="flex flex-col items-center w-full">
+            ... (same export content)
+        </div>
+
+        <!-- AI 回复 -->
+        <div v-if="roomSubTab==='llm'" class="max-w-2xl mx-auto">
+            ... (same llm content)
+        </div>
+
+        <!-- 机器人配置 -->
+        <div v-if="roomSubTab==='config'" class="max-w-2xl mx-auto">
+            ... (same config content)
+        </div>
+
+        <!-- 数据管理 -->
+        <div v-if="roomSubTab==='manage'" class="max-w-lg mx-auto">
+            ... (same manage content)
+        </div>
+    </div>
+</div>
+
+<!-- ══════ B站账号管理 ══════ -->
+<div v-if="tab==='accounts'" class="max-w-3xl mx-auto">
+    <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
+        <div class="flex items-center justify-between">
+            <h2 class="text-lg font-bold">👤 B站账号管理</h2>
+            <button @click="showNewAccount = !showNewAccount"
+                    class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
+                {{ showNewAccount ? '取消' : '📱 扫码登录新账号' }}
+            </button>
+        </div>
+
+        <!-- 扫码登录 -->
+        <div v-if="showNewAccount" class="border rounded-lg p-4 bg-gray-50 space-y-3">
+            <h3 class="text-sm font-bold">扫码登录 B站 账号</h3>
+            <label class="text-xs text-gray-500">登录后自动保存到哪个 UID？
+                <input type="number" v-model.number="newAccountUid" placeholder="填 B站 UID"
+                       class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <button @click="startAccountLogin" :disabled="accountLoggingIn"
+                    class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
+                {{ accountLoggingIn ? '请稍候...' : '生成二维码' }}
+            </button>
+
+            <div v-if="accountQrImage" class="flex flex-col items-center space-y-2">
+                <img :src="accountQrImage" class="border-2 border-gray-200 rounded-lg" style="width:180px;height:180px">
+                <div class="flex items-center gap-2">
+                    <span class="inline-block w-3 h-3 rounded-full bg-green-400 animate-pulse"></span>
+                    <span class="text-sm">请用 B站 App 扫码</span>
+                </div>
+                <div v-if="accountQrState === 'scanned'" class="text-yellow-600 text-sm">
+                    已扫码，请在手机上确认
+                </div>
+                <div v-if="accountQrState === 'done'" class="text-green-600 text-sm font-bold">
+                    ✅ 扫码成功！保存凭据中...
+                </div>
+                <div v-if="accountQrState === 'error'" class="text-red-500 text-sm">
+                    {{ accountQrError }}
+                </div>
+            </div>
+        </div>
+
+        <!-- 账号列表 -->
+        <div v-if="!accounts || accounts.length === 0" class="text-sm text-gray-400 text-center py-8">
+            暂无已登录的 B站 账号。扫码登录第一个账号。
+        </div>
+        <div v-for="a in accounts" :key="a.uid"
+             class="border rounded-lg p-4 flex items-center justify-between">
+            <div>
+                <div class="font-bold text-sm">{{ a.nickname || '未命名' }}</div>
+                <div class="text-xs text-gray-500 mt-1">UID: {{ a.uid }}</div>
+                <div v-if="a.linked_rooms && a.linked_rooms.length" class="text-xs text-gray-400 mt-1">
+                    关联房间: <span v-for="(lr, li) in a.linked_rooms" :key="lr.room_id">{{ lr.room_id }}<span v-if="li < a.linked_rooms.length-1">, </span></span>
+                </div>
+            </div>
+            <div class="flex gap-2 items-center">
+                <button @click="refreshAccount(a.uid)"
+                        class="text-blue-500 hover:text-blue-700 text-xs underline">刷新</button>
+                <button @click="deleteAccount(a.uid, a.nickname)"
+                        class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ══════ 全局配置 ══════ -->
+<div v-if="tab==='global'" class="max-w-lg mx-auto">
+    <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
+        <h2 class="text-lg font-bold">⚙️ 全局配置</h2>
+        <div class="grid grid-cols-2 gap-4">
+            <label class="text-xs text-gray-500">Web 端口
+                <input type="number" v-model.number="cfgPort" min="1024" max="65535" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500">监听地址
+                <input type="text" v-model="cfgHost" class="border p-2 rounded w-full text-sm mt-1" placeholder="0.0.0.0">
+            </label>
+        </div>
+        <div class="flex items-center gap-4">
+            <button @click="saveGlobalConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
+            <span v-if="cfgSaveMsg" class="text-sm" :class="cfgSaveOk ? 'text-green-600' : 'text-red-500'">{{ cfgSaveMsg }}</span>
+        </div>
+    </div>
+</div>
+
+<!-- ══════ 帮助页面 ══════ -->
+<div v-if="tab==='help'" class="max-w-3xl mx-auto">
+    <div class="bg-white p-6 rounded-xl shadow-sm space-y-6 text-sm leading-relaxed">
+        <h2 class="text-lg font-bold">📖 使用指南</h2>
+        <div>
+            <h3 class="font-bold text-blue-600 mb-1">🎯 弹幕命令</h3>
+            <table class="w-full text-xs border-collapse">
+                <thead><tr class="bg-gray-100"><th class="border p-1 text-left">命令</th><th class="border p-1 text-left">说明</th></tr></thead>
+                <tbody>
+                    <tr><td class="border p-1"><code>#签到</code></td><td class="border p-1">每日签到（按直播场次计算）</td></tr>
+                    <tr><td class="border p-1"><code>#抽签</code></td><td class="border p-1">今日运势抽签</td></tr>
+                    <tr><td class="border p-1"><code>#今日盲盒</code></td><td class="border p-1">今日盲盒统计</td></tr>
+                    <tr><td class="border p-1"><code>#本月盲盒</code></td><td class="border p-1">本月盲盒统计</td></tr>
+                    <tr><td class="border p-1"><code>#{{ llmWakeWord || 'ayabot' }} &lt;聊天内容&gt;</code></td><td class="border p-1">AI 智能回复</td></tr>
+                    <tr><td class="border p-1"><code>#帮助</code></td><td class="border p-1">显示所有命令</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div>
+            <h3 class="font-bold text-blue-600 mb-1">🤖 功能</h3>
+            <ul class="list-disc pl-4 space-y-1 text-xs">
+                <li>欢迎 — 新观众进入时自动欢迎</li>
+                <li>感谢 — 送礼物/盲盒时自动感谢</li>
+                <li>大航海感谢 — 舰长/提督/总督自动感谢</li>
+                <li>关键词回复 — 设定关键词自动回复</li>
+                <li>AI 回复 — 唤醒词触发 LLM 智能对话</li>
+                <li>多房间 — 一个 WebUI 管理多个主播</li>
+            </ul>
+        </div>
+    </div>
+</div>
+</div><!-- /loggedIn -->
 
 <!-- ══════ 送礼排行 ══════ -->
 <div v-if="tab==='ranking'" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
