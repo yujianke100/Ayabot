@@ -615,14 +615,27 @@ class LiveRobot:
 
         if name == "fortune":
             self.logger.info("fortune drawn: uid=%s", uid)
-            fortunes = [
-                ("大吉", ["今天运气爆棚，做什么都顺风顺水！", "主播都被你的欧气惊到了！"]),
-                ("中吉", ["运势不错，是个适合发财的好日子。", "心情舒畅，会有好事发生哦。"]),
-                ("小吉", ["平稳的一天，适合静下心来干大事。", "顺其自然，好运自会到来。"]),
-                ("末吉", ["虽然平淡，但健康平安就是最大的福气。", "不要急躁，慢慢来总会好的。"]),
-                ("凶", ["今天适合低调行事，多看看直播转转运。", "别灰心，下次抽签一定是上签！"]),
-                ("大凶", ["生活总有低谷，吃顿好的安慰一下自己吧。", "多发几条弹幕，霉运都会跑掉的。"]),
-            ]
+            # 默认签文
+            default_fortunes = {
+                "大吉": ["今天运气爆棚，做什么都顺风顺水！", "主播都被你的欧气惊到了！"],
+                "中吉": ["运势不错，是个适合发财的好日子。", "心情舒畅，会有好事发生哦。"],
+                "小吉": ["平稳的一天，适合静下心来干大事。", "顺其自然，好运自会到来。"],
+                "末吉": ["虽然平淡，但健康平安就是最大的福气。", "不要急躁，慢慢来总会好的。"],
+                "凶": ["今天适合低调行事，多看看直播转转运。", "别灰心，下次抽签一定是上签！"],
+                "大凶": ["生活总有低谷，吃顿好的安慰一下自己吧。", "多发几条弹幕，霉运都会跑掉的。"],
+            }
+            # 从配置读取自定义签文
+            cfg_fortunes = getattr(self.config, "custom_fortunes", {}) or {}
+            fortunes = []
+            for f_type, f_defaults in default_fortunes.items():
+                custom_text = cfg_fortunes.get({
+                    "大吉": "daiji", "中吉": "zhongji", "小吉": "xiaoji",
+                    "末吉": "moji", "凶": "xiong", "大凶": "daxiong",
+                }.get(f_type, ""), "")
+                if custom_text:
+                    fortunes.append((f_type, [custom_text]))
+                else:
+                    fortunes.append((f_type, f_defaults))
             f_type, jokes = random.choice(fortunes)
             joke = random.choice(jokes)
             msg = f"抽签结果：【{f_type}】！{joke}"

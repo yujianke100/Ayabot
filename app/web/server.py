@@ -2263,6 +2263,56 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     </label>
                 </div>
 
+                <hr>
+                <h3 class="text-sm font-bold">🔑 关键词回复</h3>
+                <label class="flex items-center gap-2 text-xs">
+                    <input type="checkbox" v-model="roomConfig.keyword_reply.enabled" class="w-4 h-4"> 启用
+                </label>
+                <label class="text-xs text-gray-500">冷却时间(秒)
+                    <input type="number" v-model.number="roomConfig.keyword_reply.cooldown" class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+                <div v-for="(rule, ri) in roomConfig.keyword_reply.rules" :key="ri" class="border rounded p-3 bg-gray-50 space-y-2">
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-bold">规则 #{{ ri+1 }}</span>
+                        <button @click="removeKeywordRule(ri)" class="text-red-400 text-xs underline">删除</button>
+                    </div>
+                    <label class="text-xs text-gray-500">触发关键词（逗号分隔）
+                        <input type="text" v-model="rule.keywordsStr" class="border p-1 rounded w-full text-sm mt-1" placeholder="价格,多少钱">
+                    </label>
+                    <label class="text-xs text-gray-500">回复内容
+                        <textarea v-model="rule.reply" class="border p-1 rounded w-full text-sm mt-1" rows="2"></textarea>
+                    </label>
+                    <label class="text-xs text-gray-500">匹配模式
+                        <select v-model="rule.match_mode" class="border p-1 rounded text-sm">
+                            <option value="contains">包含</option>
+                            <option value="exact">精确</option>
+                        </select>
+                    </label>
+                </div>
+                <button @click="addKeywordRule" class="text-blue-500 text-xs underline">➕ 添加规则</button>
+
+                <hr>
+                <h3 class="text-sm font-bold">🎴 自定义签文</h3>
+                <p class="text-xs text-gray-500">修改 #抽签 命令的签文内容。每种签类型一句即可，留空使用默认。</p>
+                <label class="text-xs text-gray-500">大吉
+                    <input type="text" v-model="roomConfig.custom_fortunes.daiji" class="border p-2 rounded w-full text-sm mt-1" placeholder="今天运气爆棚！">
+                </label>
+                <label class="text-xs text-gray-500">中吉
+                    <input type="text" v-model="roomConfig.custom_fortunes.zhongji" class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+                <label class="text-xs text-gray-500">小吉
+                    <input type="text" v-model="roomConfig.custom_fortunes.xiaoji" class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+                <label class="text-xs text-gray-500">末吉
+                    <input type="text" v-model="roomConfig.custom_fortunes.moji" class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+                <label class="text-xs text-gray-500">凶
+                    <input type="text" v-model="roomConfig.custom_fortunes.xiong" class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+                <label class="text-xs text-gray-500">大凶
+                    <input type="text" v-model="roomConfig.custom_fortunes.daxiong" class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+
                 <div class="flex items-center gap-4 mt-4">
                     <button @click="saveRoomConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
                     <span v-if="roomSaveMsg" class="text-sm" :class="roomSaveOk ? 'text-green-600' : 'text-red-500'">{{ roomSaveMsg }}</span>
@@ -3381,17 +3431,36 @@ createApp({
                 const data = await res.json();
                 if (data.error) throw new Error(data.error);
                 roomConfig.value = data;
+                // 确保默认结构存在
+                if (!roomConfig.value.keyword_reply) {
+                    roomConfig.value.keyword_reply = {enabled: false, cooldown: 30, rules: []};
+                }
+                roomConfig.value.keyword_reply.rules = (roomConfig.value.keyword_reply.rules || []).map(r => ({
+                    ...r,
+                    keywordsStr: (r.keywords || []).join(", ")
+                }));
+                if (!roomConfig.value.custom_fortunes) {
+                    roomConfig.value.custom_fortunes = {daiji: "", zhongji: "", xiaoji: "", moji: "", xiong: "", daxiong: ""};
+                }
             } catch(e) { alert('加载配置失败: ' + e.message); }
         }
         async function saveRoomConfig() {
             if (!roomConfig.value || !editingRoom.value) return;
             roomSaveMsg.value = '';
+            const body = JSON.parse(JSON.stringify(roomConfig.value));
+            if (body.keyword_reply && body.keyword_reply.rules) {
+                body.keyword_reply.rules = body.keyword_reply.rules.map(r => ({
+                    ...r,
+                    keywords: r.keywordsStr ? r.keywordsStr.split(/[,，]\s*/).filter(Boolean) : [],
+                    keywordsStr: undefined,
+                }));
+            }
             try {
                 const res = await fetch(`/api/rooms/${editingRoom.value}/config`, {
                     method: 'POST',
                     headers: {'Content-Type':'application/json'},
                     credentials: 'include',
-                    body: JSON.stringify(roomConfig.value),
+                    body: JSON.stringify(body),
                 });
                 if (res.status === 401) { loggedIn.value = false; return; }
                 if (!res.ok) throw new Error((await res.text()).slice(0,80));
@@ -3622,6 +3691,14 @@ createApp({
                     adminPass.value = '';
                 } else { adminPassMsg.value = '❌ 保存失败'; adminPassOk.value = false; }
             } catch(e) { adminPassMsg.value = '❌ ' + e.message; adminPassOk.value = false; }
+        }
+
+        function addKeywordRule() {
+            if (!roomConfig.value.keyword_reply.rules) roomConfig.value.keyword_reply.rules = [];
+            roomConfig.value.keyword_reply.rules.push({keywords: [], keywordsStr: "", reply: "", match_mode: "contains"});
+        }
+        function removeKeywordRule(idx) {
+            roomConfig.value.keyword_reply.rules.splice(idx, 1);
         }
 
         return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,

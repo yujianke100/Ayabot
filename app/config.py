@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 from pathlib import Path
 from typing import Any
@@ -142,6 +142,7 @@ class AppConfig:
     web_ui: WebUIConfig
     llm: LLMConfig
     account_uid: str = ""
+    custom_fortunes: dict = field(default_factory=dict)
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -271,8 +272,8 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             username=str(web_ui.get("username", "admin")),
             password=str(web_ui.get("password", "admin")),
             session_timeout=int(web_ui.get("session_timeout", 3600)),
-            title=str(web_ui.get("title", "BILIBILI-LIVE-ROBOT")),
-            bot_name=str(web_ui.get("bot_name", "ayabot")),
+            title=str(web_ui.get("title", "Ayabot")),
+            bot_name=str(web_ui.get("bot_name", "bot")),
         ),
         llm=LLMConfig(
             enabled=bool(llm.get("enabled", False)),
@@ -292,6 +293,8 @@ def load_config(path: str = "config.yaml") -> AppConfig:
                 max_messages=int(llm_ctx.get("max_messages", 10)),
             ),
         ),
+        account_uid=str(raw.get("account_uid", "")),
+        custom_fortunes=raw.get("custom_fortunes", {}),
     )
 
 
@@ -379,6 +382,10 @@ def update_config_from_dict(raw: dict[str, Any], cfg_path: str) -> bool:
             existing["room_name"] = raw["room_name"]
         if "web_ui" in raw:
             existing.setdefault("web_ui", {}).update(raw["web_ui"])
+        if "keyword_reply" in raw:
+            existing.setdefault("features", {})["keyword_reply"] = raw["keyword_reply"]
+        if "custom_fortunes" in raw:
+            existing["custom_fortunes"] = raw["custom_fortunes"]
 
         Path(cfg_path).write_text(
             yaml.dump(existing, default_flow_style=False, allow_unicode=True),
