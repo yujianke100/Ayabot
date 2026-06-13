@@ -371,6 +371,10 @@ def update_config_from_dict(raw: dict[str, Any], cfg_path: str) -> bool:
             existing["anchor_uid"] = raw["anchor_uid"]
         if "bot_name" in raw:
             existing.setdefault("web_ui", {})["bot_name"] = raw["bot_name"]
+        if "account_uid" in raw:
+            existing["account_uid"] = raw["account_uid"]
+        if "room_name" in raw:
+            existing["room_name"] = raw["room_name"]
         if "web_ui" in raw:
             existing.setdefault("web_ui", {}).update(raw["web_ui"])
 

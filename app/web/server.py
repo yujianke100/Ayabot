@@ -2324,24 +2324,37 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div class="space-y-2">
             <div class="flex items-center justify-between">
                 <h3 class="text-sm font-bold">主播账号</h3>
-                <button @click="showAddStreamer = !showAddStreamer" class="text-blue-500 hover:text-blue-700 text-xs underline">{{ showAddStreamer ? '取消' : '➕ 添加主播' }}</button>
+                <button @click="showStreamerForm = 'add'" class="text-blue-500 hover:text-blue-700 text-xs underline">➕ 添加主播</button>
             </div>
 
-            <div v-if="showAddStreamer" class="border rounded-lg p-3 bg-gray-50 space-y-2">
+            <div v-if="showStreamerForm" class="border rounded-lg p-3 bg-gray-50 space-y-2">
+                <h4 class="text-sm font-bold">{{ showStreamerForm === 'add' ? '添加主播' : '编辑主播' }}</h4>
                 <div class="grid grid-cols-2 gap-2">
                     <label class="text-xs text-gray-500">用户名
-                        <input type="text" v-model="newStreamerUser" class="border p-1 rounded w-full text-sm mt-1">
+                        <input type="text" v-model="editStreamerUser" :disabled="showStreamerForm==='edit'" class="border p-1 rounded w-full text-sm mt-1">
                     </label>
                     <label class="text-xs text-gray-500">密码
-                        <input type="password" v-model="newStreamerPass" class="border p-1 rounded w-full text-sm mt-1">
+                        <input type="password" v-model="editStreamerPass" :placeholder="showStreamerForm==='edit' ? '留空不修改' : ''" class="border p-1 rounded w-full text-sm mt-1">
                     </label>
                 </div>
-                <label class="text-xs text-gray-500">可查看的房间（逗号分隔房间ID）
-                    <input type="text" v-model="newStreamerRooms" placeholder="1946287911,12345" class="border p-1 rounded w-full text-sm mt-1">
-                </label>
-                <button @click="addStreamer" :disabled="addingStreamer" class="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded text-sm">
-                    {{ addingStreamer ? '添加中...' : '添加' }}
-                </button>
+                <label class="text-xs text-gray-500">可查看的房间</label>
+                <div class="flex flex-wrap gap-2">
+                    <label v-for="r in allRooms" :key="r.room_id"
+                           class="flex items-center gap-1 text-xs border rounded px-2 py-1 cursor-pointer select-none"
+                           :class="editStreamerRooms.includes(r.room_id) ? 'bg-blue-100 border-blue-400' : 'bg-white border-gray-200'"
+                           @click="toggleStreamerRoom(r.room_id)">
+                        <input type="checkbox" :checked="editStreamerRooms.includes(r.room_id)" class="w-3 h-3" style="display:none">
+                        {{ r.room_name || ('#'+r.room_id) }}
+                    </label>
+                    <div v-if="!allRooms.length" class="text-xs text-gray-400">暂无房间，请先在房间管理创建直播间</div>
+                </div>
+                <div class="flex gap-2 mt-2">
+                    <button @click="saveStreamer" :disabled="savingStreamer"
+                            class="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded text-sm">
+                        {{ savingStreamer ? '保存中...' : (showStreamerForm === 'add' ? '添加' : '保存') }}
+                    </button>
+                    <button @click="showStreamerForm = null" class="bg-gray-300 hover:bg-gray-400 px-3 py-1 rounded text-sm">取消</button>
+                </div>
                 <div v-if="streamerMsg" class="text-sm" :class="streamerOk ? 'text-green-600' : 'text-red-500'">{{ streamerMsg }}</div>
             </div>
 
@@ -2354,7 +2367,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <div class="font-bold text-sm">{{ s.username }}</div>
                     <div class="text-xs text-gray-500">可查看: {{ s.rooms?.join(', ') || '无' }}</div>
                 </div>
-                <button @click="deleteStreamer(s.username)" class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
+                <div class="flex gap-2">
+                    <button @click="editStreamer(s)" class="text-blue-500 hover:text-blue-700 text-xs underline">编辑</button>
+                    <button @click="deleteStreamer(s.username)" class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
+                </div>
             </div>
         </div>
     </div>
@@ -3150,6 +3166,7 @@ createApp({
                 if (!res.ok) return;
                 const data = await res.json();
                 rooms.value = data.rooms || [];
+                allRooms.value = data.rooms || [];
             } catch(e) { /* ignore */ }
         }
         async function createRoom() {
@@ -3397,11 +3414,12 @@ createApp({
 
         // ── User Management ──
         const streamers = ref([]);
-        const showAddStreamer = ref(false);
-        const newStreamerUser = ref('');
-        const newStreamerPass = ref('');
-        const newStreamerRooms = ref('');
-        const addingStreamer = ref(false);
+        const allRooms = ref([]);
+        const showStreamerForm = ref(null); // null | 'add' | 'edit'
+        const editStreamerUser = ref('');
+        const editStreamerPass = ref('');
+        const editStreamerRooms = ref([]);
+        const savingStreamer = ref(false);
         const streamerMsg = ref('');
         const streamerOk = ref(false);
         const adminPass = ref('');
@@ -3422,26 +3440,45 @@ createApp({
                 streamers.value = list;
             } catch(e) { /* ignore */ }
         }
-        async function addStreamer() {
-            if (!newStreamerUser.value || !newStreamerPass.value) { streamerMsg.value = '请填写完整'; streamerOk.value = false; return; }
-            addingStreamer.value = true;
+        function toggleStreamerRoom(roomId) {
+            const idx = editStreamerRooms.value.indexOf(roomId);
+            if (idx >= 0) editStreamerRooms.value.splice(idx, 1);
+            else editStreamerRooms.value.push(roomId);
+        }
+        function editStreamer(s) {
+            editStreamerUser.value = s.username;
+            editStreamerPass.value = '';
+            editStreamerRooms.value = [...(s.rooms || [])];
+            showStreamerForm.value = 'edit';
+        }
+        async function saveStreamer() {
+            if (!editStreamerUser.value) { streamerMsg.value = '请填写用户名'; streamerOk.value = false; return; }
+            if (showStreamerForm.value === 'add' && !editStreamerPass.value) { streamerMsg.value = '请填写密码'; streamerOk.value = false; return; }
+            savingStreamer.value = true;
             streamerMsg.value = '';
             try {
-                const rooms = newStreamerRooms.value ? newStreamerRooms.value.split(',').map(s=>s.trim()).filter(Boolean) : [];
+                const body = {
+                    username: editStreamerUser.value,
+                    role: 'streamer',
+                    rooms: editStreamerRooms.value,
+                };
+                if (showStreamerForm.value === 'add' || editStreamerPass.value) {
+                    body.password = editStreamerPass.value;
+                }
                 const res = await fetch('/api/users/update', {
                     method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include',
-                    body: JSON.stringify({username: newStreamerUser.value, password: newStreamerPass.value, role: 'streamer', rooms}),
+                    body: JSON.stringify(body),
                 });
                 const data = await res.json();
                 if (data.ok) {
-                    streamerMsg.value = '✅ 添加成功';
+                    streamerMsg.value = '✅ 保存成功';
                     streamerOk.value = true;
-                    newStreamerUser.value = ''; newStreamerPass.value = ''; newStreamerRooms.value = '';
-                    showAddStreamer.value = false;
+                    showStreamerForm.value = null;
+                    editStreamerUser.value = ''; editStreamerPass.value = ''; editStreamerRooms.value = [];
                     await loadUsers();
-                } else { streamerMsg.value = '❌ 添加失败'; streamerOk.value = false; }
+                } else { streamerMsg.value = '❌ 保存失败'; streamerOk.value = false; }
             } catch(e) { streamerMsg.value = '❌ ' + e.message; streamerOk.value = false; }
-            finally { addingStreamer.value = false; }
+            finally { savingStreamer.value = false; }
         }
         async function deleteStreamer(username) {
             if (!confirm(`确定删除主播账号「${username}」？`)) return;
@@ -3500,9 +3537,9 @@ createApp({
                 accountQrState, accountQrError, startAccountLogin, refreshAccount, deleteAccount,
                 loadAccounts, loadRooms, refreshQrCode,
                 editingNickname, startEditNickname, saveNickname, verifyAccount,
-                streamers, showAddStreamer, newStreamerUser, newStreamerPass, newStreamerRooms,
-                addingStreamer, streamerMsg, streamerOk, adminPass, adminPassMsg, adminPassOk,
-                loadUsers, addStreamer, deleteStreamer, saveAdminPass};
+                streamers, allRooms, showStreamerForm, editStreamerUser, editStreamerPass,
+                editStreamerRooms, savingStreamer, streamerMsg, streamerOk, adminPass, adminPassMsg, adminPassOk,
+                loadUsers, saveStreamer, editStreamer, deleteStreamer, toggleStreamerRoom, saveAdminPass};
     }
 }).mount('#app');
 </script>
