@@ -1271,7 +1271,7 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
             where_extra = " AND is_blind_box = 1"
 
         cur.execute(f"""
-            SELECT uid, uname, gift_name, gift_num, actual_value, ts, is_blind_box, id
+            SELECT uid, uname, gift_name, gift_num, actual_value, ts, is_blind_box, id, raw_json
             FROM gift_events
             WHERE uid = ? AND date(ts, 'unixepoch') = date(?){where_extra}
             ORDER BY ts
@@ -1279,15 +1279,41 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
         rows = cur.fetchall()
         conn.close()
 
-        return [
-            {
+        import json as _json
+        results = []
+        for r in rows:
+            raw = {}
+            if r[8]:
+                try:
+                    raw = _json.loads(r[8])
+                except Exception:
+                    raw = {}
+            # 从 raw_json 解析舰长等级、头像、礼物图标
+            guard_level = 0
+            avatar = ""
+            gift_icon = ""
+            if raw:
+                sender_info = raw.get("sender_uinfo", {}) or {}
+                base = sender_info.get("base", {}) or {}
+                avatar = base.get("face", "") or ""
+                guard_info = sender_info.get("guard", {}) or None
+                if guard_info:
+                    guard_level = guard_info.get("level", 0) or 0
+                medal = sender_info.get("medal", {}) or None
+                if medal and not guard_level:
+                    guard_level = medal.get("guard_level", 0) or 0
+                gift_info = raw.get("gift_info", {}) or {}
+                gift_icon = gift_info.get("img_basic", "") or gift_info.get("webp", "") or ""
+            results.append({
                 "uid": r[0], "uname": r[1], "gift_name": r[2],
                 "gift_num": r[3], "actual_value": r[4],
                 "ts": r[5], "is_blind_box": bool(r[6]),
                 "id": r[7],
-            }
-            for r in rows
-        ]
+                "guard_level": guard_level,
+                "avatar": avatar,
+                "gift_icon": gift_icon,
+            })
+        return results
     except Exception:
         return []
 
@@ -1623,7 +1649,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                 @click="gotoExport(u.uid, u.uname)">
                                 <td class="p-2">{{ i+1 }}</td>
                                 <td class="p-2">{{ u.uname }}</td>
-                                <td class="p-2 text-right">{{ Number(u.total).toFixed(1) }}</td>
+                                <td class="p-2 text-right">{{ Number(u.total_val).toFixed(1) }}</td>
                                 <td class="p-2 text-right" :class="Number(u.total_profit)>=0?'text-red-500':'text-green-500'">{{ Number(u.total_profit).toFixed(1) }}</td>
                             </tr>
                         </tbody>
@@ -1840,7 +1866,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
         <!-- 机器人配置 -->
         <div v-if="roomSubTab==='config'" class="max-w-2xl mx-auto">
-            <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
+            <div v-if="roomConfig" class="bg-white p-6 rounded-xl shadow-sm space-y-4">
                 <h2 class="text-lg font-bold">⚙️ 机器人配置</h2>
                 <p class="text-xs text-gray-500">配置保存后需重启对应房间服务才能生效。</p>
 
@@ -3009,6 +3035,11 @@ createApp({
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return INDEX_HTML
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(status_code=204)
 
 
 if __name__ == "__main__":
