@@ -455,6 +455,15 @@ class LiveRobot:
         uid, uname, text, moderator_hint = parsed
         self.logger.debug("danmaku received: uid=%s text=%s (anchor_uid=%s)", uid, text, self.config.anchor_uid)
 
+        if self.config.features.danmaku_log_enabled:
+            self.store.record_danmaku(
+                ts=int(time.time()),
+                uid=uid,
+                uname=uname,
+                content=text,
+                max_entries=self.config.features.danmaku_log_max_entries,
+            )
+
         # Anchor exclusive reply
         if uid == self.config.anchor_uid:
             content = text.strip()

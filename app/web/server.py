@@ -1883,6 +1883,37 @@ async def api_room_delete_old(room_id: str, request: Request):
 
 
 # ══════════════════════════════════════════════════════════════
+#  Danmaku Log API
+# ══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/danmaku_log")
+async def api_get_danmaku_log(limit: int = 50, offset: int = 0):
+    try:
+        from app.storage import StatsStore
+        store = StatsStore(_DB_PATH)
+        rows = store.get_danmaku_log(limit=limit, offset=offset)
+        store.close()
+        return {"rows": rows}
+    except Exception as exc:
+        logger.exception("danmaku_log get failed")
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.delete("/api/danmaku_log")
+async def api_clear_danmaku_log():
+    try:
+        from app.storage import StatsStore
+        store = StatsStore(_DB_PATH)
+        count = store.clear_danmaku_log()
+        store.close()
+        return {"deleted": count}
+    except Exception as exc:
+        logger.exception("danmaku_log clear failed")
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+# ══════════════════════════════════════════════════════════════
 #  HTML
 # ══════════════════════════════════════════════════════════════════
 
@@ -2465,6 +2496,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.blindbox_enabled" class="w-4 h-4"> 盲盒统计</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.guard_thanks_enabled" class="w-4 h-4"> 大航海感谢</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.connected_message_enabled" class="w-4 h-4"> 连接消息</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.danmaku_log_enabled" class="w-4 h-4"> 弹幕记录</label>
+                </div>
+                <div v-if="roomConfig.features.danmaku_log_enabled" class="grid grid-cols-2 gap-4">
+                    <label class="text-xs text-gray-500">弹幕记录最大条数
+                        <input type="number" v-model.number="roomConfig.features.danmaku_log_max_entries" min="100" max="100000" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
                 </div>
 
                 <hr>
@@ -2613,6 +2650,50 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <button @click="confirmDelete" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded text-sm h-[38px]">删除</button>
             </div>
             <div v-if="delResult" class="mt-4 text-sm">{{ delResult }}</div>
+        </div>
+
+        <!-- 弹幕记录 -->
+        <div v-if="roomSubTab==='danmaku'" class="max-w-4xl mx-auto">
+            <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
+                <div class="flex items-center justify-between">
+                    <h2 class="text-lg font-bold">💬 弹幕记录</h2>
+                    <div class="flex items-center gap-2">
+                        <button @click="loadDanmakuLog"
+                                class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">刷新</button>
+                        <button @click="clearDanmakuLog"
+                                class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded text-sm">清空</button>
+                    </div>
+                </div>
+                <div v-if="danmakuErr" class="text-red-500 text-sm">{{ danmakuErr }}</div>
+                <div v-if="danmakuRows.length" class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                        <thead><tr class="bg-gray-50 sticky top-0"><th class="p-2 text-left">时间</th><th class="p-2 text-left">用户</th><th class="p-2 text-left">UID</th><th class="p-2 text-left">内容</th></tr></thead>
+                        <tbody>
+                            <tr v-for="r in danmakuRows" :key="r.id" class="border-t hover:bg-gray-50">
+                                <td class="p-2 whitespace-nowrap text-xs text-gray-500">{{ fmtDanmakuTime(r.ts) }}</td>
+                                <td class="p-2 font-medium">{{ r.uname }}</td>
+                                <td class="p-2 text-xs text-gray-400">{{ r.uid }}</td>
+                                <td class="p-2 max-w-xs truncate">{{ r.content }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div class="flex items-center justify-between mt-4 text-sm">
+                        <div class="text-gray-500">共 {{ danmakuTotal }} 条</div>
+                        <div class="flex gap-2 items-center">
+                            <button @click="danmakuOffset = Math.max(0, danmakuOffset - danmakuLimit)"
+                                    :disabled="danmakuOffset === 0"
+                                    class="px-3 py-1 rounded border text-sm"
+                                    :class="danmakuOffset === 0 ? 'text-gray-300 cursor-not-allowed' : 'hover:bg-gray-100'">上一页</button>
+                            <span class="text-gray-500">第 {{ danmakuPage }} 页</span>
+                            <button @click="danmakuOffset += danmakuLimit"
+                                    :disabled="danmakuRows.length < danmakuLimit"
+                                    class="px-3 py-1 rounded border text-sm"
+                                    :class="danmakuRows.length < danmakuLimit ? 'text-gray-300 cursor-not-allowed' : 'hover:bg-gray-100'">下一页</button>
+                        </div>
+                    </div>
+                </div>
+                <div v-else-if="!danmakuErr" class="text-gray-400 text-center py-8">暂无弹幕记录</div>
+            </div>
         </div>
     </div>
 </div>
@@ -2942,6 +3023,7 @@ createApp({
             {key: 'export', label: '精美导出'},
             {key: 'llm', label: 'AI回复'},
             {key: 'config', label: '机器人配置'},
+            {key: 'danmaku', label: '弹幕记录'},
             {key: 'manage', label: '数据管理'},
         ];
         const newRoomAccount = ref('');
@@ -3015,6 +3097,14 @@ createApp({
         // Manage
         const delDate = ref('');
         const delResult = ref('');
+
+        // Danmaku Log
+        const danmakuRows = ref([]);
+        const danmakuErr = ref('');
+        const danmakuOffset = ref(0);
+        const danmakuLimit = ref(50);
+        const danmakuTotal = ref(0);
+        const danmakuPage = Vue.computed(() => Math.floor(danmakuOffset.value / danmakuLimit.value) + 1);
 
         // Room Management
         const rooms = ref([]);
@@ -3186,6 +3276,10 @@ createApp({
             roomSubTab.value = key;
             if (key === 'config' && selectedRoom.value) {
                 editRoomConfig(selectedRoom.value.room_id);
+            }
+            if (key === 'danmaku') {
+                danmakuOffset.value = 0;
+                loadDanmakuLog();
             }
         }
         function toggleCreateRoom() { showCreateRoom.value = !showCreateRoom.value; }
@@ -3513,6 +3607,36 @@ createApp({
                 const data = await res.json();
                 delResult.value = `已删除 ${data.deleted_events} 条事件记录`;
             } catch(e) { delResult.value = '删除失败: ' + e.message; }
+        }
+
+        // ── Danmaku Log ──
+        async function loadDanmakuLog() {
+            danmakuErr.value = '';
+            try {
+                const res = await fetch(`/api/danmaku_log?limit=${danmakuLimit.value}&offset=${danmakuOffset.value}`, {credentials: 'include'});
+                if (res.status === 401) { loggedIn.value = false; return; }
+                if (!res.ok) throw new Error((await res.text()).slice(0,80));
+                const data = await res.json();
+                danmakuRows.value = data.rows || [];
+            } catch(e) { danmakuErr.value = '加载失败: ' + e.message; }
+        }
+        async function clearDanmakuLog() {
+            if (!confirm('确定清空所有弹幕记录？此操作不可恢复！')) return;
+            danmakuErr.value = '';
+            try {
+                const res = await fetch('/api/danmaku_log', {method: 'DELETE', credentials: 'include'});
+                if (res.status === 401) { loggedIn.value = false; return; }
+                if (!res.ok) throw new Error((await res.text()).slice(0,80));
+                const data = await res.json();
+                danmakuRows.value = [];
+                danmakuOffset.value = 0;
+                danmakuTotal.value = 0;
+            } catch(e) { danmakuErr.value = '清空失败: ' + e.message; }
+        }
+        function fmtDanmakuTime(ts) {
+            if (!ts) return '';
+            const d = new Date(ts * 1000);
+            return d.toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
         }
 
         // ── LLM Config ──
@@ -4264,6 +4388,8 @@ createApp({
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
+                danmakuRows, danmakuErr, danmakuOffset, danmakuLimit, danmakuTotal, danmakuPage,
+                loadDanmakuLog, clearDanmakuLog, fmtDanmakuTime,
                 llmEnabled, llmProvider, llmApiKey, llmBaseUrl, llmModel, llmPrompt,
                 llmWakeWord, llmTemp, llmTopP, llmMaxTokens,
                 llmSaveMsg, llmSaveOk, llmTestText, llmTestResp,

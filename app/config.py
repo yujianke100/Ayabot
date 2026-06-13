@@ -45,6 +45,8 @@ class FeatureConfig:
     periodic_message_template: str = ""
     welcome_templates_for_uids: dict[int, str] | None = None  # uid -> template
     guard_welcome_templates: dict[str, str] | None = None     # captain/commander/governor -> template
+    danmaku_log_enabled: bool = False
+    danmaku_log_max_entries: int = 1000
 
 
 @dataclass(slots=True)
@@ -247,6 +249,8 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             periodic_message_template=str(features.get("periodic_message_template", "")),
             welcome_templates_for_uids=features.get("welcome_templates_for_uids", None) or None,
             guard_welcome_templates=features.get("guard_welcome_templates", None) or None,
+            danmaku_log_enabled=bool(features.get("danmaku_log_enabled", False)),
+            danmaku_log_max_entries=int(features.get("danmaku_log_max_entries", 1000)),
         ),
         cooldown=CooldownConfig(
             welcome_user_seconds=int(cooldown.get("welcome_user_seconds", 600)),
@@ -352,6 +356,8 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "periodic_message_template": config.features.periodic_message_template,
             "welcome_templates_for_uids": config.features.welcome_templates_for_uids,
             "guard_welcome_templates": config.features.guard_welcome_templates,
+            "danmaku_log_enabled": config.features.danmaku_log_enabled,
+            "danmaku_log_max_entries": config.features.danmaku_log_max_entries,
         },
         "web_ui": {
             "host": config.web_ui.host,

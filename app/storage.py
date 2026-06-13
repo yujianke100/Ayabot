@@ -94,6 +94,14 @@ class StatsStore:
             CREATE TABLE IF NOT EXISTS anchor_stream_dates (
                 date TEXT PRIMARY KEY
             );
+
+            CREATE TABLE IF NOT EXISTS danmaku_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                uid INTEGER NOT NULL,
+                uname TEXT NOT NULL,
+                content TEXT NOT NULL
+            );
             """
         )
         self._conn.commit()
@@ -368,6 +376,33 @@ class StatsStore:
             (start_ts, end_ts, uid),
         ).fetchone()
         return int(row[0]), int(row[1])
+
+    def record_danmaku(self, ts: int, uid: int, uname: str, content: str, max_entries: int = 1000) -> None:
+        self._conn.execute(
+            "INSERT INTO danmaku_log (ts, uid, uname, content) VALUES (?, ?, ?, ?)",
+            (ts, uid, uname, content),
+        )
+        if max_entries > 0:
+            self._conn.execute(
+                "DELETE FROM danmaku_log WHERE id <= (SELECT id FROM danmaku_log ORDER BY id DESC LIMIT 1 OFFSET ?)",
+                (max_entries,),
+            )
+        self._conn.commit()
+
+    def get_danmaku_log(self, limit: int = 50, offset: int = 0) -> list[dict[str, int | str]]:
+        rows = self._conn.execute(
+            "SELECT id, ts, uid, uname, content FROM danmaku_log ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        return [
+            {"id": int(r[0]), "ts": int(r[1]), "uid": int(r[2]), "uname": str(r[3]), "content": str(r[4])}
+            for r in rows
+        ]
+
+    def clear_danmaku_log(self) -> int:
+        count = self._conn.execute("DELETE FROM danmaku_log").rowcount
+        self._conn.commit()
+        return count
 
     def close(self) -> None:
         self._conn.close()
