@@ -1,0 +1,14 @@
+[Unit]
+Description=Ayabot WebUI Management Panel
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/root/ayabot/.venv/bin/python web_serve.py
+WorkingDirectory=/root/ayabot
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
