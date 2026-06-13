@@ -1092,7 +1092,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <!-- ══════ 登录页 ══════ -->
 <div v-if="!loggedIn" class="flex items-center justify-center min-h-[80vh]">
     <div class="bg-white p-8 rounded-xl shadow-md w-80">
-        <h1 class="text-xl font-bold text-center text-blue-600 mb-6">{{ botName }} 管理后台</h1>
+        <h1 class="text-xl font-bold text-center text-blue-600 mb-6">Ayabot 管理后台</h1>
         <div class="space-y-4">
             <input v-model="loginUser" placeholder="账号" class="border p-2 rounded w-full text-sm" @keyup.enter="doLogin">
             <input v-model="loginPass" type="password" placeholder="密码" class="border p-2 rounded w-full text-sm" @keyup.enter="doLogin">
@@ -1105,7 +1105,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <!-- ══════ 主界面 ══════ -->
 <div v-if="loggedIn">
 <header class="mb-6 flex justify-between items-center bg-white p-4 rounded-xl shadow-sm">
-    <h1 class="text-xl font-bold text-blue-600">🎯 {{ botName }} 管理后台</h1>
+    <h1 class="text-xl font-bold text-blue-600">🎯 Ayabot 管理后台</h1>
     <div class="flex items-center gap-4 text-sm">
         <button @click="tab='rooms'" :class="tab==='rooms'?'text-blue-600 font-bold border-b-2 border-blue-600':''">🏠 房间管理</button>
         <button @click="tab='ranking'" :class="tab==='ranking'?'text-blue-600 font-bold border-b-2 border-blue-600':''">送礼排行</button>
@@ -1269,9 +1269,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <h2 class="text-lg font-bold">⚙️ 机器人配置</h2>
 
         <div class="grid grid-cols-2 gap-4">
-            <label class="text-xs text-gray-500">机器人名称
-                <input type="text" v-model="botName" class="border p-2 rounded w-full text-sm mt-1" placeholder="ayabot">
-            </label>
             <label class="text-xs text-gray-500">Web 端口
                 <input type="number" v-model.number="cfgPort" min="1024" max="65535" class="border p-2 rounded w-full text-sm mt-1">
             </label>
@@ -1585,7 +1582,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
 
         <!-- 房间列表 -->
-        <div v-if="rooms.length === 0" class="text-sm text-gray-400 text-center py-8">
+        <div v-if="!rooms || rooms.length === 0" class="text-sm text-gray-400 text-center py-8">
             暂无房间。点击上方「新建房间」添加第一个直播间。
         </div>
         <div v-for="r in rooms" :key="r.room_id"
@@ -1706,7 +1703,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </div>
 
 <script>
-const {createApp, ref, computed, nextTick, watch} = Vue;
+const {createApp, ref, computed, nextTick} = Vue;
 createApp({
     setup() {
         const loggedIn = ref(document.cookie.includes('session='));
@@ -1808,7 +1805,6 @@ createApp({
         const ctxMaxMsg = ref(10);
 
         // General Config
-        const botName = ref('ayabot');
         const cfgHost = ref('0.0.0.0');
         const cfgPort = ref(8000);
         const cfgRoomId = ref(0);
@@ -2101,9 +2097,7 @@ createApp({
         loadRooms();
 
         // ── 动态标题 ──
-        watch(botName, (name) => {
-            document.title = (name || 'Ayabot') + ' 直播间机器人';
-        }, { immediate: true });
+        document.title = 'Ayabot 直播间机器人';
 
         // ── General Config ──
         async function loadGeneralConfig() {
@@ -2113,7 +2107,6 @@ createApp({
                 if (!res.ok) return;
                 const data = await res.json();
                 if (data.error) return;
-                botName.value = data.bot_name || 'ayabot';
                 cfgHost.value = data.web_ui?.host || '0.0.0.0';
                 cfgPort.value = data.web_ui?.port || 8000;
                 cfgRoomId.value = data.room_display_id || 0;
@@ -2149,7 +2142,6 @@ createApp({
                     headers: {'Content-Type':'application/json'},
                     credentials: 'include',
                     body: JSON.stringify({
-                        bot_name: botName.value,
                         web_ui: {
                             host: cfgHost.value,
                             port: cfgPort.value,
@@ -2432,7 +2424,7 @@ createApp({
                 cfgWelcomeOn, cfgThanksOn, cfgBlindboxOn, cfgGuardOn, cfgConnectedMsg,
                 cfgWelcomeTmpl, cfgThanksTmpl, cfgGuardCaptain, cfgGuardCommander, cfgGuardGovernor, cfgGuardDefault, cfgConnMsg,
                 cfgPeriodicOn, cfgPeriodicInterval, cfgPeriodicTmpl,
-                botName, cfgHost, cfgPort,
+                cfgHost, cfgPort,
                 cfgSaveMsg, cfgSaveOk, loadGeneralConfig, saveGeneralConfig,
                 restartMsg, restartOk, restartService,
                 biliLoginState, biliQrImage, biliLoginError,
