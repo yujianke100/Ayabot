@@ -1041,11 +1041,7 @@ async def api_bili_login_account(request: Request):
         return JSONResponse({"error": "bad request"}, status_code=400)
 
     account_uid = body.get("uid", "")
-    if not account_uid:
-        return JSONResponse({"error": "uid required"}, status_code=400)
-
-    acc_dir = _get_account_dir(account_uid)
-    acc_dir.mkdir(parents=True, exist_ok=True)
+    # 不强制 UID — 如果没传，登录后自动从 credential 提取
 
     # 生成二维码
     try:
@@ -1072,7 +1068,7 @@ async def api_bili_login_account(request: Request):
         "qr": qr,
         "created_at": time.time(),
         "state": "waiting",
-        "target_uid": account_uid,
+        "target_uid": account_uid or "",
     }
 
     return {
@@ -1108,7 +1104,8 @@ async def api_save_account_credential(request: Request):
 
     target_uid = sess.get("target_uid", "")
     if not target_uid:
-        return {"ok": False, "error": "no target uid"}
+        # 如果没传 UID，登录后从 credential 获取
+        target_uid = ""
 
     try:
         credential = qr.get_credential()
@@ -1117,6 +1114,13 @@ async def api_save_account_credential(request: Request):
 
     cookies = credential.get_cookies()
     dedeuserid = cookies.get("DedeUserID", "")
+
+    # 如果没传 UID，使用登录后的 DedeUserID
+    if not target_uid and dedeuserid:
+        target_uid = dedeuserid
+
+    if not target_uid:
+        return {"ok": False, "error": "no target uid"}
 
     # 保存到 accounts/<uid>/
     acc_dir = _get_account_dir(target_uid)
@@ -1509,8 +1513,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <header class="mb-6 flex justify-between items-center bg-white p-4 rounded-xl shadow-sm">
     <h1 class="text-xl font-bold text-blue-600">🎯 Ayabot 管理后台</h1>
     <div class="flex items-center gap-4 text-sm">
+        <button @click="tab='accounts'" :class="tab==='accounts'?'text-blue-600 font-bold border-b-2 border-blue-600':''">🤖 机器人B站账号</button>
         <button @click="tab='rooms'" :class="tab==='rooms'?'text-blue-600 font-bold border-b-2 border-blue-600':''">🏠 房间管理</button>
-        <button @click="tab='accounts'" :class="tab==='accounts'?'text-blue-600 font-bold border-b-2 border-blue-600':''">👤 B站账号</button>
         <button @click="tab='global'" :class="tab==='global'?'text-blue-600 font-bold border-b-2 border-blue-600':''">⚙️ 全局配置</button>
         <button @click="tab='help'"  :class="tab==='help' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">帮助</button>
         <button @click="doLogout" class="text-gray-400 hover:text-red-500 ml-2">退出</button>
@@ -1985,20 +1989,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <div v-if="tab==='accounts'" class="max-w-3xl mx-auto">
     <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
         <div class="flex items-center justify-between">
-            <h2 class="text-lg font-bold">👤 B站账号管理</h2>
+            <h2 class="text-lg font-bold">🤖 机器人B站账号</h2>
             <button @click="toggleNewAccount"
                     class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
-                {{ showNewAccount ? '取消' : '📱 扫码登录新账号' }}
+                {{ showNewAccount ? '取消' : '📱 扫码登录' }}
             </button>
         </div>
 
         <!-- 扫码登录 -->
         <div v-if="showNewAccount" class="border rounded-lg p-4 bg-gray-50 space-y-3">
             <h3 class="text-sm font-bold">扫码登录 B站 账号</h3>
-            <label class="text-xs text-gray-500">登录后自动保存到哪个 UID？
-                <input type="number" v-model.number="newAccountUid" placeholder="填 B站 UID"
-                       class="border p-2 rounded w-full text-sm mt-1">
-            </label>
+            <p class="text-xs text-gray-500">用 B站 App 扫描二维码即可登录，系统自动识别账号。</p>
             <button @click="startAccountLogin" :disabled="accountLoggingIn"
                     class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
                 {{ accountLoggingIn ? '请稍候...' : '生成二维码' }}
@@ -2014,7 +2015,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     已扫码，请在手机上确认
                 </div>
                 <div v-if="accountQrState === 'done'" class="text-green-600 text-sm font-bold">
-                    ✅ 扫码成功！保存凭据中...
+                    ✅ 登录成功
                 </div>
                 <div v-if="accountQrState === 'error'" class="text-red-500 text-sm">
                     {{ accountQrError }}
@@ -2024,7 +2025,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
         <!-- 账号列表 -->
         <div v-if="!accounts || accounts.length === 0" class="text-sm text-gray-400 text-center py-8">
-            暂无已登录的 B站 账号。扫码登录第一个账号。
+            暂无已登录的 B站 账号。
         </div>
         <div v-for="a in accounts" :key="a.uid"
              class="border rounded-lg p-4 flex items-center justify-between">
@@ -2034,10 +2035,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <div v-if="a.linked_rooms && a.linked_rooms.length" class="text-xs text-gray-400 mt-1">
                     关联房间: <span v-for="(lr, li) in a.linked_rooms" :key="lr.room_id">{{ lr.room_id }}<span v-if="li < a.linked_rooms.length-1">, </span></span>
                 </div>
+                <div v-else class="text-xs text-gray-400 mt-1">未关联房间（可在房间详情设置中绑定）</div>
             </div>
             <div class="flex gap-2 items-center">
-                <button @click="refreshAccount(a.uid)"
-                        class="text-blue-500 hover:text-blue-700 text-xs underline">刷新</button>
                 <button @click="deleteAccount(a.uid, a.nickname)"
                         class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
             </div>
@@ -2355,7 +2355,6 @@ createApp({
             } catch(e) { /* ignore */ }
         }
         async function startAccountLogin() {
-            if (!newAccountUid.value) { accountQrError.value = '请填写 UID'; accountQrState.value = 'error'; return; }
             accountLoggingIn.value = true;
             accountQrState.value = 'loading';
             accountQrError.value = '';
@@ -2365,7 +2364,7 @@ createApp({
                     method: 'POST',
                     headers: {'Content-Type':'application/json'},
                     credentials: 'include',
-                    body: JSON.stringify({uid: String(newAccountUid.value)}),
+                    body: JSON.stringify({}),
                 });
                 if (!res.ok) throw new Error('请求失败');
                 const data = await res.json();
