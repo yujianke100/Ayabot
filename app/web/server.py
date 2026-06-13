@@ -118,16 +118,44 @@ app = FastAPI(title="BiliRobot Manager")
 #  Auth
 # ══════════════════════════════════════════════════════════════════
 
-_SESSIONS: dict[str, float] = {}  # token -> expiry (unix ts)
+_SESSIONS: dict[str, tuple[float, str, str, list]] = {}  # token -> (expiry, username, role, allowed_rooms)
 _RATE_LIMIT: dict[str, list[float]] = {}  # ip -> [timestamps]
+_AUTH_CONFIG_PATH: str = "auth/users.json"
+
+
+def _load_users() -> dict:
+    """加载用户配置. 返回 {username: {password, role, rooms}}"""
+    p = Path(_ROOMS_BASE_DIR).resolve() / _AUTH_CONFIG_PATH
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _save_users(users: dict) -> None:
+    p = Path(_ROOMS_BASE_DIR).resolve() / _AUTH_CONFIG_PATH
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _user_role(token: str) -> tuple[str, str, list]:
+    """返回 (username, role, allowed_rooms) 或 (\"\", \"\", [])"""
+    sess = _SESSIONS.get(token)
+    if sess and sess[0] > time.time():
+        return (sess[1], sess[2], sess[3])
+    return ("", "", [])
 
 
 def _check_auth(request: Request) -> bool:
     token = request.cookies.get("session")
     if token and token in _SESSIONS:
-        if _SESSIONS[token] > time.time():
+        sess = _SESSIONS[token]
+        if sess[0] > time.time():
             return True
-        del _SESSIONS[token]
+        else:
+            _SESSIONS.pop(token, None)
     return False
 
 
@@ -262,11 +290,22 @@ async def api_login(request: Request):
 
     username = body.get("username", "")
     password = body.get("password", "")
-    if username != AUTH_USER or password != AUTH_PASS:
+
+    # 检查多用户配置
+    users = _load_users()
+    user_info = users.get(username)
+    if user_info and user_info.get("password") == password:
+        role = user_info.get("role", "admin")
+        allowed_rooms = user_info.get("rooms", [])
+    elif username == AUTH_USER and password == AUTH_PASS:
+        # 兼容旧配置（config.yaml 中的账号密码）
+        role = "admin"
+        allowed_rooms = []
+    else:
         return JSONResponse({"error": "wrong credentials"}, status_code=403)
 
     token = secrets.token_hex(32)
-    _SESSIONS[token] = time.time() + _SESSION_TIMEOUT
+    _SESSIONS[token] = (time.time() + _SESSION_TIMEOUT, username, role, allowed_rooms)
 
     resp = JSONResponse({"ok": True, "token": token})
     resp.set_cookie(
@@ -766,6 +805,74 @@ async def api_save_general_config(request: Request):
 
 
 # ══════════════════════════════════════════════════════════════
+#  用户管理 API
+# ══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/users")
+async def api_list_users():
+    """列出所有用户."""
+    return {"users": _load_users()}
+
+
+@app.post("/api/users/update")
+async def api_update_user(request: Request):
+    """添加/修改用户（管理员或主播）."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    username = body.get("username", "").strip()
+    if not username:
+        return JSONResponse({"error": "username required"}, status_code=400)
+
+    users = _load_users()
+    password = body.get("password", "")
+    role = body.get("role", "streamer")
+    rooms = body.get("rooms", [])
+
+    if password:
+        users[username] = {"password": password, "role": role, "rooms": rooms}
+    elif username in users:
+        # 不修改密码，只更新角色和房间
+        users[username]["role"] = role
+        users[username]["rooms"] = rooms
+    else:
+        return JSONResponse({"error": "user not found and no password provided"}, status_code=400)
+
+    _save_users(users)
+    return {"ok": True}
+
+
+@app.delete("/api/users/{username}")
+async def api_delete_user(username: str):
+    """删除用户."""
+    users = _load_users()
+    users.pop(username, None)
+    _save_users(users)
+    return {"ok": True}
+
+
+@app.post("/api/users/admin_password")
+async def api_set_admin_password(request: Request):
+    """设置管理员密码（同步到 auth 配置和当前环境变量）."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    new_pass = body.get("password", "").strip()
+    if len(new_pass) < 4:
+        return JSONResponse({"error": "password too short"}, status_code=400)
+
+    global AUTH_PASS
+    users = _load_users()
+    users["admin"] = {"password": new_pass, "role": "admin", "rooms": []}
+    _save_users(users)
+    AUTH_PASS = new_pass  # 立即生效
+    return {"ok": True}
+
+
+# ══════════════════════════════════════════════════════════════
 #  多房间管理 API
 # ══════════════════════════════════════════════════════════════
 
@@ -836,9 +943,15 @@ def _list_rooms_from_disk() -> list[dict[str, Any]]:
 
 
 @app.get("/api/rooms")
-async def api_list_rooms():
+async def api_list_rooms(request: Request):
     """列出所有房间及状态."""
-    return {"rooms": _list_rooms_from_disk()}
+    rooms = _list_rooms_from_disk()
+    # 根据用户角色过滤
+    token = request.cookies.get("session", "")
+    _, role, allowed = _user_role(token)
+    if role == "streamer" and allowed:
+        rooms = [r for r in rooms if r["room_id"] in allowed]
+    return {"rooms": rooms}
 
 
 @app.post("/api/rooms")
@@ -1694,11 +1807,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
             </div>
             <div class="flex items-center gap-2">
                 <span class="text-xs text-gray-500">B站账号:</span>
-                <select v-model="selectedRoomAccount" @change="assignAccountToRoom"
-                        class="border p-1 rounded text-sm">
+                <select v-model="selectedRoomAccount" class="border p-1 rounded text-sm">
                     <option value="">不关联</option>
                     <option v-for="a in accounts" :key="a.uid" :value="a.uid">{{ a.nickname || 'UID:'+a.uid }}</option>
                 </select>
+                <button @click="assignAccountToRoom" class="bg-blue-500 hover:bg-blue-600 text-white px-2 py-0.5 rounded text-xs">保存</button>
+                <span v-if="accountAssignMsg" class="text-xs" :class="accountAssignOk ? 'text-green-600' : 'text-red-500'">{{ accountAssignMsg }}</span>
             </div>
         </div>
 
@@ -2146,7 +2260,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </div>
 
 <!-- ══════ 全局配置 ══════ -->
-<div v-if="tab==='global'" class="max-w-lg mx-auto">
+<div v-if="tab==='global'" class="max-w-2xl mx-auto">
     <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
         <h2 class="text-lg font-bold">⚙️ 全局配置</h2>
         <div class="grid grid-cols-2 gap-4">
@@ -2160,6 +2274,61 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div class="flex items-center gap-4">
             <button @click="saveGlobalConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
             <span v-if="cfgSaveMsg" class="text-sm" :class="cfgSaveOk ? 'text-green-600' : 'text-red-500'">{{ cfgSaveMsg }}</span>
+        </div>
+    </div>
+
+    <div class="bg-white p-6 rounded-xl shadow-sm space-y-4 mt-4">
+        <h2 class="text-lg font-bold">👥 账号管理</h2>
+        <p class="text-xs text-gray-500">管理员可查看所有房间。主播只能看到自己被分配的直播间。</p>
+
+        <!-- 管理员密码 -->
+        <div class="border rounded-lg p-4 bg-gray-50 space-y-3">
+            <h3 class="text-sm font-bold">管理员密码</h3>
+            <div class="flex gap-2 items-end">
+                <label class="text-xs text-gray-500 flex-1">新密码
+                    <input type="password" v-model="adminPass" placeholder="留空不修改" class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+                <button @click="saveAdminPass" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm h-[38px]">保存</button>
+            </div>
+            <div v-if="adminPassMsg" class="text-sm" :class="adminPassOk ? 'text-green-600' : 'text-red-500'">{{ adminPassMsg }}</div>
+        </div>
+
+        <!-- 主播账号列表 -->
+        <div class="space-y-2">
+            <div class="flex items-center justify-between">
+                <h3 class="text-sm font-bold">主播账号</h3>
+                <button @click="showAddStreamer = !showAddStreamer" class="text-blue-500 hover:text-blue-700 text-xs underline">{{ showAddStreamer ? '取消' : '➕ 添加主播' }}</button>
+            </div>
+
+            <div v-if="showAddStreamer" class="border rounded-lg p-3 bg-gray-50 space-y-2">
+                <div class="grid grid-cols-2 gap-2">
+                    <label class="text-xs text-gray-500">用户名
+                        <input type="text" v-model="newStreamerUser" class="border p-1 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">密码
+                        <input type="password" v-model="newStreamerPass" class="border p-1 rounded w-full text-sm mt-1">
+                    </label>
+                </div>
+                <label class="text-xs text-gray-500">可查看的房间（逗号分隔房间ID）
+                    <input type="text" v-model="newStreamerRooms" placeholder="1946287911,12345" class="border p-1 rounded w-full text-sm mt-1">
+                </label>
+                <button @click="addStreamer" :disabled="addingStreamer" class="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded text-sm">
+                    {{ addingStreamer ? '添加中...' : '添加' }}
+                </button>
+                <div v-if="streamerMsg" class="text-sm" :class="streamerOk ? 'text-green-600' : 'text-red-500'">{{ streamerMsg }}</div>
+            </div>
+
+            <div v-if="!streamers || streamers.length === 0" class="text-sm text-gray-400 text-center py-4">
+                暂无主播账号。
+            </div>
+            <div v-for="s in streamers" :key="s.username"
+                 class="border rounded p-3 flex items-center justify-between">
+                <div>
+                    <div class="font-bold text-sm">{{ s.username }}</div>
+                    <div class="text-xs text-gray-500">可查看: {{ s.rooms?.join(', ') || '无' }}</div>
+                </div>
+                <button @click="deleteStreamer(s.username)" class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
+            </div>
         </div>
     </div>
 </div>
@@ -2220,6 +2389,8 @@ createApp({
         ];
         const newRoomAccount = ref('');
         const selectedRoomAccount = ref('');
+        const accountAssignMsg = ref('');
+        const accountAssignOk = ref(false);
 
         // Accounts management
         const accounts = ref([]);
@@ -2379,6 +2550,7 @@ createApp({
                 await loadGeneralConfig();
                 await loadRooms();
                 await loadAccounts();
+                await loadUsers();
             } catch(e) { loginErr.value = '登录失败: ' + e.message; }
         }
         function doLogout() {
@@ -2434,14 +2606,28 @@ createApp({
         async function assignAccountToRoom() {
             const rid = selectedRoom.value?.room_id;
             if (!rid) return;
+            accountAssignMsg.value = '';
             try {
-                await fetch(`/api/rooms/${rid}/config`, {
+                const res = await fetch(`/api/rooms/${rid}/config`, {
                     method: 'POST',
                     headers: {'Content-Type':'application/json'},
                     credentials: 'include',
                     body: JSON.stringify({account_uid: selectedRoomAccount.value || ''}),
                 });
-            } catch(e) { /* ignore */ }
+                const data = await res.json();
+                if (data.ok) {
+                    accountAssignMsg.value = '✅ 已保存';
+                    accountAssignOk.value = true;
+                    selectedRoom.value.account_uid = selectedRoomAccount.value;
+                    await loadRooms();
+                } else {
+                    accountAssignMsg.value = '❌ 保存失败';
+                    accountAssignOk.value = false;
+                }
+            } catch(e) {
+                accountAssignMsg.value = '❌ 保存失败';
+                accountAssignOk.value = false;
+            }
         }
 
         // ── Accounts Management ──
@@ -3158,6 +3344,79 @@ createApp({
             }
         }
 
+        // ── User Management ──
+        const streamers = ref([]);
+        const showAddStreamer = ref(false);
+        const newStreamerUser = ref('');
+        const newStreamerPass = ref('');
+        const newStreamerRooms = ref('');
+        const addingStreamer = ref(false);
+        const streamerMsg = ref('');
+        const streamerOk = ref(false);
+        const adminPass = ref('');
+        const adminPassMsg = ref('');
+        const adminPassOk = ref(false);
+        async function loadUsers() {
+            try {
+                const res = await fetch('/api/users', {credentials: 'include'});
+                if (!res.ok) return;
+                const data = await res.json();
+                const users = data.users || {};
+                const list = [];
+                for (const [uname, info] of Object.entries(users)) {
+                    if (info.role === 'streamer') {
+                        list.push({username: uname, ...info});
+                    }
+                }
+                streamers.value = list;
+            } catch(e) { /* ignore */ }
+        }
+        async function addStreamer() {
+            if (!newStreamerUser.value || !newStreamerPass.value) { streamerMsg.value = '请填写完整'; streamerOk.value = false; return; }
+            addingStreamer.value = true;
+            streamerMsg.value = '';
+            try {
+                const rooms = newStreamerRooms.value ? newStreamerRooms.value.split(',').map(s=>s.trim()).filter(Boolean) : [];
+                const res = await fetch('/api/users/update', {
+                    method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include',
+                    body: JSON.stringify({username: newStreamerUser.value, password: newStreamerPass.value, role: 'streamer', rooms}),
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    streamerMsg.value = '✅ 添加成功';
+                    streamerOk.value = true;
+                    newStreamerUser.value = ''; newStreamerPass.value = ''; newStreamerRooms.value = '';
+                    showAddStreamer.value = false;
+                    await loadUsers();
+                } else { streamerMsg.value = '❌ 添加失败'; streamerOk.value = false; }
+            } catch(e) { streamerMsg.value = '❌ ' + e.message; streamerOk.value = false; }
+            finally { addingStreamer.value = false; }
+        }
+        async function deleteStreamer(username) {
+            if (!confirm(`确定删除主播账号「${username}」？`)) return;
+            try {
+                const res = await fetch(`/api/users/${username}`, {method: 'DELETE', credentials: 'include'});
+                if (!res.ok) throw new Error('删除失败');
+                await loadUsers();
+            } catch(e) { alert(e.message); }
+        }
+        async function saveAdminPass() {
+            if (!adminPass.value || adminPass.value.length < 4) { adminPassMsg.value = '密码至少4位'; adminPassOk.value = false; return; }
+            adminPassMsg.value = '';
+            try {
+                const res = await fetch('/api/users/admin_password', {
+                    method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include',
+                    body: JSON.stringify({password: adminPass.value}),
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    adminPassMsg.value = '✅ 密码已更新';
+                    adminPassOk.value = true;
+                    adminPass.value = '';
+                } else { adminPassMsg.value = '❌ 保存失败'; adminPassOk.value = false; }
+            } catch(e) { adminPassMsg.value = '❌ ' + e.message; adminPassOk.value = false; }
+        }
+
         return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
                 tab, rStart, rEnd, rType, ranking, errRanking, loadRanking,
                 eUid, eName, eDate, eType, ePerCol, eColWidth, exportList, exportDates, exportCols, errExport,
@@ -3180,7 +3439,7 @@ createApp({
                 restartMsg, restartOk, restartService,
                 selectedRoom, roomSubTab, roomSubTabs, newRoomAccount, selectedRoomAccount,
                 selectRoom, assignAccountToRoom, toggleCreateRoom, toggleNewAccount,
-                selectRoomSubTab,
+                selectRoomSubTab, accountAssignMsg, accountAssignOk,
                 rooms, showCreateRoom, newRoomUid, newRoomName, newRoomPort, newRoomDisplayId,
                 creatingRoom, createRoomMsg, createRoomOk, createRoom,
                 startRoom, stopRoom, deleteRoom, editRoomConfig, saveRoomConfig, editingRoom, roomConfig,
@@ -3188,7 +3447,10 @@ createApp({
                 accounts, showNewAccount, newAccountUid, accountLoggingIn, accountQrImage,
                 accountQrState, accountQrError, startAccountLogin, refreshAccount, deleteAccount,
                 loadAccounts, loadRooms, refreshQrCode,
-                editingNickname, startEditNickname, saveNickname, verifyAccount};
+                editingNickname, startEditNickname, saveNickname, verifyAccount,
+                streamers, showAddStreamer, newStreamerUser, newStreamerPass, newStreamerRooms,
+                addingStreamer, streamerMsg, streamerOk, adminPass, adminPassMsg, adminPassOk,
+                loadUsers, addStreamer, deleteStreamer, saveAdminPass};
     }
 }).mount('#app');
 </script>
