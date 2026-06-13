@@ -934,8 +934,10 @@ async def _resolve_room_id(anchor_uid: int) -> int:
                 if resp.content_type != "application/json":
                     raise ValueError(f"B站 API 返回非 JSON (content_type={resp.content_type}), 可能被风控")
                 data = await resp.json()
-        if data.get("code") == 0 and data.get("data", {}).get("room_id"):
-            return int(data["data"]["room_id"])
+        if data.get("code") == 0:
+            room_id = data.get("data", {}).get("room_id") or data.get("data", {}).get("roomid")
+            if room_id:
+                return int(room_id)
         raise ValueError(f"B站 API 返回异常: {data}")
     except Exception as exc:
         raise ValueError(f"无法解析直播间号 (UID={anchor_uid}): {exc}") from exc
