@@ -2589,6 +2589,33 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <button @click="addUidWelcomeTemplate" class="text-blue-500 text-xs underline">➕ 添加UID欢迎模板</button>
 
                 <hr>
+                <h3 class="text-sm font-bold">🎯 UID 自定义配置</h3>
+                <p class="text-xs text-gray-500">为特定UID的用户设置专属欢迎词和关键词触发规则。关键词用逗号分隔。</p>
+                <details class="border rounded p-3 bg-gray-50">
+                    <summary class="text-sm font-medium cursor-pointer">点击展开编辑</summary>
+                    <div class="mt-3 space-y-3">
+                        <div v-for="(uc, uci) in roomConfig.features.uid_configs_entries" :key="uci" class="border rounded p-3 bg-white space-y-2">
+                            <div class="flex items-center justify-between">
+                                <span class="text-xs font-bold">配置 #{{ uci+1 }}</span>
+                                <button @click="removeUidConfig(uci)" class="text-red-400 text-xs underline">删除</button>
+                            </div>
+                            <div class="grid grid-cols-3 gap-2">
+                                <label class="text-xs text-gray-500">UID
+                                    <input type="number" v-model.number="uc.uid" class="border p-1 rounded w-full text-sm mt-1" placeholder="用户UID">
+                                </label>
+                                <label class="text-xs text-gray-500">欢迎模板
+                                    <input type="text" v-model="uc.welcome_template" class="border p-1 rounded w-full text-sm mt-1" placeholder="欢迎{uname}！">
+                                </label>
+                                <label class="text-xs text-gray-500">关键词（逗号分隔）
+                                    <input type="text" v-model="uc.keyword_rules_str" class="border p-1 rounded w-full text-sm mt-1" placeholder="价格,多少钱,优惠">
+                                </label>
+                            </div>
+                        </div>
+                        <button @click="addUidConfig" class="text-blue-500 text-xs underline">➕ 添加UID配置</button>
+                    </div>
+                </details>
+
+                <hr>
                 <h3 class="text-sm font-bold">🔑 关键词回复</h3>
                 <label class="flex items-center gap-2 text-xs">
                     <input type="checkbox" v-model="roomConfig.keyword_reply.enabled" class="w-4 h-4"> 启用
@@ -3965,6 +3992,13 @@ createApp({
                 // 转换 UID 欢迎模板 dict → entries 数组
                 const wtfu = roomConfig.value.features.welcome_templates_for_uids || {};
                 roomConfig.value.features.welcome_templates_for_uids_entries = Object.entries(wtfu).map(([uid, tmpl]) => ({uid: Number(uid), template: tmpl}));
+                // 转换 uid_configs array → entries with keyword_rules_str
+                const ucfgs = roomConfig.value.features.uid_configs || [];
+                roomConfig.value.features.uid_configs_entries = ucfgs.map(uc => ({
+                    uid: uc.uid || 0,
+                    welcome_template: uc.welcome_template || "",
+                    keyword_rules_str: (uc.keyword_rules || []).join(", "),
+                }));
                 // 确保大航海欢迎模板存在
                 if (!roomConfig.value.features.guard_welcome_templates) {
                     roomConfig.value.features.guard_welcome_templates = {captain: "", commander: "", governor: ""};
@@ -3992,6 +4026,15 @@ createApp({
                 }
                 body.features.welcome_templates_for_uids = Object.keys(wtfu).length ? wtfu : null;
                 delete body.features.welcome_templates_for_uids_entries;
+            }
+            // 转换 uid_configs_entries → array
+            if (body.features && body.features.uid_configs_entries) {
+                body.features.uid_configs = body.features.uid_configs_entries.map(uc => ({
+                    uid: Number(uc.uid) || 0,
+                    welcome_template: uc.welcome_template || "",
+                    keyword_rules: uc.keyword_rules_str ? uc.keyword_rules_str.split(/[,，]\s*/).filter(Boolean) : [],
+                })).filter(uc => uc.uid > 0);
+                delete body.features.uid_configs_entries;
             }
             try {
                 const res = await fetch(`/api/rooms/${editingRoom.value}/config`, {
@@ -4382,6 +4425,13 @@ createApp({
         function removeUidWelcomeTemplate(idx) {
             roomConfig.value.features.welcome_templates_for_uids_entries.splice(idx, 1);
         }
+        function addUidConfig() {
+            if (!roomConfig.value.features.uid_configs_entries) roomConfig.value.features.uid_configs_entries = [];
+            roomConfig.value.features.uid_configs_entries.push({uid: 0, welcome_template: "", keyword_rules_str: ""});
+        }
+        function removeUidConfig(idx) {
+            roomConfig.value.features.uid_configs_entries.splice(idx, 1);
+        }
 
         return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
                 tab, userRole,
@@ -4427,7 +4477,8 @@ createApp({
                 editStreamerRooms, savingStreamer, streamerMsg, streamerOk, adminPass, adminPassMsg, adminPassOk,
                 loadUsers, saveStreamer, editStreamer, deleteStreamer, toggleStreamerRoom, saveAdminPass, showRoomDropdown,
                 addKeywordRule, removeKeywordRule,
-                addUidWelcomeTemplate, removeUidWelcomeTemplate};
+                addUidWelcomeTemplate, removeUidWelcomeTemplate,
+                addUidConfig, removeUidConfig};
     }
 }).mount('#app');
 </script>

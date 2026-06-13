@@ -51,6 +51,7 @@ class FeatureConfig:
     share_template: str = "感谢分享直播间~"
     like_thanks_enabled: bool = True
     like_template: str = "感谢50个点赞~"
+    uid_configs: list[dict] | None = None  # list of {uid, welcome_template, keyword_rules}
 
 
 @dataclass(slots=True)
@@ -259,6 +260,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             share_template=str(features.get("share_template", "感谢分享直播间~")),
             like_thanks_enabled=bool(features.get("like_thanks_enabled", True)),
             like_template=str(features.get("like_template", "感谢50个点赞~")),
+            uid_configs=features.get("uid_configs", None) or None,
         ),
         cooldown=CooldownConfig(
             welcome_user_seconds=int(cooldown.get("welcome_user_seconds", 600)),
@@ -370,6 +372,7 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "share_template": config.features.share_template,
             "like_thanks_enabled": config.features.like_thanks_enabled,
             "like_template": config.features.like_template,
+            "uid_configs": config.features.uid_configs,
         },
         "web_ui": {
             "host": config.web_ui.host,
