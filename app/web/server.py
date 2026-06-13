@@ -1604,27 +1604,369 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
         <!-- 送礼排行 -->
         <div v-if="roomSubTab==='ranking'" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            ... (same ranking content but using selectedRoom's APIs)
+            <div class="bg-white p-4 rounded-xl shadow-sm">
+                <div class="flex flex-wrap gap-2 mb-3">
+                    <input type="date" v-model="rStart" class="border p-2 rounded text-sm flex-1 min-w-0">
+                    <input type="date" v-model="rEnd"   class="border p-2 rounded text-sm flex-1 min-w-0">
+                    <select v-model="rType" class="border p-2 rounded text-sm">
+                        <option value="all">全部</option>
+                        <option value="gift">一般礼物</option>
+                        <option value="blindbox">盲盒</option>
+                    </select>
+                    <button @click="loadRanking" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">查询</button>
+                </div>
+                <div v-if="errRanking" class="text-red-500 text-sm mb-2">{{ errRanking }}</div>
+                <div class="overflow-y-auto max-h-[520px]" v-if="ranking.length">
+                    <table class="w-full text-sm">
+                        <thead><tr class="bg-gray-50 sticky top-0"><th class="p-2 text-left">#</th><th class="p-2 text-left">用户</th><th class="p-2 text-right">价值</th><th class="p-2 text-right">利润</th></tr></thead>
+                        <tbody>
+                            <tr v-for="(u,i) in ranking" :key="u.uid"
+                                class="border-t hover:bg-blue-50 cursor-pointer transition"
+                                @click="gotoExport(u.uid, u.uname)">
+                                <td class="p-2">{{ i+1 }}</td>
+                                <td class="p-2">{{ u.uname }}</td>
+                                <td class="p-2 text-right">{{ Number(u.total).toFixed(1) }}</td>
+                                <td class="p-2 text-right" :class="Number(u.total_profit)>=0?'text-red-500':'text-green-500'">{{ Number(u.total_profit).toFixed(1) }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div v-else-if="!errRanking" class="text-gray-400 text-center py-8">暂无数据</div>
+            </div>
+            <div class="bg-white p-4 rounded-xl shadow-sm flex flex-col min-h-[300px]">
+                <canvas id="chartRank" class="flex-1 min-h-0"></canvas>
+            </div>
         </div>
 
         <!-- 精美导出 -->
         <div v-if="roomSubTab==='export'" class="flex flex-col items-center w-full">
-            ... (same export content)
+            <div class="bg-white p-4 rounded-xl shadow-sm w-full max-w-3xl mb-4 space-y-3">
+                <div class="flex flex-wrap gap-2 items-end">
+                    <label class="text-xs text-gray-500 flex-[2]">UID<input type="number" v-model.number="eUid" class="border p-2 rounded w-full text-sm mt-1" @input="onUidInput"></label>
+                    <label class="text-xs text-gray-500 flex-[2]">
+                        日期
+                        <div class="relative">
+                            <input type="text" readonly :value="eDate" placeholder="点击选择日期"
+                                   class="border p-2 rounded w-full text-sm mt-1 cursor-pointer bg-white"
+                                   @click="showCalendar = !showCalendar">
+                            <div v-if="showCalendar" @click.stop class="absolute top-full left-0 mt-1 bg-white border rounded-xl shadow-lg z-50 p-3 w-[300px]">
+                                <div class="flex justify-between items-center mb-2">
+                                    <button @click="calMonth--" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&lt;</button>
+                                    <span class="text-sm font-bold">{{ calYear }}年{{ calMonth+1 }}月</span>
+                                    <button @click="calMonth++" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&gt;</button>
+                                </div>
+                                <div class="grid grid-cols-7 gap-1 text-center text-xs mb-1">
+                                    <div class="text-gray-400 font-medium">日</div>
+                                    <div class="text-gray-400 font-medium">一</div>
+                                    <div class="text-gray-400 font-medium">二</div>
+                                    <div class="text-gray-400 font-medium">三</div>
+                                    <div class="text-gray-400 font-medium">四</div>
+                                    <div class="text-gray-400 font-medium">五</div>
+                                    <div class="text-gray-400 font-medium">六</div>
+                                </div>
+                                <div class="grid grid-cols-7 gap-1">
+                                    <template v-for="(day,i) in calDays" :key="i">
+                                        <div v-if="!day" class="h-8"></div>
+                                        <button v-else
+                                                :disabled="!day.hasData"
+                                                @click="pickDate(day.ymd)"
+                                                class="h-8 rounded text-xs transition"
+                                                :class="day.hasData
+                                                    ? (day.ymd === eDate ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-700 hover:bg-blue-200 cursor-pointer')
+                                                    : 'text-gray-300 cursor-not-allowed'">
+                                            {{ day.d }}
+                                        </button>
+                                    </template>
+                                </div>
+                                <div class="text-[10px] text-gray-400 mt-2 text-center">蓝色 = 有数据，灰色 = 无数据</div>
+                            </div>
+                        </div>
+                    </label>
+                    <select v-model="eType" class="border p-2 rounded text-sm h-[38px]">
+                        <option value="all">全部</option>
+                        <option value="gift">仅一般礼物</option>
+                        <option value="blindbox">仅盲盒</option>
+                    </select>
+                    <button @click="loadExport" class="bg-green-500 hover:bg-green-600 text-white px-5 py-2 rounded text-sm h-[38px]">生成</button>
+                </div>
+                <div class="flex flex-wrap gap-4 items-end">
+                    <label class="text-xs text-gray-500">每列行数
+                        <input type="number" v-model.number="ePerCol" min="1" max="50" class="border p-2 rounded text-sm mt-1 w-20">
+                    </label>
+                    <label class="text-xs text-gray-500 flex-1 min-w-[200px]">
+                        单列宽度 <span class="text-sm font-mono ml-1">{{ eColWidth }}px</span>
+                        <input type="range" v-model.number="eColWidth" min="200" max="600" step="10" class="w-full mt-1">
+                    </label>
+                </div>
+            </div>
+            <div v-if="errExport" class="text-red-500 text-sm mb-2">{{ errExport }}</div>
+
+            <!-- 精美数据展示区（水平可滚动，居中） -->
+            <div id="capture" v-if="exportList.length" class="w-full overflow-x-auto">
+                <div class="capture-inner">
+                <div class="text-center text-gray-400 text-xs mb-3">
+                    <span class="font-semibold">{{ eName }}</span> ·
+                    {{ eDate }} · 礼物投喂明细
+                    <span v-if="eType==='gift'">（一般礼物）</span>
+                    <span v-else-if="eType==='blindbox'">（盲盒）</span>
+                </div>
+                <div class="capture-grid" :style="{ minWidth: exportCols.length * (eColWidth + 16) + 'px' }">
+                    <div v-for="(col,cidx) in exportCols" :key="cidx" class="capture-col" :style="{ minWidth: eColWidth + 'px', maxWidth: eColWidth + 'px' }">
+                        <div v-for="(item,idx2) in col" :key="item.id"
+                             class="bili-card"
+                             :class="cardBgClass(item.guard_level)">
+                            <div class="avatar-wrap">
+                                <!-- 舰长头像框 — 仅舰长有 -->
+                                <img v-if="item.guard_level === 3"
+                                     :src="proxyImg('https://i0.hdslb.com/bfs/live/80f732943cc3367029df65e267960d56736a82ee.png')"
+                                     class="frame-img"
+                                     @error="$event.target.style.display='none'">
+                                <img :src="proxyImg(item.avatar)" class="face"
+                                     @error="$event.target.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 44 44%22><rect width=%2244%22 height=%2244%22 fill=%22%23ccc%22 rx=%2222%22/></svg>'">
+                            </div>
+                            <div class="flex-1 min-w-0">
+                                <div class="font-bold text-sm truncate">
+                                    {{ item.uname }}
+                                    <span v-if="item.guard_level" class="inline-block text-[9px] font-bold px-[5px] py-[1px] rounded-full ml-1 align-middle"
+                                          :class="guardBadgeClass(item.guard_level)">{{ guardLabel(item.guard_level) }}</span>
+                                </div>
+                                <div class="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                                    <span class="text-xs text-white/80">投喂了 {{ item.gift_name }} × {{ item.gift_num }}</span>
+                                    <span class="gift-value" v-if="item.price">¥{{ (item.price / 1000).toFixed(1) }}</span>
+                                    <span class="gift-time" v-if="item.ts">{{ fmtTime(item.ts) }}</span>
+                                </div>
+                            </div>
+                            <img v-if="item.gift_icon" :src="proxyImg(item.gift_icon)" class="gift-icon"
+                                 @error="$event.target.style.display='none'">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+            <div v-else-if="!errExport" class="text-gray-400 mt-20">输入 UID 和日期后点击"生成"</div>
         </div>
 
         <!-- AI 回复 -->
         <div v-if="roomSubTab==='llm'" class="max-w-2xl mx-auto">
-            ... (same llm content)
+            <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
+                <h2 class="text-lg font-bold">🤖 AI 回复设置</h2>
+                <p class="text-xs text-gray-400">用户发送 <code class="bg-gray-100 px-1 rounded">#{{ llmWakeWord || 'ayabot' }} &lt;聊天内容&gt;</code> 时调用 LLM API 自动回复。</p>
+
+                <label class="flex items-center gap-2 text-sm">
+                    <input type="checkbox" v-model="llmEnabled" class="w-4 h-4">
+                    启用 AI 回复
+                </label>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <label class="text-xs text-gray-500">接口格式
+                        <select v-model="llmProvider" class="border p-2 rounded w-full text-sm mt-1">
+                            <option value="openai">OpenAI 格式</option>
+                            <option value="anthropic">Anthropic 格式</option>
+                        </select>
+                    </label>
+                    <label class="text-xs text-gray-500">模型
+                        <input type="text" v-model="llmModel" placeholder="gpt-4o-mini" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">唤醒词
+                        <div class="flex items-center mt-1">
+                            <span class="bg-gray-200 px-2 py-[7px] rounded-l text-sm font-mono text-gray-500">#</span>
+                            <input type="text" v-model="llmWakeWord" placeholder="ayabot" class="border p-2 rounded-r w-full text-sm flex-1">
+                        </div>
+                        <span class="text-xs text-gray-400">用户发送 <code>#{{ llmWakeWord || 'ayabot' }} &lt;聊天内容&gt;</code> 触发</span>
+                    </label>
+                    <label class="text-xs text-gray-500">温度 (temperature)
+                        <input type="number" v-model="llmTemp" step="0.1" min="0" max="2" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">Top P
+                        <input type="number" v-model="llmTopP" step="0.05" min="0" max="1" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">最大 Token
+                        <input type="number" v-model.number="llmMaxTokens" min="1" max="2000" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                </div>
+
+                <label class="text-xs text-gray-500">API Key
+                    <input type="password" v-model="llmApiKey" placeholder="sk-..." class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+
+                <label class="text-xs text-gray-500">Base URL
+                    <input type="url" v-model="llmBaseUrl" placeholder="https://api.openai.com/v1" class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+
+                <label class="text-xs text-gray-500">人设（System Prompt）
+                    <textarea v-model="llmPrompt" rows="3" class="border p-2 rounded w-full text-sm mt-1" placeholder="你是ayabot，一个可爱温柔的虚拟主播助手。"></textarea>
+                </label>
+
+                <hr class="my-2">
+                <h3 class="text-sm font-bold">🧠 对话上下文</h3>
+
+                <label class="flex items-center gap-2 text-sm">
+                    <input type="checkbox" v-model="ctxEnabled" class="w-4 h-4">
+                    开启上下文记忆
+                </label>
+
+                <div v-if="ctxEnabled" class="grid grid-cols-2 gap-4">
+                    <label class="text-xs text-gray-500">隔离方式
+                        <select v-model="ctxMode" class="border p-2 rounded w-full text-sm mt-1">
+                            <option value="isolated">按用户隔离</option>
+                            <option value="merged">所有用户合并</option>
+                        </select>
+                    </label>
+                    <label class="text-xs text-gray-500">记录内容
+                        <select v-model="ctxContent" class="border p-2 rounded w-full text-sm mt-1">
+                            <option value="llm_only">仅 #{{ llmWakeWord }} 对话</option>
+                            <option value="all">所有弹幕消息</option>
+                        </select>
+                    </label>
+                </div>
+
+                <label v-if="ctxEnabled" class="text-xs text-gray-500">保留条数
+                    <input type="number" v-model.number="ctxMaxMsg" min="1" max="50" class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+
+                <div class="flex items-center gap-4">
+                    <button @click="saveLlmConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
+                    <span v-if="llmSaveMsg" class="text-sm" :class="llmSaveOk ? 'text-green-600' : 'text-red-500'">{{ llmSaveMsg }}</span>
+                </div>
+
+                <hr class="my-2">
+                <h3 class="text-sm font-bold">测试</h3>
+                <div class="flex gap-2">
+                    <input type="text" v-model="llmTestText" placeholder="输入测试消息" class="border p-2 rounded flex-1 text-sm"
+                           @keyup.enter="testLlm">
+                    <button @click="testLlm" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">测试</button>
+                </div>
+                <div v-if="llmTestResp" class="text-sm bg-gray-50 p-3 rounded">{{ llmTestResp }}</div>
+            </div>
         </div>
 
         <!-- 机器人配置 -->
         <div v-if="roomSubTab==='config'" class="max-w-2xl mx-auto">
-            ... (same config content)
+            <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
+                <h2 class="text-lg font-bold">⚙️ 机器人配置</h2>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <label class="text-xs text-gray-500">Web 端口
+                        <input type="number" v-model.number="cfgPort" min="1024" max="65535" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">监听地址
+                        <input type="text" v-model="cfgHost" class="border p-2 rounded w-full text-sm mt-1" placeholder="0.0.0.0">
+                    </label>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <label class="text-xs text-gray-500">直播间 ID
+                        <input type="number" v-model.number="cfgRoomId" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">主播 UID
+                        <input type="number" v-model.number="cfgAnchorUid" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                </div>
+
+                <hr>
+                <h3 class="text-sm font-bold">⏱️ 冷却时间（秒）</h3>
+                <div class="grid grid-cols-2 gap-4">
+                    <label class="text-xs text-gray-500">欢迎同用户间隔
+                        <input type="number" v-model.number="cfgWelcomeCd" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">感谢同用户间隔
+                        <input type="number" v-model.number="cfgThanksCd" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                </div>
+
+                <hr>
+                <h3 class="text-sm font-bold">🚦 限流</h3>
+                <div class="grid grid-cols-2 gap-4">
+                    <label class="text-xs text-gray-500">弹幕发送间隔(秒)
+                        <input type="number" v-model="cfgSendInterval" step="0.1" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">重试次数
+                        <input type="number" v-model.number="cfgRetry" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">队列上限
+                        <input type="number" v-model.number="cfgMaxQueue" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">回复延迟(秒)
+                        <input type="number" v-model="cfgReplyDelay" step="0.1" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                </div>
+
+                <hr>
+                <h3 class="text-sm font-bold">🎛️ 功能开关</h3>
+                <div class="grid grid-cols-2 gap-2 text-sm">
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgWelcomeOn" class="w-4 h-4"> 欢迎</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgThanksOn" class="w-4 h-4"> 感谢</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgBlindboxOn" class="w-4 h-4"> 盲盒统计</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgGuardOn" class="w-4 h-4"> 大航海感谢</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgConnectedMsg" class="w-4 h-4"> 连接消息</label>
+                </div>
+
+                <hr>
+                <h3 class="text-sm font-bold">📝 回复模板</h3>
+                <div class="space-y-3">
+                    <label class="text-xs text-gray-500 block">欢迎模板
+                        <input type="text" v-model="cfgWelcomeTmpl" placeholder="欢迎{uname}来到直播间" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500 block">感谢模板
+                        <input type="text" v-model="cfgThanksTmpl" placeholder="感谢{uname}的{gift_name}x{gift_num}!" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500 block">大航海 - 舰长
+                        <input type="text" v-model="cfgGuardCaptain" placeholder="感谢{uname}上舰！" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500 block">大航海 - 提督
+                        <input type="text" v-model="cfgGuardCommander" placeholder="感谢{uname}支持！" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500 block">大航海 - 总督
+                        <input type="text" v-model="cfgGuardGovernor" placeholder="感谢{uname}支持！" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500 block">大航海 - 默认
+                        <input type="text" v-model="cfgGuardDefault" placeholder="感谢{uname}开通大航海！" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500 block">连接消息
+                        <input type="text" v-model="cfgConnMsg" placeholder="来了喵~" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                </div>
+
+                <hr>
+                <h3 class="text-sm font-bold">⏰ 定时消息</h3>
+                <div class="space-y-3">
+                    <label class="flex items-center gap-2 text-sm">
+                        <input type="checkbox" v-model="cfgPeriodicOn" class="w-4 h-4">
+                        启用定时消息（仅在开播时发送）
+                    </label>
+                    <div class="grid grid-cols-2 gap-4">
+                        <label class="text-xs text-gray-500">间隔（秒）
+                            <input type="number" v-model.number="cfgPeriodicInterval" min="30" max="86400" class="border p-2 rounded w-full text-sm mt-1">
+                            <span class="text-xs text-gray-400">默认 600 秒（10 分钟）</span>
+                        </label>
+                    </div>
+                    <label class="text-xs text-gray-500 block">消息内容
+                        <input type="text" v-model="cfgPeriodicTmpl" placeholder="欢迎关注直播间~点个关注不迷路！" class="border p-2 rounded w-full text-sm mt-1">
+                        <span class="text-xs text-gray-400">留空则不发送定时消息</span>
+                    </label>
+                </div>
+
+                <div class="flex items-center gap-4 mt-4">
+                    <button @click="saveGeneralConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
+                    <span v-if="cfgSaveMsg" class="text-sm" :class="cfgSaveOk ? 'text-green-600' : 'text-red-500'">{{ cfgSaveMsg }}</span>
+                    <button @click="loadGeneralConfig" class="text-gray-500 hover:text-gray-700 underline text-sm">刷新</button>
+                </div>
+                <div class="flex items-center gap-4 mt-2 border-t pt-4">
+                    <button @click="restartService" class="bg-red-500 hover:bg-red-600 text-white px-6 py-2 rounded text-sm">🔄 重启服务</button>
+                    <span v-if="restartMsg" class="text-sm" :class="restartOk ? 'text-green-600' : 'text-red-500'">{{ restartMsg }}</span>
+                </div>
+            </div>
         </div>
 
         <!-- 数据管理 -->
-        <div v-if="roomSubTab==='manage'" class="max-w-lg mx-auto">
-            ... (same manage content)
+        <div v-if="roomSubTab==='manage'" class="max-w-lg mx-auto bg-white p-6 rounded-xl shadow-sm">
+            <h2 class="text-lg font-bold mb-4 text-red-600">⚠️ 数据管理</h2>
+            <p class="text-sm text-gray-500 mb-4">注意：删除操作不可恢复。</p>
+            <div class="flex gap-2 items-end">
+                <label class="text-xs text-gray-500 flex-1">删除此日期之前的数据<input type="date" v-model="delDate" class="border p-2 rounded w-full text-sm mt-1"></label>
+                <button @click="confirmDelete" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded text-sm h-[38px]">删除</button>
+            </div>
+            <div v-if="delResult" class="mt-4 text-sm">{{ delResult }}</div>
         </div>
     </div>
 </div>
@@ -1745,589 +2087,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </div>
 </div><!-- /loggedIn -->
 
-<!-- ══════ 送礼排行 ══════ -->
-<div v-if="tab==='ranking'" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-    <div class="bg-white p-4 rounded-xl shadow-sm">
-        <div class="flex flex-wrap gap-2 mb-3">
-            <input type="date" v-model="rStart" class="border p-2 rounded text-sm flex-1 min-w-0">
-            <input type="date" v-model="rEnd"   class="border p-2 rounded text-sm flex-1 min-w-0">
-            <select v-model="rType" class="border p-2 rounded text-sm">
-                <option value="all">全部</option>
-                <option value="gift">一般礼物</option>
-                <option value="blindbox">盲盒</option>
-            </select>
-            <button @click="loadRanking" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">查询</button>
-        </div>
-        <div v-if="errRanking" class="text-red-500 text-sm mb-2">{{ errRanking }}</div>
-        <div class="overflow-y-auto max-h-[520px]" v-if="ranking.length">
-            <table class="w-full text-sm">
-                <thead><tr class="bg-gray-50 sticky top-0"><th class="p-2 text-left">#</th><th class="p-2 text-left">用户</th><th class="p-2 text-right">价值</th><th class="p-2 text-right">利润</th></tr></thead>
-                <tbody>
-                    <tr v-for="(u,i) in ranking" :key="u.uid"
-                        class="border-t hover:bg-blue-50 cursor-pointer transition"
-                        @click="gotoExport(u.uid, u.uname)">
-                        <td class="p-2">{{ i+1 }}</td>
-                        <td class="p-2">{{ u.uname }}</td>
-                        <td class="p-2 text-right">{{ Number(u.total_val).toFixed(1) }}</td>
-                        <td class="p-2 text-right" :class="Number(u.total_profit)>=0?'text-red-500':'text-green-500'">{{ Number(u.total_profit).toFixed(1) }}</td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-        <div v-else-if="!errRanking" class="text-gray-400 text-center py-8">暂无数据</div>
-    </div>
-    <div class="bg-white p-4 rounded-xl shadow-sm flex flex-col min-h-[300px]">
-        <canvas id="chartRank" class="flex-1 min-h-0"></canvas>
-    </div>
-</div>
-
-<!-- ══════ 精美导出 ══════ -->
-<div v-if="tab==='export'" class="flex flex-col items-center w-full">
-    <div class="bg-white p-4 rounded-xl shadow-sm w-full max-w-3xl mb-4 space-y-3">
-        <div class="flex flex-wrap gap-2 items-end">
-            <label class="text-xs text-gray-500 flex-[2]">UID<input type="number" v-model.number="eUid" class="border p-2 rounded w-full text-sm mt-1" @input="onUidInput"></label>
-            <label class="text-xs text-gray-500 flex-[2]">
-                日期
-                <div class="relative">
-                    <input type="text" readonly :value="eDate" placeholder="点击选择日期"
-                           class="border p-2 rounded w-full text-sm mt-1 cursor-pointer bg-white"
-                           @click="showCalendar = !showCalendar">
-                    <div v-if="showCalendar" @click.stop class="absolute top-full left-0 mt-1 bg-white border rounded-xl shadow-lg z-50 p-3 w-[300px]">
-                        <div class="flex justify-between items-center mb-2">
-                            <button @click="calMonth--" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&lt;</button>
-                            <span class="text-sm font-bold">{{ calYear }}年{{ calMonth+1 }}月</span>
-                            <button @click="calMonth++" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&gt;</button>
-                        </div>
-                        <div class="grid grid-cols-7 gap-1 text-center text-xs mb-1">
-                            <div class="text-gray-400 font-medium">日</div>
-                            <div class="text-gray-400 font-medium">一</div>
-                            <div class="text-gray-400 font-medium">二</div>
-                            <div class="text-gray-400 font-medium">三</div>
-                            <div class="text-gray-400 font-medium">四</div>
-                            <div class="text-gray-400 font-medium">五</div>
-                            <div class="text-gray-400 font-medium">六</div>
-                        </div>
-                        <div class="grid grid-cols-7 gap-1">
-                            <template v-for="(day,i) in calDays" :key="i">
-                                <div v-if="!day" class="h-8"></div>
-                                <button v-else
-                                        :disabled="!day.hasData"
-                                        @click="pickDate(day.ymd)"
-                                        class="h-8 rounded text-xs transition"
-                                        :class="day.hasData
-                                            ? (day.ymd === eDate ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-700 hover:bg-blue-200 cursor-pointer')
-                                            : 'text-gray-300 cursor-not-allowed'">
-                                    {{ day.d }}
-                                </button>
-                            </template>
-                        </div>
-                        <div class="text-[10px] text-gray-400 mt-2 text-center">蓝色 = 有数据，灰色 = 无数据</div>
-                    </div>
-                </div>
-            </label>
-            <select v-model="eType" class="border p-2 rounded text-sm h-[38px]">
-                <option value="all">全部</option>
-                <option value="gift">仅一般礼物</option>
-                <option value="blindbox">仅盲盒</option>
-            </select>
-            <button @click="loadExport" class="bg-green-500 hover:bg-green-600 text-white px-5 py-2 rounded text-sm h-[38px]">生成</button>
-        </div>
-        <div class="flex flex-wrap gap-4 items-end">
-            <label class="text-xs text-gray-500">每列行数
-                <input type="number" v-model.number="ePerCol" min="1" max="50" class="border p-2 rounded text-sm mt-1 w-20">
-            </label>
-            <label class="text-xs text-gray-500 flex-1 min-w-[200px]">
-                单列宽度 <span class="text-sm font-mono ml-1">{{ eColWidth }}px</span>
-                <input type="range" v-model.number="eColWidth" min="200" max="600" step="10" class="w-full mt-1">
-            </label>
-        </div>
-    </div>
-    <div v-if="errExport" class="text-red-500 text-sm mb-2">{{ errExport }}</div>
-
-    <!-- 精美数据展示区（水平可滚动，居中） -->
-    <div id="capture" v-if="exportList.length" class="w-full overflow-x-auto">
-        <div class="capture-inner">
-        <div class="text-center text-gray-400 text-xs mb-3">
-            <span class="font-semibold">{{ eName }}</span> ·
-            {{ eDate }} · 礼物投喂明细
-            <span v-if="eType==='gift'">（一般礼物）</span>
-            <span v-else-if="eType==='blindbox'">（盲盒）</span>
-        </div>
-        <div class="capture-grid" :style="{ minWidth: exportCols.length * (eColWidth + 16) + 'px' }">
-            <div v-for="(col,cidx) in exportCols" :key="cidx" class="capture-col" :style="{ minWidth: eColWidth + 'px', maxWidth: eColWidth + 'px' }">
-                <div v-for="(item,idx2) in col" :key="item.id"
-                     class="bili-card"
-                     :class="cardBgClass(item.guard_level)">
-                    <div class="avatar-wrap">
-                        <!-- 舰长头像框 — 仅舰长有 -->
-                        <img v-if="item.guard_level === 3"
-                             :src="proxyImg('https://i0.hdslb.com/bfs/live/80f732943cc3367029df65e267960d56736a82ee.png')"
-                             class="frame-img"
-                             @error="$event.target.style.display='none'">
-                        <img :src="proxyImg(item.avatar)" class="face"
-                             @error="$event.target.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 44 44%22><rect width=%2244%22 height=%2244%22 fill=%22%23ccc%22 rx=%2222%22/></svg>'">
-                    </div>
-                    <div class="flex-1 min-w-0">
-                        <div class="font-bold text-sm truncate">
-                            {{ item.uname }}
-                            <span v-if="item.guard_level" class="inline-block text-[9px] font-bold px-[5px] py-[1px] rounded-full ml-1 align-middle"
-                                  :class="guardBadgeClass(item.guard_level)">{{ guardLabel(item.guard_level) }}</span>
-                        </div>
-                        <div class="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                            <span class="text-xs text-white/80">投喂了 {{ item.gift_name }} × {{ item.gift_num }}</span>
-                            <span class="gift-value" v-if="item.price">¥{{ (item.price / 1000).toFixed(1) }}</span>
-                            <span class="gift-time" v-if="item.ts">{{ fmtTime(item.ts) }}</span>
-                        </div>
-                    </div>
-                    <img v-if="item.gift_icon" :src="proxyImg(item.gift_icon)" class="gift-icon"
-                         @error="$event.target.style.display='none'">
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-    <div v-else-if="!errExport" class="text-gray-400 mt-20">输入 UID 和日期后点击"生成"</div>
-</div>
-
-<!-- ══════ 机器人配置 ══════ -->
-<div v-if="tab==='config'" class="max-w-2xl mx-auto">
-    <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
-        <h2 class="text-lg font-bold">⚙️ 机器人配置</h2>
-
-        <div class="grid grid-cols-2 gap-4">
-            <label class="text-xs text-gray-500">Web 端口
-                <input type="number" v-model.number="cfgPort" min="1024" max="65535" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500">监听地址
-                <input type="text" v-model="cfgHost" class="border p-2 rounded w-full text-sm mt-1" placeholder="0.0.0.0">
-            </label>
-        </div>
-
-        <div class="grid grid-cols-2 gap-4">
-            <label class="text-xs text-gray-500">直播间 ID
-                <input type="number" v-model.number="cfgRoomId" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500">主播 UID
-                <input type="number" v-model.number="cfgAnchorUid" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-        </div>
-
-        <hr>
-        <h3 class="text-sm font-bold">⏱️ 冷却时间（秒）</h3>
-        <div class="grid grid-cols-2 gap-4">
-            <label class="text-xs text-gray-500">欢迎同用户间隔
-                <input type="number" v-model.number="cfgWelcomeCd" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500">感谢同用户间隔
-                <input type="number" v-model.number="cfgThanksCd" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-        </div>
-
-        <hr>
-        <h3 class="text-sm font-bold">🚦 限流</h3>
-        <div class="grid grid-cols-2 gap-4">
-            <label class="text-xs text-gray-500">弹幕发送间隔(秒)
-                <input type="number" v-model="cfgSendInterval" step="0.1" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500">重试次数
-                <input type="number" v-model.number="cfgRetry" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500">队列上限
-                <input type="number" v-model.number="cfgMaxQueue" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500">回复延迟(秒)
-                <input type="number" v-model="cfgReplyDelay" step="0.1" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-        </div>
-
-        <hr>
-        <h3 class="text-sm font-bold">🎛️ 功能开关</h3>
-        <div class="grid grid-cols-2 gap-2 text-sm">
-            <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgWelcomeOn" class="w-4 h-4"> 欢迎</label>
-            <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgThanksOn" class="w-4 h-4"> 感谢</label>
-            <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgBlindboxOn" class="w-4 h-4"> 盲盒统计</label>
-            <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgGuardOn" class="w-4 h-4"> 大航海感谢</label>
-            <label class="flex items-center gap-2"><input type="checkbox" v-model="cfgConnectedMsg" class="w-4 h-4"> 连接消息</label>
-        </div>
-
-        <hr>
-        <h3 class="text-sm font-bold">📝 回复模板</h3>
-        <div class="space-y-3">
-            <label class="text-xs text-gray-500 block">欢迎模板
-                <input type="text" v-model="cfgWelcomeTmpl" placeholder="欢迎{uname}来到直播间" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500 block">感谢模板
-                <input type="text" v-model="cfgThanksTmpl" placeholder="感谢{uname}的{gift_name}x{gift_num}!" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500 block">大航海 - 舰长
-                <input type="text" v-model="cfgGuardCaptain" placeholder="感谢{uname}上舰！" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500 block">大航海 - 提督
-                <input type="text" v-model="cfgGuardCommander" placeholder="感谢{uname}支持！" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500 block">大航海 - 总督
-                <input type="text" v-model="cfgGuardGovernor" placeholder="感谢{uname}支持！" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500 block">大航海 - 默认
-                <input type="text" v-model="cfgGuardDefault" placeholder="感谢{uname}开通大航海！" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500 block">连接消息
-                <input type="text" v-model="cfgConnMsg" placeholder="来了喵~" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-        </div>
-
-        <hr>
-        <h3 class="text-sm font-bold">⏰ 定时消息</h3>
-        <div class="space-y-3">
-            <label class="flex items-center gap-2 text-sm">
-                <input type="checkbox" v-model="cfgPeriodicOn" class="w-4 h-4">
-                启用定时消息（仅在开播时发送）
-            </label>
-            <div class="grid grid-cols-2 gap-4">
-                <label class="text-xs text-gray-500">间隔（秒）
-                    <input type="number" v-model.number="cfgPeriodicInterval" min="30" max="86400" class="border p-2 rounded w-full text-sm mt-1">
-                    <span class="text-xs text-gray-400">默认 600 秒（10 分钟）</span>
-                </label>
-            </div>
-            <label class="text-xs text-gray-500 block">消息内容
-                <input type="text" v-model="cfgPeriodicTmpl" placeholder="欢迎关注直播间~点个关注不迷路！" class="border p-2 rounded w-full text-sm mt-1">
-                <span class="text-xs text-gray-400">留空则不发送定时消息</span>
-            </label>
-        </div>
-
-        <div class="flex items-center gap-4 mt-4">
-            <button @click="saveGeneralConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
-            <span v-if="cfgSaveMsg" class="text-sm" :class="cfgSaveOk ? 'text-green-600' : 'text-red-500'">{{ cfgSaveMsg }}</span>
-            <button @click="loadGeneralConfig" class="text-gray-500 hover:text-gray-700 underline text-sm">刷新</button>
-        </div>
-        <div class="flex items-center gap-4 mt-2 border-t pt-4">
-            <button @click="restartService" class="bg-red-500 hover:bg-red-600 text-white px-6 py-2 rounded text-sm">🔄 重启服务</button>
-            <span v-if="restartMsg" class="text-sm" :class="restartOk ? 'text-green-600' : 'text-red-500'">{{ restartMsg }}</span>
-        </div>
-    </div>
-</div>
-
-<!-- ══════ AI 回复设置 ══════ -->
-<div v-if="tab==='llm'" class="max-w-2xl mx-auto">
-    <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
-        <h2 class="text-lg font-bold">🤖 AI 回复设置</h2>
-        <p class="text-xs text-gray-400">用户发送 <code class="bg-gray-100 px-1 rounded">#{{ llmWakeWord || 'ayabot' }} &lt;聊天内容&gt;</code> 时调用 LLM API 自动回复。</p>
-
-        <label class="flex items-center gap-2 text-sm">
-            <input type="checkbox" v-model="llmEnabled" class="w-4 h-4">
-            启用 AI 回复
-        </label>
-
-        <div class="grid grid-cols-2 gap-4">
-            <label class="text-xs text-gray-500">接口格式
-                <select v-model="llmProvider" class="border p-2 rounded w-full text-sm mt-1">
-                    <option value="openai">OpenAI 格式</option>
-                    <option value="anthropic">Anthropic 格式</option>
-                </select>
-            </label>
-            <label class="text-xs text-gray-500">模型
-                <input type="text" v-model="llmModel" placeholder="gpt-4o-mini" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500">唤醒词
-                <div class="flex items-center mt-1">
-                    <span class="bg-gray-200 px-2 py-[7px] rounded-l text-sm font-mono text-gray-500">#</span>
-                    <input type="text" v-model="llmWakeWord" placeholder="ayabot" class="border p-2 rounded-r w-full text-sm flex-1">
-                </div>
-                <span class="text-xs text-gray-400">用户发送 <code>#{{ llmWakeWord || 'ayabot' }} &lt;聊天内容&gt;</code> 触发</span>
-            </label>
-            <label class="text-xs text-gray-500">温度 (temperature)
-                <input type="number" v-model="llmTemp" step="0.1" min="0" max="2" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500">Top P
-                <input type="number" v-model="llmTopP" step="0.05" min="0" max="1" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500">最大 Token
-                <input type="number" v-model.number="llmMaxTokens" min="1" max="2000" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-        </div>
-
-        <label class="text-xs text-gray-500">API Key
-            <input type="password" v-model="llmApiKey" placeholder="sk-..." class="border p-2 rounded w-full text-sm mt-1">
-        </label>
-
-        <label class="text-xs text-gray-500">Base URL
-            <input type="url" v-model="llmBaseUrl" placeholder="https://api.openai.com/v1" class="border p-2 rounded w-full text-sm mt-1">
-        </label>
-
-        <label class="text-xs text-gray-500">人设（System Prompt）
-            <textarea v-model="llmPrompt" rows="3" class="border p-2 rounded w-full text-sm mt-1" placeholder="你是ayabot，一个可爱温柔的虚拟主播助手。"></textarea>
-        </label>
-
-        <hr class="my-2">
-        <h3 class="text-sm font-bold">🧠 对话上下文</h3>
-
-        <label class="flex items-center gap-2 text-sm">
-            <input type="checkbox" v-model="ctxEnabled" class="w-4 h-4">
-            开启上下文记忆
-        </label>
-
-        <div v-if="ctxEnabled" class="grid grid-cols-2 gap-4">
-            <label class="text-xs text-gray-500">隔离方式
-                <select v-model="ctxMode" class="border p-2 rounded w-full text-sm mt-1">
-                    <option value="isolated">按用户隔离</option>
-                    <option value="merged">所有用户合并</option>
-                </select>
-            </label>
-            <label class="text-xs text-gray-500">记录内容
-                <select v-model="ctxContent" class="border p-2 rounded w-full text-sm mt-1">
-                    <option value="llm_only">仅 #{{ llmWakeWord }} 对话</option>
-                    <option value="all">所有弹幕消息</option>
-                </select>
-            </label>
-        </div>
-
-        <label v-if="ctxEnabled" class="text-xs text-gray-500">保留条数
-            <input type="number" v-model.number="ctxMaxMsg" min="1" max="50" class="border p-2 rounded w-full text-sm mt-1">
-        </label>
-
-        <div class="flex items-center gap-4">
-            <button @click="saveLlmConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
-            <span v-if="llmSaveMsg" class="text-sm" :class="llmSaveOk ? 'text-green-600' : 'text-red-500'">{{ llmSaveMsg }}</span>
-        </div>
-
-        <hr class="my-2">
-        <h3 class="text-sm font-bold">测试</h3>
-        <div class="flex gap-2">
-            <input type="text" v-model="llmTestText" placeholder="输入测试消息" class="border p-2 rounded flex-1 text-sm"
-                   @keyup.enter="testLlm">
-            <button @click="testLlm" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">测试</button>
-        </div>
-        <div v-if="llmTestResp" class="text-sm bg-gray-50 p-3 rounded">{{ llmTestResp }}</div>
-    </div>
-</div>
-
-<!-- ══════ B站 扫码登录 ══════ -->
-<div v-if="tab==='bili_login'" class="max-w-lg mx-auto">
-    <div class="bg-white p-6 rounded-xl shadow-sm text-center space-y-4">
-        <h2 class="text-lg font-bold">🅱️ B 站扫码登录</h2>
-        <p class="text-sm text-gray-500">首次启动或 Cookie 过期时，使用 Bilibili App 扫码登录</p>
-
-        <div v-if="biliLoginState === 'idle'">
-            <button @click="startBiliLogin" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">📱 生成二维码</button>
-        </div>
-
-        <div v-if="biliLoginState === 'loading'" class="py-4">
-            <p class="text-gray-400">正在生成二维码...</p>
-        </div>
-
-        <div v-if="biliLoginState === 'waiting' || biliLoginState === 'scanned'" class="space-y-3">
-            <div class="flex justify-center">
-                <img :src="biliQrImage" class="border-2 border-gray-200 rounded-lg" style="width:200px;height:200px">
-            </div>
-            <div class="flex items-center justify-center gap-2">
-                <span v-if="biliLoginState==='waiting'" class="inline-block w-3 h-3 rounded-full bg-green-400 animate-pulse"></span>
-                <span v-if="biliLoginState==='scanned'" class="inline-block w-3 h-3 rounded-full bg-yellow-400 animate-pulse"></span>
-                <span class="text-sm">{{ biliLoginState === 'waiting' ? '等待扫码...' : '已扫码，请在手机上确认' }}</span>
-            </div>
-        </div>
-
-        <div v-if="biliLoginState === 'done'" class="space-y-3 py-4">
-            <div class="text-4xl text-green-500">✅</div>
-            <p class="text-green-600 font-bold">扫码成功！</p>
-            <button @click="saveBiliLogin" class="bg-green-500 hover:bg-green-600 text-white px-6 py-2 rounded text-sm">
-                保存凭据并重启服务
-            </button>
-        </div>
-
-        <div v-if="biliLoginState === 'saving'" class="py-4">
-            <p class="text-gray-400">正在保存凭据并重启服务...</p>
-        </div>
-
-        <div v-if="biliLoginState === 'timeout'" class="space-y-3">
-            <p class="text-red-500">⏰ 二维码已过期</p>
-            <button @click="startBiliLogin" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">重新生成</button>
-        </div>
-
-        <div v-if="biliLoginState === 'error'" class="space-y-3">
-            <p class="text-red-500">❌ {{ biliLoginError }}</p>
-            <button @click="startBiliLogin" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">重试</button>
-        </div>
-    </div>
-</div>
-
-<!-- ══════ 数据管理 ══════ -->
-<div v-if="tab==='manage'" class="max-w-lg mx-auto bg-white p-6 rounded-xl shadow-sm">
-    <h2 class="text-lg font-bold mb-4 text-red-600">⚠️ 数据管理</h2>
-    <p class="text-sm text-gray-500 mb-4">注意：删除操作不可恢复。</p>
-    <div class="flex gap-2 items-end">
-        <label class="text-xs text-gray-500 flex-1">删除此日期之前的数据<input type="date" v-model="delDate" class="border p-2 rounded w-full text-sm mt-1"></label>
-        <button @click="confirmDelete" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded text-sm h-[38px]">删除</button>
-    </div>
-    <div v-if="delResult" class="mt-4 text-sm">{{ delResult }}</div>
-</div>
-
-
-<!-- ══════ 房间管理 ══════ -->
-<div v-if="tab==='rooms'" class="max-w-4xl mx-auto">
-    <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
-        <div class="flex items-center justify-between">
-            <h2 class="text-lg font-bold">🏠 房间管理</h2>
-            <button @click="showCreateRoom = true"
-                    class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">
-                ➕ 新建房间
-            </button>
-        </div>
-
-        <!-- 新建房间表单 -->
-        <div v-if="showCreateRoom" class="border rounded-lg p-4 bg-gray-50 space-y-3">
-            <h3 class="text-sm font-bold">新建直播间</h3>
-            <div class="grid grid-cols-2 gap-3">
-                <label class="text-xs text-gray-500">主播 UID
-                    <input type="number" v-model.number="newRoomUid" placeholder="填 B站 主播 UID"
-                           class="border p-2 rounded w-full text-sm mt-1">
-                </label>
-                <label class="text-xs text-gray-500">机器人名称
-                    <input type="text" v-model="newRoomName" placeholder="文文"
-                           class="border p-2 rounded w-full text-sm mt-1">
-                </label>
-                <label class="text-xs text-gray-500">Web 端口
-                    <input type="number" v-model.number="newRoomPort" placeholder="8000"
-                           class="border p-2 rounded w-full text-sm mt-1">
-                </label>
-                <label class="text-xs text-gray-500">直播间号（留空自动解析）
-                    <input type="number" v-model.number="newRoomDisplayId" placeholder="留空自动"
-                           class="border p-2 rounded w-full text-sm mt-1">
-                </label>
-            </div>
-            <div class="flex gap-2">
-                <button @click="createRoom" :disabled="creatingRoom"
-                        class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
-                    {{ creatingRoom ? '创建中...' : '创建' }}
-                </button>
-                <button @click="showCreateRoom = false"
-                        class="bg-gray-300 hover:bg-gray-400 px-4 py-2 rounded text-sm">取消</button>
-            </div>
-            <div v-if="createRoomMsg" class="text-sm" :class="createRoomOk ? 'text-green-600' : 'text-red-500'">
-                {{ createRoomMsg }}
-            </div>
-        </div>
-
-        <!-- 房间列表 -->
-        <div v-if="!rooms || rooms.length === 0" class="text-sm text-gray-400 text-center py-8">
-            暂无房间。点击上方「新建房间」添加第一个直播间。
-        </div>
-        <div v-for="r in rooms" :key="r.room_id"
-             class="border rounded-lg p-4 flex items-center justify-between"
-             :class="r.status==='running' ? 'border-green-300 bg-green-50' : 'border-gray-200'">
-            <div class="flex-1">
-                <div class="flex items-center gap-2">
-                    <span class="w-2 h-2 rounded-full inline-block"
-                          :class="r.status==='running' ? 'bg-green-500' : 'bg-gray-400'"></span>
-                    <span class="font-bold text-sm">{{ r.bot_name || '未命名' }}</span>
-                    <span class="text-xs text-gray-400">#{{ r.room_id }}</span>
-                </div>
-                <div class="text-xs text-gray-500 mt-1">
-                    UID: {{ r.anchor_uid }} | 端口: {{ r.port }} | 状态: {{ r.status === 'running' ? '🟢 运行中' : (r.status === 'stopped' ? '⏹️ 已停止' : `❓ ${r.status}`) }}
-                </div>
-            </div>
-            <div class="flex gap-2 items-center">
-                <button @click="editRoomConfig(r.room_id)"
-                        class="text-blue-500 hover:text-blue-700 text-sm underline">配置</button>
-                <button v-if="r.status !== 'running'"
-                        @click="startRoom(r.room_id)"
-                        class="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded text-xs">启动</button>
-                <button v-if="r.status === 'running'"
-                        @click="stopRoom(r.room_id)"
-                        class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-xs">停止</button>
-                <button @click="deleteRoom(r.room_id, r.bot_name)"
-                        class="text-red-400 hover:text-red-600 text-sm underline">删除</button>
-            </div>
-        </div>
-
-        <!-- 房间详情 / 配置编辑 -->
-        <div v-if="editingRoom" class="border rounded-lg p-4 bg-gray-50 mt-4 space-y-3">
-            <h3 class="text-sm font-bold">⚙️ 房间配置 — {{ editingRoom }}</h3>
-            <div v-if="roomConfig" class="space-y-2">
-                <div class="grid grid-cols-2 gap-3">
-                    <label class="text-xs text-gray-500">主播 UID
-                        <input type="number" v-model.number="roomConfig.anchor_uid" class="border p-2 rounded w-full text-sm mt-1">
-                    </label>
-                    <label class="text-xs text-gray-500">直播间号
-                        <input type="number" v-model.number="roomConfig.room_display_id" class="border p-2 rounded w-full text-sm mt-1">
-                    </label>
-                    <label class="text-xs text-gray-500">Web 端口
-                        <input type="number" v-model.number="roomConfig.web_ui.port" class="border p-2 rounded w-full text-sm mt-1">
-                    </label>
-                    <label class="text-xs text-gray-500">机器人名称
-                        <input type="text" v-model="roomConfig.bot_name" class="border p-2 rounded w-full text-sm mt-1">
-                    </label>
-                </div>
-                <div class="flex gap-2">
-                    <button @click="saveRoomConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
-                        保存配置
-                    </button>
-                    <button @click="editingRoom = null; roomConfig = null;"
-                            class="bg-gray-300 hover:bg-gray-400 px-4 py-2 rounded text-sm">关闭</button>
-                </div>
-                <div v-if="roomSaveMsg" class="text-sm" :class="roomSaveOk ? 'text-green-600' : 'text-red-500'">{{ roomSaveMsg }}</div>
-            </div>
-            <div v-else class="text-sm text-gray-400">加载中...</div>
-        </div>
-    </div>
-</div>
-
-
-<!-- ══════ 帮助页面 ══════ -->
-<div v-if="tab==='help'" class="max-w-3xl mx-auto">
-    <div class="bg-white p-6 rounded-xl shadow-sm space-y-6 text-sm leading-relaxed">
-        <h2 class="text-lg font-bold">📖 使用指南</h2>
-
-        <div>
-            <h3 class="font-bold text-blue-600 mb-1">🎯 弹幕命令</h3>
-            <table class="w-full text-xs border-collapse">
-                <thead><tr class="bg-gray-100"><th class="border p-1 text-left">命令</th><th class="border p-1 text-left">说明</th></tr></thead>
-                <tbody>
-                    <tr><td class="border p-1"><code>#签到</code></td><td class="border p-1">每日签到（按直播场次计算）</td></tr>
-                    <tr><td class="border p-1"><code>#抽签</code></td><td class="border p-1">今日运势抽签</td></tr>
-                    <tr><td class="border p-1"><code>#今日盲盒</code></td><td class="border p-1">今日盲盒统计</td></tr>
-                    <tr><td class="border p-1"><code>#本月盲盒</code></td><td class="border p-1">本月盲盒统计</td></tr>
-                    <tr><td class="border p-1"><code>#{{ llmWakeWord || 'ayabot' }} &lt;聊天内容&gt;</code></td><td class="border p-1">AI 智能回复（需在 AI 回复页开启）</td></tr>
-                    <tr><td class="border p-1"><code>#帮助</code></td><td class="border p-1">显示所有命令</td></tr>
-                </tbody>
-            </table>
-        </div>
-
-        <div>
-            <h3 class="font-bold text-blue-600 mb-1">🤖 功能介绍</h3>
-            <ul class="list-disc pl-4 space-y-1 text-xs">
-                <li><b>欢迎</b> — 新观众进入直播间时自动发送欢迎消息</li>
-                <li><b>感谢</b> — 观众送礼物/盲盒时自动感谢</li>
-                <li><b>大航海感谢</b> — 舰长/提督/总督购买时自动感谢</li>
-                <li><b>关键词回复</b> — 设定关键词自动回复（如「群」回复群号）</li>
-                <li><b>AI 回复</b> — 唤醒词触发 LLM 智能对话，支持自定义人设和上下文记忆</li>
-                <li><b>连接消息</b> — 机器人成功连接直播间时发送消息</li>
-            </ul>
-        </div>
-
-        <div>
-            <h3 class="font-bold text-blue-600 mb-1">⚙️ 配置提示</h3>
-            <ul class="list-disc pl-4 space-y-1 text-xs">
-                <li>机器人配置修改后需要点击「重启服务」按钮才能生效</li>
-                <li>AI 回复配置保存后立即生效，无需重启</li>
-                <li>直播间 ID 和主播 UID 修改后需要重启才能生效</li>
-                <li>如果收不到弹幕命令回复，可以尝试调大「回复延迟」或「弹幕发送间隔」</li>
-            </ul>
-        </div>
-
-        <div>
-            <h3 class="font-bold text-blue-600 mb-1">🎨 界面功能</h3>
-            <ul class="list-disc pl-4 space-y-1 text-xs">
-                <li><b>送礼排行</b> — 按日期范围查看送礼排行（支持礼物/盲盒/全部）</li>
-                <li><b>精美导出</b> — 按用户导出精美礼物卡片，支持多列布局</li>
-                <li><b>数据管理</b> — 删除指定日期之前的旧数据</li>
-            </ul>
-        </div>
-    </div>
-</div>
-</div><!-- /loggedIn -->
-
-</div>
-
 <script>
 const {createApp, ref, computed, nextTick} = Vue;
 createApp({
@@ -2336,7 +2095,31 @@ createApp({
         const loginUser = ref('');
         const loginPass = ref('');
         const loginErr = ref('');
-        const tab = ref('ranking');
+        const tab = ref('rooms');
+
+        // Room detail
+        const selectedRoom = ref(null);
+        const roomSubTab = ref('ranking');
+        const roomSubTabs = [
+            {key: 'ranking', label: '送礼排行'},
+            {key: 'export', label: '精美导出'},
+            {key: 'llm', label: 'AI回复'},
+            {key: 'config', label: '机器人配置'},
+            {key: 'manage', label: '数据管理'},
+        ];
+        const newRoomAccount = ref('');
+        const selectedRoomAccount = ref('');
+
+        // Accounts management
+        const accounts = ref([]);
+        const showNewAccount = ref(false);
+        const newAccountUid = ref(0);
+        const accountLoggingIn = ref(false);
+        const accountQrImage = ref('');
+        const accountQrState = ref('idle');
+        const accountQrError = ref('');
+        const accountSessionId = ref('');
+        let accountsPollTimer = null;
 
         // Ranking
         const rStart = ref(new Date().toISOString().slice(0,10));
@@ -2483,6 +2266,8 @@ createApp({
                 loggedIn.value = true;
                 await loadLlmConfig();
                 await loadGeneralConfig();
+                await loadRooms();
+                await loadAccounts();
             } catch(e) { loginErr.value = '登录失败: ' + e.message; }
         }
         function doLogout() {
@@ -2521,14 +2306,125 @@ createApp({
             return '';
         }
 
+        // ── Room Detail ──
+        function selectRoom(r) {
+            selectedRoom.value = r;
+            roomSubTab.value = 'ranking';
+            selectedRoomAccount.value = r.account_uid || '';
+        }
+        async function assignAccountToRoom() {
+            const rid = selectedRoom.value?.room_id;
+            if (!rid) return;
+            try {
+                await fetch(`/api/rooms/${rid}/config`, {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    credentials: 'include',
+                    body: JSON.stringify({account_uid: selectedRoomAccount.value || ''}),
+                });
+            } catch(e) { /* ignore */ }
+        }
+
+        // ── Accounts Management ──
+        async function loadAccounts() {
+            try {
+                const res = await fetch('/api/bili_accounts', {credentials: 'include'});
+                if (res.status === 401) { loggedIn.value = false; return; }
+                if (!res.ok) return;
+                const data = await res.json();
+                accounts.value = data.accounts || [];
+            } catch(e) { /* ignore */ }
+        }
+        async function startAccountLogin() {
+            if (!newAccountUid.value) { accountQrError.value = '请填写 UID'; accountQrState.value = 'error'; return; }
+            accountLoggingIn.value = true;
+            accountQrState.value = 'loading';
+            accountQrError.value = '';
+            if (accountsPollTimer) { clearInterval(accountsPollTimer); accountsPollTimer = null; }
+            try {
+                const res = await fetch('/api/bili_accounts', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    credentials: 'include',
+                    body: JSON.stringify({uid: String(newAccountUid.value)}),
+                });
+                if (!res.ok) throw new Error('请求失败');
+                const data = await res.json();
+                if (!data.ok) throw new Error(data.error || '生成二维码失败');
+                accountQrImage.value = data.qr_image;
+                accountSessionId.value = data.session_id;
+                accountQrState.value = 'waiting';
+                accountsPollTimer = setInterval(pollAccountLogin, 2000);
+            } catch(e) {
+                accountQrError.value = e.message;
+                accountQrState.value = 'error';
+            } finally {
+                accountLoggingIn.value = false;
+            }
+        }
+        async function pollAccountLogin() {
+            if (!accountSessionId.value) return;
+            try {
+                const res = await fetch('/api/bili_login/status?session_id=' + accountSessionId.value, {
+                    credentials: 'include',
+                });
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.state === 'done') {
+                    accountQrState.value = 'done';
+                    if (accountsPollTimer) { clearInterval(accountsPollTimer); accountsPollTimer = null; }
+                    await saveAccountLogin();
+                } else if (data.state === 'scanned') {
+                    accountQrState.value = 'scanned';
+                } else if (data.state === 'timeout') {
+                    accountQrState.value = 'timeout';
+                    if (accountsPollTimer) { clearInterval(accountsPollTimer); accountsPollTimer = null; }
+                } else if (data.state === 'error') {
+                    accountQrError.value = data.message || '登录失败';
+                    accountQrState.value = 'error';
+                    if (accountsPollTimer) { clearInterval(accountsPollTimer); accountsPollTimer = null; }
+                }
+            } catch(e) { /* ignore */ }
+        }
+        async function saveAccountLogin() {
+            try {
+                await fetch('/api/bili_accounts/save', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    credentials: 'include',
+                    body: JSON.stringify({session_id: accountSessionId.value}),
+                });
+            } catch(e) { /* ignore */ }
+            await loadAccounts();
+        }
+        async function refreshAccount(uid) {
+            // 目前没有单独的刷新 API，重新加载列表
+            await loadAccounts();
+        }
+        async function deleteAccount(uid, nickname) {
+            if (!confirm(`⚠️ 确定删除 B站账号「${nickname || uid}」（${uid}）？`)) return;
+            try {
+                const res = await fetch(`/api/bili_accounts/${uid}`, {
+                    method: 'DELETE', credentials: 'include',
+                });
+                if (!res.ok) throw new Error((await res.text()).slice(0,80));
+                await loadAccounts();
+            } catch(e) { alert('删除失败: ' + e.message); }
+        }
+
         // ── Ranking ──
         async function loadRanking() {
             errRanking.value = '';
             ranking.value = [];
+            const roomId = selectedRoom.value?.room_id;
+            if (!roomId) return;
             try {
-                const res = await fetch(`/api/ranking?start=${rStart.value}&end=${rEnd.value}&gift_type=${rType.value}`);
+                const res = await fetch(`/api/rooms/${roomId}/ranking?rStart=${rStart.value}&rEnd=${rEnd.value}&rType=${rType.value}`);
                 if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
-                ranking.value = await res.json();
+                const data = await res.json();
+                ranking.value = (data.ranking || []).map(u => ({
+                    uid: u.uid, uname: u.uname, total_val: u.total, total_profit: 0
+                }));
             } catch(e) { errRanking.value = '加载失败: ' + e.message; }
             await nextTick();
             updateChart();
@@ -2556,8 +2452,10 @@ createApp({
         // ── Export ──
         async function loadUserDates() {
             if (!eUid.value) return;
+            const roomId = selectedRoom.value?.room_id;
+            if (!roomId) return;
             try {
-                const res = await fetch(`/api/user_dates?uid=${eUid.value}`);
+                const res = await fetch(`/api/rooms/${roomId}/user_dates?uid=${eUid.value}`);
                 if (!res.ok) return;
                 const arr = await res.json();
                 exportDates.value = arr;
@@ -2583,10 +2481,21 @@ createApp({
             errExport.value = '';
             exportList.value = [];
             if (!eUid.value || !eDate.value) { errExport.value = '请填写 UID 和日期'; return; }
+            const roomId = selectedRoom.value?.room_id;
+            if (!roomId) return;
             try {
-                const res = await fetch(`/api/user_gifts?uid=${eUid.value}&date=${eDate.value}&gift_type=${eType.value}`);
+                const res = await fetch(`/api/rooms/${roomId}/user_gifts?uid=${eUid.value}&date=${eDate.value}&gift_type=${eType.value}`);
                 if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
-                exportList.value = await res.json();
+                const data = await res.json();
+                exportList.value = (data || []).map(item => ({
+                    ...item,
+                    gift_num: item.gift_count,
+                    price: item.actual_amount,
+                    ts: item.created_at ? new Date(item.created_at).getTime() / 1000 : 0,
+                    avatar: '',
+                    guard_level: 0,
+                    gift_icon: '',
+                }));
                 if (exportList.value.length) {
                     eName.value = exportList.value[0].uname || '';
                 } else {
@@ -2597,7 +2506,7 @@ createApp({
         function gotoExport(uid, uname) {
             eUid.value = uid;
             eName.value = uname || '';
-            tab.value = 'export';
+            roomSubTab.value = 'export';
             showCalendar.value = false;
             exportDates.value = [];
             exportList.value = [];
@@ -2609,8 +2518,10 @@ createApp({
         async function confirmDelete() {
             if (!delDate.value) { delResult.value = '请选择日期'; return; }
             if (!confirm(`确定删除 ${delDate.value} 之前的所有数据？此操作不可恢复！`)) return;
+            const roomId = selectedRoom.value?.room_id;
+            if (!roomId) return;
             try {
-                const res = await fetch('/api/delete_old', {
+                const res = await fetch(`/api/rooms/${roomId}/delete_old`, {
                     method: 'POST',
                     headers: {'Content-Type':'application/json'},
                     body: JSON.stringify({date: delDate.value})
@@ -2834,9 +2745,9 @@ createApp({
             try {
                 const body = {
                     anchor_uid: newRoomUid.value,
-                    bot_name: newRoomName.value || ('文文' + String(newRoomUid.value).slice(0,4)),
-                    port: newRoomPort.value || 8001,
                 };
+                if (newRoomName.value) body.bot_name = newRoomName.value;
+                if (newRoomPort.value && newRoomPort.value !== 8001) body.port = newRoomPort.value;
                 if (newRoomDisplayId.value) body.room_display_id = newRoomDisplayId.value;
                 const res = await fetch('/api/rooms', {
                     method: 'POST',
@@ -2850,10 +2761,22 @@ createApp({
                     createRoomMsg.value = `✅ 房间 ${data.room_id}（${data.room_display_id}）创建成功！`;
                     createRoomOk.value = true;
                     showCreateRoom.value = false;
+                    // 关联 B站 账号
+                    if (newRoomAccount.value) {
+                        try {
+                            await fetch(`/api/rooms/${data.room_id}/config`, {
+                                method: 'POST',
+                                headers: {'Content-Type':'application/json'},
+                                credentials: 'include',
+                                body: JSON.stringify({account_uid: newRoomAccount.value}),
+                            });
+                        } catch(e) { /* ignore */ }
+                    }
                     newRoomUid.value = 0;
                     newRoomName.value = '';
                     newRoomPort.value = 8001;
                     newRoomDisplayId.value = 0;
+                    newRoomAccount.value = '';
                     await loadRooms();
                 } else {
                     createRoomMsg.value = '❌ ' + (data.error || '创建失败');
