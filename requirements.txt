@@ -3,3 +3,6 @@ PyYAML>=6.0.1
 aiohttp>=3.9.5
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
+
+# Windows tray .exe 构建依赖
+# pip install pystray pillow pyinstaller

@@ -759,7 +759,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ botName }} 直播间机器人</title>
+<title>Ayabot 直播间机器人</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
@@ -1054,6 +1054,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div class="grid grid-cols-2 gap-4">
             <label class="text-xs text-gray-500">机器人名称
                 <input type="text" v-model="botName" class="border p-2 rounded w-full text-sm mt-1" placeholder="ayabot">
+            </label>
+            <label class="text-xs text-gray-500">Web 端口
+                <input type="number" v-model.number="cfgPort" min="1024" max="65535" class="border p-2 rounded w-full text-sm mt-1">
+            </label>
+            <label class="text-xs text-gray-500">监听地址
+                <input type="text" v-model="cfgHost" class="border p-2 rounded w-full text-sm mt-1" placeholder="0.0.0.0">
             </label>
         </div>
 
@@ -1461,6 +1467,8 @@ createApp({
 
         // General Config
         const botName = ref('ayabot');
+        const cfgHost = ref('0.0.0.0');
+        const cfgPort = ref(8000);
         const cfgRoomId = ref(0);
         const cfgAnchorUid = ref(0);
         const cfgWelcomeCd = ref(600);
@@ -1749,6 +1757,11 @@ createApp({
         loadLlmConfig();
         loadGeneralConfig();
 
+        // ── 动态标题 ──
+        watch(botName, (name) => {
+            document.title = (name || 'Ayabot') + ' 直播间机器人';
+        }, { immediate: true });
+
         // ── General Config ──
         async function loadGeneralConfig() {
             try {
@@ -1758,6 +1771,8 @@ createApp({
                 const data = await res.json();
                 if (data.error) return;
                 botName.value = data.bot_name || 'ayabot';
+                cfgHost.value = data.web_ui?.host || '0.0.0.0';
+                cfgPort.value = data.web_ui?.port || 8000;
                 cfgRoomId.value = data.room_display_id || 0;
                 cfgAnchorUid.value = data.anchor_uid || 0;
                 cfgWelcomeCd.value = data.cooldown?.welcome_user_seconds ?? 600;
@@ -1792,6 +1807,10 @@ createApp({
                     credentials: 'include',
                     body: JSON.stringify({
                         bot_name: botName.value,
+                        web_ui: {
+                            host: cfgHost.value,
+                            port: cfgPort.value,
+                        },
                         cooldown: {
                             welcome_user_seconds: cfgWelcomeCd.value,
                             thanks_user_seconds: cfgThanksCd.value,
@@ -1949,7 +1968,7 @@ createApp({
                 cfgWelcomeOn, cfgThanksOn, cfgBlindboxOn, cfgGuardOn, cfgConnectedMsg,
                 cfgWelcomeTmpl, cfgThanksTmpl, cfgGuardCaptain, cfgGuardCommander, cfgGuardGovernor, cfgGuardDefault, cfgConnMsg,
                 cfgPeriodicOn, cfgPeriodicInterval, cfgPeriodicTmpl,
-                botName,
+                botName, cfgHost, cfgPort,
                 cfgSaveMsg, cfgSaveOk, loadGeneralConfig, saveGeneralConfig,
                 restartMsg, restartOk, restartService,
                 biliLoginState, biliQrImage, biliLoginError,

@@ -325,6 +325,10 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "periodic_message_interval_seconds": config.features.periodic_message_interval_seconds,
             "periodic_message_template": config.features.periodic_message_template,
         },
+        "web_ui": {
+            "host": config.web_ui.host,
+            "port": config.web_ui.port,
+        },
     }
 
 
@@ -350,6 +354,8 @@ def update_config_from_dict(raw: dict[str, Any], cfg_path: str) -> bool:
             existing["anchor_uid"] = raw["anchor_uid"]
         if "bot_name" in raw:
             existing.setdefault("web_ui", {})["bot_name"] = raw["bot_name"]
+        if "web_ui" in raw:
+            existing.setdefault("web_ui", {}).update(raw["web_ui"])
 
         Path(cfg_path).write_text(
             yaml.dump(existing, default_flow_style=False, allow_unicode=True),
