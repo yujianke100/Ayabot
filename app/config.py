@@ -254,10 +254,10 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             log_level=str(runtime.get("log_level", "INFO")),
         ),
         storage=StorageConfig(
-            sqlite_path=str(storage.get("sqlite_path", "data/bot.db")),
+            sqlite_path=sqlite_path,
         ),
         auth=AuthConfig(
-            credential_store_path=str(auth.get("credential_store_path", "data/credential.json")),
+            credential_store_path=cred_store_path,
             auto_login=bool(auth.get("auto_login", True)),
             qr_poll_seconds=float(auth.get("qr_poll_seconds", 1.0)),
             refresh_interval_seconds=int(auth.get("refresh_interval_seconds", 3600)),
