@@ -57,7 +57,7 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
         config: AppConfig 对象
         config_path: 配置文件的实际路径（用于解析相对路径）
     """
-    global AUTH_USER, AUTH_PASS, _SESSION_TIMEOUT, _HTTP_HOST, _HTTP_PORT, _DB_PATH, _LLM_CONFIG_DICT, _CONFIG_YAML_PATH
+    global AUTH_USER, AUTH_PASS, _SESSION_TIMEOUT, _HTTP_HOST, _HTTP_PORT, _DB_PATH, _LLM_CONFIG_DICT, _CONFIG_YAML_PATH, _ROOMS_BASE_DIR
     if config is None:
         _fallback_read_config()
         return
@@ -88,6 +88,7 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
         },
     })
     _CONFIG_YAML_PATH = config_path
+    _ROOMS_BASE_DIR = str(Path(config_path).parent) if config_path else "."
     logger.info("webui configured: host=%s port=%s db=%s", _HTTP_HOST, _HTTP_PORT, os.path.abspath(_DB_PATH))
 
 
@@ -756,6 +757,208 @@ async def api_save_general_config(request: Request):
 
 
 # ══════════════════════════════════════════════════════════════
+#  多房间管理 API
+# ══════════════════════════════════════════════════════════════
+
+_ROOMS_BASE_DIR: str = "."  # 由 init_app 设置
+
+
+async def _resolve_room_id(anchor_uid: int) -> int:
+    """通过 B站 API 从主播 UID 查询直播间号."""
+    url = f"https://api.live.bilibili.com/room/v1/Room/getRoomInfoOld?mid={anchor_uid}"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as sess:
+            async with sess.get(url) as resp:
+                data = await resp.json()
+        if data.get("code") == 0 and data.get("data", {}).get("room_id"):
+            return int(data["data"]["room_id"])
+        raise ValueError(f"B站 API 返回异常: {data}")
+    except Exception as exc:
+        raise ValueError(f"无法解析直播间号 (UID={anchor_uid}): {exc}") from exc
+
+
+def _room_service_name(room_id: str) -> str:
+    return f"bili-live-bot@{room_id}.service"
+
+
+def _room_status(room_id: str) -> str:
+    """查询 systemd 服务状态: running / stopped / not_found."""
+    import subprocess as _sp
+    try:
+        r = _sp.run(
+            ["systemctl", "is-active", _room_service_name(room_id)],
+            capture_output=True, text=True, timeout=5,
+        )
+        out = r.stdout.strip()
+        return "running" if out == "active" else out
+    except Exception:
+        return "unknown"
+
+
+def _list_rooms_from_disk() -> list[dict[str, Any]]:
+    """扫描 rooms/ 目录列出所有房间."""
+    from app.config import DEFAULT_ROOMS_DIR
+    base = Path(_ROOMS_BASE_DIR).resolve() / DEFAULT_ROOMS_DIR
+    if not base.exists():
+        return []
+    rooms: list[dict[str, Any]] = []
+    for d in sorted(base.iterdir()):
+        if not d.is_dir():
+            continue
+        room_id = d.name
+        cfg_path = d / "config.yaml"
+        if not cfg_path.exists():
+            continue
+        # 读取关键信息
+        try:
+            import yaml
+            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            cfg = {}
+        rooms.append({
+            "room_id": room_id,
+            "anchor_uid": cfg.get("anchor_uid", 0),
+            "room_display_id": cfg.get("room_display_id", 0),
+            "bot_name": cfg.get("web_ui", {}).get("bot_name", ""),
+            "status": _room_status(room_id),
+            "port": cfg.get("web_ui", {}).get("port", 8000),
+        })
+    return rooms
+
+
+@app.get("/api/rooms")
+async def api_list_rooms():
+    """列出所有房间及状态."""
+    return {"rooms": _list_rooms_from_disk()}
+
+
+@app.post("/api/rooms")
+async def api_create_room(request: Request):
+    """新建房间: 传入 anchor_uid, 可选 room_display_id / bot_name / port."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    anchor_uid = body.get("anchor_uid")
+    if not anchor_uid:
+        return JSONResponse({"error": "anchor_uid is required"}, status_code=400)
+
+    # 自动解析直播间号
+    room_display_id = body.get("room_display_id")
+    if not room_display_id:
+        try:
+            room_display_id = await _resolve_room_id(int(anchor_uid))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+    room_id = str(room_display_id)
+    from app.config import ensure_room_dirs, get_room_path
+    room_dir = ensure_room_dirs(room_id, base_dir=_ROOMS_BASE_DIR)
+    cfg_path = room_dir / "config.yaml"
+
+    if cfg_path.exists():
+        return JSONResponse({"error": f"房间 {room_id} 已存在"}, status_code=409)
+
+    # 从根 config.yaml 复制模板
+    import shutil
+    root_cfg = Path(_ROOMS_BASE_DIR).resolve() / "config.yaml"
+    alt_cfg = Path(_ROOMS_BASE_DIR).resolve() / "config.example.yaml"
+    src = root_cfg if root_cfg.exists() else (alt_cfg if alt_cfg.exists() else None)
+    if not src:
+        return JSONResponse({"error": "根目录 config.yaml 不存在"}, status_code=500)
+
+    shutil.copy2(str(src), str(cfg_path))
+
+    # 写入房间配置
+    port = body.get("port", 8000)
+    bot_name = body.get("bot_name", f"文文{room_id[:4]}")
+    from app.config import update_config_from_dict
+    update_config_from_dict({
+        "room_display_id": int(room_display_id),
+        "anchor_uid": int(anchor_uid),
+        "bot_name": bot_name,
+        "web_ui": {"port": int(port)},
+    }, str(cfg_path))
+
+    logger.info("room created: id=%s uid=%s port=%s", room_id, anchor_uid, port)
+    return {"ok": True, "room_id": room_id, "room_display_id": room_display_id}
+
+
+@app.post("/api/rooms/{room_id}/start")
+async def api_start_room(room_id: str):
+    """启动房间 systemd 服务."""
+    import subprocess as _sp
+    svc = _room_service_name(room_id)
+    r = _sp.run(["systemctl", "start", svc], capture_output=True, text=True, timeout=15)
+    if r.returncode != 0:
+        return JSONResponse({"error": f"启动失败: {r.stderr.strip()}"}, status_code=500)
+    logger.info("room started: %s", room_id)
+    return {"ok": True, "status": "running"}
+
+
+@app.post("/api/rooms/{room_id}/stop")
+async def api_stop_room(room_id: str):
+    """停止房间 systemd 服务."""
+    import subprocess as _sp
+    svc = _room_service_name(room_id)
+    _sp.run(["systemctl", "stop", svc], capture_output=True, text=True, timeout=15)
+    logger.info("room stopped: %s", room_id)
+    return {"ok": True, "status": "stopped"}
+
+
+@app.delete("/api/rooms/{room_id}")
+async def api_delete_room(room_id: str):
+    """删除房间（先停止，再删目录）."""
+    import shutil
+    import subprocess as _sp
+
+    # 先停止
+    svc = _room_service_name(room_id)
+    _sp.run(["systemctl", "stop", svc], capture_output=True, text=True, timeout=15)
+    _sp.run(["systemctl", "disable", svc], capture_output=True, text=True, timeout=15)
+
+    # 删除目录
+    from app.config import get_room_path
+    room_dir = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR)
+    if room_dir.exists():
+        shutil.rmtree(str(room_dir))
+    logger.info("room deleted: %s", room_id)
+    return {"ok": True}
+
+
+@app.get("/api/rooms/{room_id}/config")
+async def api_get_room_config(room_id: str):
+    """获取房间配置."""
+    from app.config import get_room_path
+    cfg_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "config.yaml"
+    if not cfg_path.exists():
+        return JSONResponse({"error": "room not found"}, status_code=404)
+    from app.config import load_config, config_to_dict
+    try:
+        cfg = load_config(str(cfg_path))
+        return config_to_dict(cfg)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.post("/api/rooms/{room_id}/config")
+async def api_save_room_config(room_id: str, request: Request):
+    """保存房间配置."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    from app.config import get_room_path
+    cfg_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "config.yaml"
+    if not cfg_path.exists():
+        return JSONResponse({"error": "room not found"}, status_code=404)
+    from app.config import update_config_from_dict
+    ok = update_config_from_dict(body, str(cfg_path))
+    return {"ok": ok}
+
+
+# ══════════════════════════════════════════════════════════════
 #  HTML
 # ══════════════════════════════════════════════════════════════════
 
@@ -896,6 +1099,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <header class="mb-6 flex justify-between items-center bg-white p-4 rounded-xl shadow-sm">
     <h1 class="text-xl font-bold text-blue-600">🎯 {{ botName }} 管理后台</h1>
     <div class="flex items-center gap-4 text-sm">
+        <button @click="tab='rooms'" :class="tab==='rooms'?'text-blue-600 font-bold border-b-2 border-blue-600':''">🏠 房间管理</button>
         <button @click="tab='ranking'" :class="tab==='ranking'?'text-blue-600 font-bold border-b-2 border-blue-600':''">送礼排行</button>
         <button @click="tab='export'"  :class="tab==='export' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">精美导出</button>
         <button @click="tab='llm'"    :class="tab==='llm'    ?'text-blue-600 font-bold border-b-2 border-blue-600':''">AI 回复</button>
@@ -1327,6 +1531,116 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </div>
 
 
+<!-- ══════ 房间管理 ══════ -->
+<div v-if="tab==='rooms'" class="max-w-4xl mx-auto">
+    <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
+        <div class="flex items-center justify-between">
+            <h2 class="text-lg font-bold">🏠 房间管理</h2>
+            <button @click="showCreateRoom = true"
+                    class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">
+                ➕ 新建房间
+            </button>
+        </div>
+
+        <!-- 新建房间表单 -->
+        <div v-if="showCreateRoom" class="border rounded-lg p-4 bg-gray-50 space-y-3">
+            <h3 class="text-sm font-bold">新建直播间</h3>
+            <div class="grid grid-cols-2 gap-3">
+                <label class="text-xs text-gray-500">主播 UID
+                    <input type="number" v-model.number="newRoomUid" placeholder="填 B站 主播 UID"
+                           class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+                <label class="text-xs text-gray-500">机器人名称
+                    <input type="text" v-model="newRoomName" placeholder="文文"
+                           class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+                <label class="text-xs text-gray-500">Web 端口
+                    <input type="number" v-model.number="newRoomPort" placeholder="8000"
+                           class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+                <label class="text-xs text-gray-500">直播间号（留空自动解析）
+                    <input type="number" v-model.number="newRoomDisplayId" placeholder="留空自动"
+                           class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+            </div>
+            <div class="flex gap-2">
+                <button @click="createRoom" :disabled="creatingRoom"
+                        class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
+                    {{ creatingRoom ? '创建中...' : '创建' }}
+                </button>
+                <button @click="showCreateRoom = false"
+                        class="bg-gray-300 hover:bg-gray-400 px-4 py-2 rounded text-sm">取消</button>
+            </div>
+            <div v-if="createRoomMsg" class="text-sm" :class="createRoomOk ? 'text-green-600' : 'text-red-500'">
+                {{ createRoomMsg }}
+            </div>
+        </div>
+
+        <!-- 房间列表 -->
+        <div v-if="rooms.length === 0" class="text-sm text-gray-400 text-center py-8">
+            暂无房间。点击上方「新建房间」添加第一个直播间。
+        </div>
+        <div v-for="r in rooms" :key="r.room_id"
+             class="border rounded-lg p-4 flex items-center justify-between"
+             :class="r.status==='running' ? 'border-green-300 bg-green-50' : 'border-gray-200'">
+            <div class="flex-1">
+                <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full inline-block"
+                          :class="r.status==='running' ? 'bg-green-500' : 'bg-gray-400'"></span>
+                    <span class="font-bold text-sm">{{ r.bot_name || '未命名' }}</span>
+                    <span class="text-xs text-gray-400">#{{ r.room_id }}</span>
+                </div>
+                <div class="text-xs text-gray-500 mt-1">
+                    UID: {{ r.anchor_uid }} | 端口: {{ r.port }} | 状态: {{ r.status === 'running' ? '🟢 运行中' : (r.status === 'stopped' ? '⏹️ 已停止' : `❓ ${r.status}`) }}
+                </div>
+            </div>
+            <div class="flex gap-2 items-center">
+                <button @click="editRoomConfig(r.room_id)"
+                        class="text-blue-500 hover:text-blue-700 text-sm underline">配置</button>
+                <button v-if="r.status !== 'running'"
+                        @click="startRoom(r.room_id)"
+                        class="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded text-xs">启动</button>
+                <button v-if="r.status === 'running'"
+                        @click="stopRoom(r.room_id)"
+                        class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-xs">停止</button>
+                <button @click="deleteRoom(r.room_id, r.bot_name)"
+                        class="text-red-400 hover:text-red-600 text-sm underline">删除</button>
+            </div>
+        </div>
+
+        <!-- 房间详情 / 配置编辑 -->
+        <div v-if="editingRoom" class="border rounded-lg p-4 bg-gray-50 mt-4 space-y-3">
+            <h3 class="text-sm font-bold">⚙️ 房间配置 — {{ editingRoom }}</h3>
+            <div v-if="roomConfig" class="space-y-2">
+                <div class="grid grid-cols-2 gap-3">
+                    <label class="text-xs text-gray-500">主播 UID
+                        <input type="number" v-model.number="roomConfig.anchor_uid" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">直播间号
+                        <input type="number" v-model.number="roomConfig.room_display_id" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">Web 端口
+                        <input type="number" v-model.number="roomConfig.web_ui.port" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">机器人名称
+                        <input type="text" v-model="roomConfig.bot_name" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                </div>
+                <div class="flex gap-2">
+                    <button @click="saveRoomConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
+                        保存配置
+                    </button>
+                    <button @click="editingRoom = null; roomConfig = null;"
+                            class="bg-gray-300 hover:bg-gray-400 px-4 py-2 rounded text-sm">关闭</button>
+                </div>
+                <div v-if="roomSaveMsg" class="text-sm" :class="roomSaveOk ? 'text-green-600' : 'text-red-500'">{{ roomSaveMsg }}</div>
+            </div>
+            <div v-else class="text-sm text-gray-400">加载中...</div>
+        </div>
+    </div>
+</div>
+
+
 <!-- ══════ 帮助页面 ══════ -->
 <div v-if="tab==='help'" class="max-w-3xl mx-auto">
     <div class="bg-white p-6 rounded-xl shadow-sm space-y-6 text-sm leading-relaxed">
@@ -1447,6 +1761,21 @@ createApp({
         // Manage
         const delDate = ref('');
         const delResult = ref('');
+
+        // Room Management
+        const rooms = ref([]);
+        const showCreateRoom = ref(false);
+        const newRoomUid = ref(0);
+        const newRoomName = ref('');
+        const newRoomPort = ref(8001);
+        const newRoomDisplayId = ref(0);
+        const creatingRoom = ref(false);
+        const createRoomMsg = ref('');
+        const createRoomOk = ref(false);
+        const editingRoom = ref(null);
+        const roomConfig = ref(null);
+        const roomSaveMsg = ref('');
+        const roomSaveOk = ref(false);
 
         // LLM Config
         const llmEnabled = ref(false);
@@ -1761,6 +2090,7 @@ createApp({
         // 自动加载配置
         loadLlmConfig();
         loadGeneralConfig();
+        loadRooms();
 
         // ── 动态标题 ──
         watch(botName, (name) => {
@@ -1858,6 +2188,127 @@ createApp({
             } catch(e) {
                 cfgSaveMsg.value = '保存失败: ' + e.message;
                 cfgSaveOk.value = false;
+            }
+        }
+
+        // ── Room Management ──
+        async function loadRooms() {
+            try {
+                const res = await fetch('/api/rooms', {credentials: 'include'});
+                if (res.status === 401) { loggedIn.value = false; return; }
+                if (!res.ok) return;
+                const data = await res.json();
+                rooms.value = data.rooms || [];
+            } catch(e) { /* ignore */ }
+        }
+        async function createRoom() {
+            if (!newRoomUid.value) { createRoomMsg.value = '请填写主播 UID'; createRoomOk.value = false; return; }
+            creatingRoom.value = true;
+            createRoomMsg.value = '';
+            try {
+                const body = {
+                    anchor_uid: newRoomUid.value,
+                    bot_name: newRoomName.value || ('文文' + String(newRoomUid.value).slice(0,4)),
+                    port: newRoomPort.value || 8001,
+                };
+                if (newRoomDisplayId.value) body.room_display_id = newRoomDisplayId.value;
+                const res = await fetch('/api/rooms', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    credentials: 'include',
+                    body: JSON.stringify(body),
+                });
+                if (res.status === 401) { loggedIn.value = false; return; }
+                const data = await res.json();
+                if (data.ok) {
+                    createRoomMsg.value = `✅ 房间 ${data.room_id}（${data.room_display_id}）创建成功！`;
+                    createRoomOk.value = true;
+                    showCreateRoom.value = false;
+                    newRoomUid.value = 0;
+                    newRoomName.value = '';
+                    newRoomPort.value = 8001;
+                    newRoomDisplayId.value = 0;
+                    await loadRooms();
+                } else {
+                    createRoomMsg.value = '❌ ' + (data.error || '创建失败');
+                    createRoomOk.value = false;
+                }
+            } catch(e) {
+                createRoomMsg.value = '❌ 创建失败: ' + e.message;
+                createRoomOk.value = false;
+            } finally {
+                creatingRoom.value = false;
+            }
+        }
+        async function startRoom(roomId) {
+            if (!confirm(`确定启动房间 ${roomId}？`)) return;
+            try {
+                const res = await fetch(`/api/rooms/${roomId}/start`, {
+                    method: 'POST', credentials: 'include',
+                });
+                if (!res.ok) throw new Error((await res.text()).slice(0,80));
+                await loadRooms();
+            } catch(e) { alert('启动失败: ' + e.message); }
+        }
+        async function stopRoom(roomId) {
+            if (!confirm(`确定停止房间 ${roomId}？`)) return;
+            try {
+                const res = await fetch(`/api/rooms/${roomId}/stop`, {
+                    method: 'POST', credentials: 'include',
+                });
+                if (!res.ok) throw new Error((await res.text()).slice(0,80));
+                await loadRooms();
+            } catch(e) { alert('停止失败: ' + e.message); }
+        }
+        async function deleteRoom(roomId, name) {
+            if (!confirm(`⚠️ 确定删除房间「${name || roomId}」（${roomId}）？\n这将停止服务并删除所有数据！`)) return;
+            try {
+                const res = await fetch(`/api/rooms/${roomId}`, {
+                    method: 'DELETE', credentials: 'include',
+                });
+                if (!res.ok) throw new Error((await res.text()).slice(0,80));
+                editingRoom.value = null;
+                roomConfig.value = null;
+                await loadRooms();
+            } catch(e) { alert('删除失败: ' + e.message); }
+        }
+        async function editRoomConfig(roomId) {
+            editingRoom.value = roomId;
+            roomConfig.value = null;
+            roomSaveMsg.value = '';
+            try {
+                const res = await fetch(`/api/rooms/${roomId}/config`, {credentials: 'include'});
+                if (res.status === 401) { loggedIn.value = false; return; }
+                if (!res.ok) throw new Error((await res.text()).slice(0,80));
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+                roomConfig.value = data;
+            } catch(e) { alert('加载配置失败: ' + e.message); }
+        }
+        async function saveRoomConfig() {
+            if (!roomConfig.value || !editingRoom.value) return;
+            roomSaveMsg.value = '';
+            try {
+                const res = await fetch(`/api/rooms/${editingRoom.value}/config`, {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    credentials: 'include',
+                    body: JSON.stringify(roomConfig.value),
+                });
+                if (res.status === 401) { loggedIn.value = false; return; }
+                if (!res.ok) throw new Error((await res.text()).slice(0,80));
+                const data = await res.json();
+                if (data.ok) {
+                    roomSaveMsg.value = '✅ 已保存';
+                    roomSaveOk.value = true;
+                    await loadRooms();
+                } else {
+                    roomSaveMsg.value = '❌ 保存失败';
+                    roomSaveOk.value = false;
+                }
+            } catch(e) {
+                roomSaveMsg.value = '❌ ' + e.message;
+                roomSaveOk.value = false;
             }
         }
 

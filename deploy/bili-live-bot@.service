@@ -1,0 +1,16 @@
+[Unit]
+Description=Bilibili Live Robot - Room %i
+After=network.target
+PartOf=bili-live-bot@%i.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/ayabot
+ExecStart=/root/ayabot/.venv/bin/python -m app.main --room %i
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
