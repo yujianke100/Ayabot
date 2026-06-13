@@ -1,5 +1,5 @@
-room_display_id: 123456
-anchor_uid: 1000000
+room_display_id: 0
+anchor_uid: 0
 
 credential:
   sessdata: ""
@@ -9,35 +9,26 @@ credential:
 
 features:
   welcome_enabled: true
-  welcome_template: "Welcome {uname}"
+  welcome_template: "欢迎 {uname} 来到直播间喵~"
   thanks_enabled: true
-  thanks_template: "感谢 {uname} 的 {gift_name} x{gift_num}"
+  thanks_template: "感谢 {uname} 送出的 {gift_name} x{gift_num}"
   blindbox_enabled: true
   allow_admin_as_anchor: false
   guard_thanks_enabled: true
-  guard_thanks_template_captain: "Thanks {uname} for buying Captain x{months}"
-  guard_thanks_template_commander: "Thanks {uname} for buying Commander x{months}"
-  guard_thanks_template_governor: "Thanks {uname} for buying Governor x{months}"
-  guard_thanks_template_default: "Thanks {uname} for guard support ({guard_type}) x{months}"
-  connected_message: "机器人已上线～"
+  guard_thanks_template_captain: "感谢 {uname} 开通舰长 x{months}"
+  guard_thanks_template_commander: "感谢 {uname} 开通提督 x{months}"
+  guard_thanks_template_governor: "感谢 {uname} 开通总督 x{months}"
+  guard_thanks_template_default: "感谢 {uname} 的大航海 ({guard_type}) x{months}"
+  connected_message: "机器人已上线~"
   connected_message_enabled: true
-  anchor_exclusive_reply:
-    - trigger_keyword: "^ayabot"
-      reply_template: "在的喵，找ayabot有什么事吗？"
-      is_regex: true
-    - trigger_keyword: "下班"
-      reply_template: "主播辛苦了喵！"
+  anchor_exclusive_reply: []
   keyword_reply:
     enabled: false
     cooldown: 30
-    rules:
-      - keywords: ["价格", "多少钱", "怎么买"]
-        reply: "价格请私信主播～"
-        match_mode: "contains"
-      - keywords: ["群", "QQ群", "粉丝群"]
-        reply: "粉丝群：123456789"
-      - keywords: ["点歌"]
-        reply: "暂不支持点歌哦"
+    rules: []
+  periodic_message_enabled: true
+  periodic_message_interval_seconds: 600
+  periodic_message_template: "点个关注不迷路喵~"
 
 cooldown:
   welcome_user_seconds: 600
@@ -67,10 +58,10 @@ web_ui:
   enabled: true
   host: "0.0.0.0"
   port: 8000
-  username: "wenwen"
-  password: "31415926"
+  username: "admin"
+  password: "admin123"
   session_timeout: 3600
-  bot_name: "ayabot"
+  bot_name: "bot"
 
 llm:
   enabled: false
@@ -78,11 +69,11 @@ llm:
   api_key: ""
   base_url: "https://api.openai.com/v1"
   model: "gpt-4o-mini"
-  wake_word: "ayabot"
+  wake_word: "bot"
   temperature: 0.7
   top_p: 0.9
   max_tokens: 150
-  system_prompt: "你是ayabot，一个可爱温柔的虚拟主播助手。你的任务是在直播间用弹幕和观众互动。"
+  system_prompt: "你是bot，一个直播间弹幕聊天机器人。你的任务是在直播间用弹幕和观众互动。"
   context:
     enabled: true
     mode: "isolated"

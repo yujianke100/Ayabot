@@ -1040,11 +1040,11 @@ async def api_create_room(request: Request):
     if cfg_path.exists():
         return JSONResponse({"error": f"房间 {room_id} 已存在"}, status_code=409)
 
-    # 从根 config.yaml 复制模板
+    # 从 config.example.yaml 复制模板（优先），降级到根 config.yaml
     import shutil
     root_cfg = Path(_ROOMS_BASE_DIR).resolve() / "config.yaml"
-    alt_cfg = Path(_ROOMS_BASE_DIR).resolve() / "config.example.yaml"
-    src = root_cfg if root_cfg.exists() else (alt_cfg if alt_cfg.exists() else None)
+    example_cfg = Path(_ROOMS_BASE_DIR).resolve() / "config.example.yaml"
+    src = example_cfg if example_cfg.exists() else (root_cfg if root_cfg.exists() else None)
     if not src:
         return JSONResponse({"error": "根目录 config.yaml 不存在"}, status_code=500)
 
