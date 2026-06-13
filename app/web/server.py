@@ -1465,8 +1465,8 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
 
         cur.execute(f"""
             SELECT uid, uname,
-                   sum(CASE WHEN is_blind_box=1 THEN actual_value ELSE CAST(json_extract(raw_json, '$.total_coin') AS INTEGER) END) as total,
-                   sum(profit_value) as total_profit
+                   ROUND(CAST(SUM(CASE WHEN is_blind_box=1 THEN actual_value ELSE CAST(json_extract(raw_json, '$.total_coin') AS INTEGER) END) AS REAL) / 100.0, 2) as total,
+                   ROUND(CAST(SUM(profit_value) AS REAL) / 100.0, 2) as total_profit
             FROM gift_events WHERE {where_sql}
             GROUP BY uid ORDER BY total DESC LIMIT 50
         """, params)
@@ -1510,6 +1510,8 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
 
         import json as _json
         results = []
+        # 合并字典：key = (batch_combo_id, gift_name) → merged entry
+        merged = {}
         for r in rows:
             raw = {}
             if r[8]:
@@ -1517,7 +1519,7 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
                     raw = _json.loads(r[8])
                 except Exception:
                     raw = {}
-            # 从 raw_json 解析实际价格、舰长等级、头像、礼物图标
+            # 从 raw_json 解析实际价格、舰长等级、头像、礼物图标、batch_combo_id
             guard_level = 0
             avatar = ""
             gift_icon = ""
@@ -1525,8 +1527,11 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
             is_blind = bool(r[6])
 
             if not is_blind and raw:
-                # 一般礼物：从 total_coin 取实际价值
-                actual_value = int(raw.get("total_coin", 0) or 0)
+                # 一般礼物：从 total_coin 取实际价值，转为元
+                actual_value = round(int(raw.get("total_coin", 0) or 0) / 100.0, 2)
+            else:
+                # 盲盒：DB actual_value 已经是分，转为元
+                actual_value = round(actual_value / 100.0, 2)
 
             if raw:
                 sender_info = raw.get("sender_uinfo", {}) or {}
@@ -1541,15 +1546,24 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
                 gift_info = raw.get("gift_info", {}) or {}
                 gift_icon = gift_info.get("img_basic", "") or gift_info.get("webp", "") or ""
 
-            results.append({
-                "uid": r[0], "uname": r[1], "gift_name": r[2],
-                "gift_num": r[3], "actual_value": actual_value,
-                "ts": r[5], "is_blind_box": is_blind,
-                "id": r[7],
-                "guard_level": guard_level,
-                "avatar": avatar,
-                "gift_icon": gift_icon,
-            })
+            # 合并 key：batch_combo_id（短时间相同礼物合并）
+            batch_key = r[8] and _json.loads(r[8]).get("batch_combo_id", "") or ""
+            merge_key = (batch_key, r[2])
+
+            if merge_key in merged:
+                merged[merge_key]["gift_num"] += r[3]
+            else:
+                merged[merge_key] = {
+                    "uid": r[0], "uname": r[1], "gift_name": r[2],
+                    "gift_num": r[3], "actual_value": actual_value,
+                    "ts": r[5], "is_blind_box": is_blind,
+                    "id": r[7],
+                    "guard_level": guard_level,
+                    "avatar": avatar,
+                    "gift_icon": gift_icon,
+                }
+
+        results = list(merged.values())
         return results
     except Exception:
         return []
