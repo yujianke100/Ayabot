@@ -1176,9 +1176,12 @@ async def api_account_login_status(session_id: str):
 
     try:
         if qr.has_done():
+            logger.info("account QR poll: has_done true")
             return {"state": "done"}
 
         state = await qr.check_state()
+
+        logger.info("account QR poll: session=%s.. state=%s elapsed=%.1fs", session_id[:8], state.value if hasattr(state, 'value') else str(state), elapsed)
 
         if state == login_v2.QrCodeLoginEvents.TIMEOUT:
             _BILI_LOGIN_SESSIONS.pop(session_id, None)
