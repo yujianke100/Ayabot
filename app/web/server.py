@@ -1170,6 +1170,10 @@ async def api_account_login_status(session_id: str):
 
     qr = sess["qr"]
 
+    # 生成后至少过 5 秒才认可 SCAN 状态，避免刚生成时的误判
+    import time as _time2
+    elapsed = _time2.time() - sess.get("created_at", 0)
+
     try:
         if qr.has_done():
             return {"state": "done"}
@@ -1180,9 +1184,15 @@ async def api_account_login_status(session_id: str):
             _BILI_LOGIN_SESSIONS.pop(session_id, None)
             return {"state": "timeout"}
         if state == login_v2.QrCodeLoginEvents.SCAN:
-            return {"state": "scanned"}
+            if elapsed >= 5:
+                return {"state": "scanned"}
+            else:
+                return {"state": "waiting"}
         if state == login_v2.QrCodeLoginEvents.CONF:
-            return {"state": "done"}
+            if elapsed >= 5:
+                return {"state": "done"}
+            else:
+                return {"state": "scanned"}
 
         return {"state": "waiting"}
     except Exception as exc:
