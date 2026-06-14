@@ -41,7 +41,7 @@ python -m app.main
 
 > **端口被占用了？** 启动前运行 `export AYABOT_PORT=你想要的端口号` 即可修改。
 
-第一次启动时，机器人会在终端打印二维码，用 B 站 App 扫码登录。之后会自动保存凭据。
+首次启动后，在 WebUI → **B站账号** 中扫码登录即可。凭据会自动保存。
 
 ### 或用 Docker 跑
 
@@ -182,6 +182,23 @@ anchor_uid: 1000000                # ← 改成主播的 UID
 ```bash
 docker pull ghcr.io/yujianke100/ayabot:latest
 ```
+
+### 🇨🇳 国内镜像加速
+
+ghcr.io 国内拉取可能很慢，推荐以下方式：
+
+**方式一：通过 ghcr.io 镜像站拉取**
+
+```bash
+# 中科大 ghcr.io 镜像
+docker pull docker.mirrors.ustc.edu.cn/ghcr.io/yujianke100/ayabot:latest
+
+# 网易 ghcr.io 镜像
+docker pull hub-mirror.c.163.com/ghcr.io/yujianke100/ayabot:latest
+```
+
+**方式二：查询最新可用镜像站**
+→ [demo.kentxxq.com/app/mirror](https://demo.kentxxq.com/app/mirror)（实时检测国内各镜像站可用性）
 
 ---
 

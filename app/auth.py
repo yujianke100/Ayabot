@@ -31,10 +31,13 @@ class AuthManager:
         if not self.config.auth.auto_login:
             raise RuntimeError("No valid credential and auto_login is disabled")
 
-        self.logger.info("no valid credential found, start QR login in terminal")
-        credential = await self._qr_login()
-        self._save_credential(credential)
-        return credential
+        self.logger.info("no valid credential found")
+        # 终端不再打印二维码，用户需通过 WebUI "B站账号"功能扫码登录
+        raise RuntimeError(
+            "No valid B站 credential. "
+            "Please login via WebUI → B站账号 → 扫码登录, "
+            "then restart the room."
+        )
 
     def start_refresh_loop(self, credential: Credential) -> None:
         if self._refresh_task is not None:
@@ -122,13 +125,13 @@ class AuthManager:
             return False
 
     async def _qr_login(self) -> Credential:
+        """WebUI 账号管理已接管 QR 登录，此方法保留仅作兜底。"""
         qr_login = login_v2.QrCodeLogin(platform=login_v2.QrCodeLoginChannel.WEB)
         await qr_login.generate_qrcode()
 
-        print("\n========== Bilibili QR Login ==========")
-        print(qr_login.get_qrcode_terminal())
-        print("Use Bilibili app to scan and confirm login.")
-        print("======================================\n")
+        self.logger.info("qr login started — scan via WebUI → B站账号")
+        url = qr_login.get_qrcode_url()
+        self.logger.info("qrcode url: %s", url)
 
         last_state = None
         while not qr_login.has_done():
