@@ -1,7 +1,13 @@
 [Unit]
 Description=Bilibili Live Robot - Room %i
 After=network.target
-PartOf=bili-live-bot@%i.service
+
+# ╔══════════════════════════════════════════════════════════╗
+# ║  此文件为 systemd 部署可选方案                           ║
+# ║  新版 Ayabot 已内置 ProcessManager，WebUI 可直接管理    ║
+# ║  子进程，无需 systemd。以下配置仅用于生产服务器场景。     ║
+# ║  Windows / Docker / 本地开发：用 WebUI 启动/停止即可     ║
+# ╚══════════════════════════════════════════════════════════╝
 
 [Service]
 Type=simple
