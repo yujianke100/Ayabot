@@ -65,17 +65,13 @@ class LiveRobot:
         self._periodic_task: Optional[asyncio.Task[None]] = None
         self._keyword_reply_cooldown_ts: dict[int, float] = {}
 
-        self._like_counts: dict[int, int] = {}
-        self._like_thanked: set[int] = set()
-        self._share_template = config.features.share_template
-        self._like_template = config.features.like_template
-
         # 从配置读取唤醒词
         wake = getattr(config.llm, 'wake_word', 'ayabot')
         _set_wake_word(wake)
 
     async def run(self) -> None:
         self.logger.info("robot started, room=%s", self.config.room_display_id)
+        self._poll_counter = 0
         self._msg_worker_task = asyncio.create_task(self._message_worker())
         self._periodic_task = asyncio.create_task(self._periodic_message_loop())
 
@@ -87,6 +83,9 @@ class LiveRobot:
                 if (not is_live) and self._danmaku is not None:
                     await self._stop_danmaku()
 
+                self._poll_counter = (self._poll_counter + 1) % 10
+                if self._poll_counter == 0:
+                    self.logger.info("poll: live=%s danmaku=%s", is_live, self._danmaku is not None)
                 await asyncio.sleep(self.config.runtime.poll_interval_seconds)
         finally:
             await self.shutdown()
@@ -133,8 +132,6 @@ class LiveRobot:
 
         self._danmaku.on("ROOM_ADMINS")(self._on_room_admins)
         self._danmaku.on("DANMU_MSG")(self._on_danmaku)
-
-        self._danmaku.on("LIKE_INFO_V3_CLICK")(self._on_like)
 
         # Log all events for debugging blindbox and unknown event types
         self._danmaku.on("ALL")(self._on_all_events)
@@ -264,7 +261,7 @@ class LiveRobot:
                         # Gradually reduce interval back to min after success
                         if current_interval > min_interval:
                             current_interval = max(min_interval, current_interval * 0.8)
-                        self.logger.debug(
+                        self.logger.info(
                             "send danmaku success: reply_uid=%s text=%s", msg.reply_uid, msg.text,
                         )
                         break
@@ -307,10 +304,6 @@ class LiveRobot:
 
         data = event.get("data", {})
         msg_type = data.get("msg_type") if isinstance(data, dict) else None
-        if msg_type == 3:
-            await self._on_share(uid, uname)
-            return
-
         if not self._welcome_enabled:
             return
 
@@ -324,8 +317,12 @@ class LiveRobot:
         # Resolve template: uid-specific -> guard-level -> default
         template = None
         wtfu = self.config.features.welcome_templates_for_uids
-        if wtfu and uid in wtfu:
-            template = wtfu[uid]
+        if wtfu:
+            # YAML 存储的键可能是字符串，统一转 int 再查
+            if uid in wtfu:
+                template = wtfu[uid]
+            elif str(uid) in wtfu:
+                template = wtfu[str(uid)]
 
         if template is None:
             guard_level = self._get_guard_level(event)
@@ -493,12 +490,23 @@ class LiveRobot:
                     await self._enqueue_reply(text=rule.reply_template, reply_uid=uid)
                     return
 
-        command = _parse_command(text)
+        command = _parse_command(text, allow_bare=self.config.features.allow_bare_commands)
         if command is None:
             self.logger.debug("danmaku is not command: uid=%s text=%s", uid, text)
+
+            # ── AI回复免#触发弹幕开头匹配唤醒词 ──
+            wake = self.config.llm.wake_word or _CURRENT_WAKE_WORD
+            if self.config.features.llm_bare_trigger and text.startswith(wake):
+                command = ("llm_chat", text[len(wake):].strip())
+                self.logger.debug("bare llm trigger matched: uid=%s text=%s", uid, text)
+            # ── 包含关键词触发AI回复（需 allow_bare_commands） ──
+            elif self.config.features.allow_bare_commands and self.config.features.llm_keyword_trigger and wake in text:
+                command = ("llm_chat", text)
+                self.logger.debug("keyword llm trigger matched: uid=%s text=%s", uid, text)
+
+        if command is None:
             # Check keyword-based auto-reply
             kr = self.config.features.keyword_reply
-            self.logger.debug("keyword_reply config: enabled=%s rules_count=%s", kr.enabled, len(kr.rules))
             if kr.enabled and kr.rules:
                 reply = _match_keyword_rule(text, kr.rules, uid=uid)
                 if reply:
@@ -515,33 +523,45 @@ class LiveRobot:
 
         name, arg = command
         self.logger.debug("command parsed: uid=%s name=%s arg=%s", uid, name, arg)
+
+        # 数字转中文辅助
+        def _num(s: str) -> str:
+            if self.config.features.use_chinese_numbers:
+                return _to_chinese_num(s)
+            return s
+
         if name == "blindbox_me":
             self.logger.info("blindbox stats requested: uid=%s arg=%s", uid, arg)
             now = datetime.now()
             month_key = now.strftime("%Y-%m")
-            month_label = f"{now.month}月"
             if arg:
                 result = self.store.get_user_monthly_blindbox_by_uname(month=month_key, uname=arg)
                 if result is None:
-                    await self._enqueue_reply(text=f"未找到{arg}的盲盒记录", reply_uid=uid)
+                    reply = f"未找到{arg}的盲盒记录"
+                    self.logger.info("blindbox reply: %s", reply)
+                    await self._enqueue_reply(text=reply, reply_uid=uid)
                     return
                 _uid, blind_count, cost_total, actual_total, profit_total = result
-                text_out = f"{month_label}该用户盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
+                tmpl = self.config.features.blindbox_result_monthly
+                text_out = tmpl.replace("{count}", _num(str(blind_count))).replace("{cost}", _num(str(cost_total))).replace("{profit}", _num(str(profit_total)))
             else:
-                # If anchor or admin, show total stats of the room
                 if uid == self.config.anchor_uid or self._has_control_permission(uid, moderator_hint):
                     total = self.store.get_monthly_total_blindbox(month=month_key)
                     blind_count, cost_total, actual_total, profit_total = total
-                    text_out = f"{month_label}本直播间盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
+                    tmpl = self.config.features.blindbox_result_monthly
+                    text_out = tmpl.replace("{count}", _num(str(blind_count))).replace("{cost}", _num(str(cost_total))).replace("{profit}", _num(str(profit_total)))
                 else:
                     row = self.store.get_user_monthly_blindbox(month=month_key, uid=uid)
                     if row is None:
                         gift_event_count, _ = self.store.get_user_monthly_gift_activity(month=month_key, uid=uid)
-                        text_out = f"{month_label} 暂无盲盒记录" if gift_event_count > 0 else f"{month_label} 无送礼记录"
+                        text_out = self.config.features.blindbox_no_blindbox if gift_event_count > 0 else self.config.features.blindbox_no_gift
+                        self.logger.info("blindbox reply: %s", text_out)
                         await self._enqueue_reply(text=text_out, reply_uid=uid)
                         return
                     blind_count, cost_total, actual_total, profit_total = row
-                    text_out = f"{month_label}盲盒{blind_count}个，支出{cost_total}，收益{profit_total}"
+                    tmpl = self.config.features.blindbox_result_monthly
+                    text_out = tmpl.replace("{count}", _num(str(blind_count))).replace("{cost}", _num(str(cost_total))).replace("{profit}", _num(str(profit_total)))
+            self.logger.info("blindbox reply: %s", text_out)
             await self._enqueue_reply(text=text_out, reply_uid=uid)
             return
 
@@ -553,24 +573,31 @@ class LiveRobot:
             if arg:
                 result = self.store.get_today_user_blindbox_by_uname(today_start, today_end, arg)
                 if result is None:
-                    await self._enqueue_reply(text=f"未找到{arg}今日的盲盒记录", reply_uid=uid)
+                    reply = f"未找到{arg}今日的盲盒记录"
+                    self.logger.info("today blindbox reply: %s", reply)
+                    await self._enqueue_reply(text=reply, reply_uid=uid)
                     return
                 _uid, blind_count, cost_total, actual_total, profit_total = result
-                text_out = f"今日该用户盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
+                tmpl = self.config.features.blindbox_result_today
+                text_out = tmpl.replace("{count}", _num(str(blind_count))).replace("{cost}", _num(str(cost_total))).replace("{profit}", _num(str(profit_total)))
             else:
                 if uid == self.config.anchor_uid or self._has_control_permission(uid, moderator_hint):
                     total = self.store.get_today_total_blindbox(today_start, today_end)
                     blind_count, cost_total, actual_total, profit_total = total
-                    text_out = f"今日本直播间盲盒{blind_count}个，总支出{cost_total}，总收益{profit_total}"
+                    tmpl = self.config.features.blindbox_result_today
+                    text_out = tmpl.replace("{count}", _num(str(blind_count))).replace("{cost}", _num(str(cost_total))).replace("{profit}", _num(str(profit_total)))
                 else:
                     row = self.store.get_today_user_blindbox(today_start, today_end, uid)
                     if row is None:
                         gift_event_count, _ = self.store.get_today_user_gift_activity(today_start, today_end, uid)
-                        text_out = "今日暂无盲盒记录" if gift_event_count > 0 else "今日无送礼记录"
+                        text_out = self.config.features.blindbox_no_blindbox if gift_event_count > 0 else self.config.features.blindbox_no_gift
+                        self.logger.info("today blindbox reply: %s", text_out)
                         await self._enqueue_reply(text=text_out, reply_uid=uid)
                         return
                     blind_count, cost_total, actual_total, profit_total = row
-                    text_out = f"今日盲盒{blind_count}个，支出{cost_total}，收益{profit_total}"
+                    tmpl = self.config.features.blindbox_result_today
+                    text_out = tmpl.replace("{count}", _num(str(blind_count))).replace("{cost}", _num(str(cost_total))).replace("{profit}", _num(str(profit_total)))
+            self.logger.info("today blindbox reply: %s", text_out)
             await self._enqueue_reply(text=text_out, reply_uid=uid)
             return
 
@@ -621,8 +648,11 @@ class LiveRobot:
             )
 
             if not reply:
+                self.logger.info("llm reply: (empty) -> fallback message")
                 await self._enqueue_reply(text=_CURRENT_WAKE_WORD + "不知道该怎么回答呢~", reply_uid=uid)
                 return
+
+            self.logger.info("llm reply: %s", reply)
 
             # 保存到上下文
             if ctx_enabled:
@@ -633,9 +663,9 @@ class LiveRobot:
                     history = history[-ctx_max:]
                 self._chat_contexts[ctx_key] = history
 
-            # Truncate to fit B站 danmaku limit (~30 chars)
-            if len(reply) > 27:
-                reply = reply[:27] + "..."
+            # Truncate to fit B站 danmaku limit (~40 chars)
+            if len(reply) > 37:
+                reply = reply[:37] + "..."
             await self._enqueue_reply(text=reply, reply_uid=uid)
             return
 
@@ -727,7 +757,7 @@ class LiveRobot:
 
         # Suppress high-frequency / known events to reduce log noise
         noisy_prefixes = ("SUPER_CHAT", "HOT_RANK_", "ONLINE_RANK_",
-                          "LIKE_INFO_V3_", "POPULARITY_")
+                          "POPULARITY_")
         if event_type.startswith(noisy_prefixes):
             return
         noisy_exact = ("VIEW", "INTERACT_WORD_V2", "WATCHED_CHANGE",
@@ -736,7 +766,8 @@ class LiveRobot:
                        "COMBO_RESOURCE", "COMBO_SEND", "ANIMATION",
                        "SPECIAL_GIFT", "VERIFICATION_SUCCESSFUL",
                        "UNIVERSAL_EVENT_GIFT", "UNIVERSAL_EVENT_GIFT_V2",
-                       "GUARD_BUY", "USER_TOAST_MSG", "USER_TOAST_MSG_V2")
+                       "GUARD_BUY", "USER_TOAST_MSG", "USER_TOAST_MSG_V2",
+                       "LIKE_INFO_V3_CLICK", "LIKE_INFO_V3_UPDATE")
         if event_type in noisy_exact:
             return
         self.logger.debug("unhandled event: type=%s", event_type)
@@ -760,30 +791,6 @@ class LiveRobot:
 
     async def _on_connected(self, event: dict[str, Any]) -> None:
         await self._enqueue_message(text=self.config.features.connected_message, reply_uid=None)
-
-    async def _on_share(self, uid: int, uname: str) -> None:
-        if not self.config.features.share_thanks_enabled:
-            return
-        text = self._share_template.replace("{uname}", uname)
-        await self._enqueue_message(text=text, reply_uid=uid)
-
-    async def _on_like(self, event: dict[str, Any]) -> None:
-        if not self.config.features.like_thanks_enabled:
-            return
-        data = event.get("data", {})
-        if not isinstance(data, dict):
-            return
-        uid = _safe_int(data.get("uid") or 0)
-        uname = str(data.get("uname", ""))
-        if uid <= 0 or not uname:
-            return
-        if uid in self._like_thanked:
-            return
-        self._like_counts[uid] = self._like_counts.get(uid, 0) + 1
-        if self._like_counts[uid] >= 50:
-            text = self._like_template.replace("{uname}", uname)
-            await self._enqueue_message(text=text, reply_uid=uid)
-            self._like_thanked.add(uid)
 
     def _has_control_permission(self, uid: int, moderator_hint: bool) -> bool:
         if uid == self.config.anchor_uid:
@@ -851,6 +858,13 @@ def _safe_int(value: Any) -> int:
         return int(value)
     except Exception:  # noqa: BLE001
         return 0
+
+
+def _to_chinese_num(text: str) -> str:
+    """将字符串中的阿拉伯数字替换为中文数字，避免 B站 数字拦截."""
+    mapping = {"0": "零", "1": "一", "2": "二", "3": "三", "4": "四",
+               "5": "五", "6": "六", "7": "七", "8": "八", "9": "九"}
+    return "".join(mapping.get(ch, ch) for ch in text)
 
 
 def _extract_live_status(data: Any) -> bool:
@@ -1043,13 +1057,31 @@ def _parse_danmaku_user_and_text(event: dict[str, Any]) -> Optional[tuple[int, s
     return uid, uname, text.strip(), moderator_hint
 
 
-def _parse_command(text: str) -> Optional[tuple[str, str]]:
+def _parse_command(text: str, allow_bare: bool = False) -> Optional[tuple[str, str]]:
     s = text.strip()
-    # Normalize full-width '#' and spaces
+    # Normalize full-width '#'
     if s.startswith("＃"):
         s = "#" + s[1:]
-    
-    # Create a normalized compact version for simple commands
+
+    had_hash = s.startswith("#")
+
+    # Try matching with the # prefix
+    result = _match_hash_command(s)
+    if result is not None:
+        return result
+
+    # Bare mode: also try with # prepended (only if original text didn't have #)
+    if allow_bare and not had_hash:
+        return _match_hash_command("#" + s)
+
+    return None
+
+
+def _match_hash_command(s: str) -> Optional[tuple[str, str]]:
+    """匹配 # 开头的指令模式。s 已经是规范化后的字符串。"""
+    if not s.startswith("#"):
+        return None
+
     compact = "".join(s.split()).replace("：", ":")
 
     # Command: #{wake_word} (e.g. #文文)
@@ -1058,16 +1090,13 @@ def _parse_command(text: str) -> Optional[tuple[str, str]]:
     if compact == wake_hash or compact.startswith(wake_hash):
         rest = ""
         if compact == wake_hash:
-            # Just "#{wake}" with nothing after it
             pass
         elif compact.startswith(f"{wake_hash}:"):
             rest = compact[len(f"{wake_hash}:"):]
         elif compact.startswith(wake_hash):
             rest = compact[len(wake_hash):]
-        # Also handle space-separated: "#{wake} 你好"
         if not rest and (s.startswith(f"{wake_hash} ") or s.startswith(f"＃{wake} ")):
             rest = s.split(" ", 1)[1] if " " in s else ""
-        # Also handle full-width colon
         if not rest and "：" in s:
             parts = s.split("：", 1)
             if parts[0].strip() in (wake_hash, f"＃{wake}"):
@@ -1076,60 +1105,34 @@ def _parse_command(text: str) -> Optional[tuple[str, str]]:
             return "llm_chat", ""
         return "llm_chat", rest.strip()
 
-    # Command: #帮助
     if compact in ("#帮助", "#help"):
         return "help", ""
-
-    # Command: #签到
     if compact == "#签到":
         return "checkin", ""
-
-    # Command: #抽签
     if compact == "#抽签":
         return "fortune", ""
-
-    # Command: #盲盒统计 / #盲盒我的
     if compact in ("#盲盒统计", "#盲盒我的"):
         return "blindbox_me", ""
-    
-    # Command: #盲盒统计:名字 or #盲盒统计 名字
     if compact.startswith("#盲盒统计:"):
         return "blindbox_me", compact[len("#盲盒统计:"):]
-    
-    # Fallback for "#盲盒统计 名字" where compact would be "#盲盒统计名字"
     if s.startswith("#盲盒统计 ") or s.startswith("＃盲盒统计 "):
         return "blindbox_me", s[len("#盲盒统计 "):].strip()
-
-    # Command: #今日盲盒
     if compact == "#今日盲盒":
         return "today_blindbox", ""
-
-    # Command: #今日盲盒:用户名
     if compact.startswith("#今日盲盒:"):
         return "today_blindbox", compact[len("#今日盲盒:"):]
-
-    # Fallback: #今日盲盒 用户名
     if s.startswith("#今日盲盒 ") or s.startswith("＃今日盲盒 "):
         return "today_blindbox", s[len("#今日盲盒 "):].strip()
-
-    # Command: #本月盲盒 — same as #盲盒统计
     if compact == "#本月盲盒":
         return "blindbox_me", ""
-
-    # Command: #本月盲盒:用户名
     if compact.startswith("#本月盲盒:"):
         return "blindbox_me", compact[len("#本月盲盒:"):]
-
-    # Fallback: #本月盲盒 用户名
     if s.startswith("#本月盲盒 ") or s.startswith("＃本月盲盒 "):
         return "blindbox_me", s[len("#本月盲盒 "):].strip()
-
     if compact in ("#欢迎:开", "＃欢迎:开"):
         return "welcome_on", ""
     if compact in ("#欢迎:关", "＃欢迎:关"):
         return "welcome_off", ""
-
-    # Flexible matching for commands with spaces
     if s == "#欢迎 开" or compact == "#欢迎开":
         return "welcome_on", ""
     if s == "#欢迎 关" or compact == "#欢迎关":

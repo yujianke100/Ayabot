@@ -19,10 +19,6 @@ features:
   guard_thanks_template_commander: "感谢 {uname} 开通提督 x{months}"
   guard_thanks_template_governor: "感谢 {uname} 开通总督 x{months}"
   guard_thanks_template_default: "感谢 {uname} 的大航海 ({guard_type}) x{months}"
-  share_thanks_enabled: true
-  share_template: "感谢分享直播间~"
-  like_thanks_enabled: true
-  like_template: "感谢50个点赞~"
   connected_message: "机器人已上线~"
   connected_message_enabled: true
   anchor_exclusive_reply: []
@@ -61,11 +57,11 @@ auth:
 web_ui:
   enabled: true
   host: "0.0.0.0"
-  port: 8000
-  username: "admin"
-  password: "admin123"
+  port: 19810                           # 监听端口，可通过环境变量 AYABOT_PORT 覆盖
+  # username: "ayabot"                  # 默认管理员账号（见 README）
+  # password: "123456"                  # 默认管理员密码（首次登录强制修改）
   session_timeout: 3600
-  bot_name: "bot"
+  bot_name: "ayabot"
 
 llm:
   enabled: false
@@ -73,11 +69,11 @@ llm:
   api_key: ""
   base_url: "https://api.openai.com/v1"
   model: "gpt-4o-mini"
-  wake_word: "bot"
+  wake_word: "ayabot"
   temperature: 0.7
   top_p: 0.9
   max_tokens: 150
-  system_prompt: "你是bot，一个直播间弹幕聊天机器人。你的任务是在直播间用弹幕和观众互动。"
+  system_prompt: "你是ayabot，一个可爱温柔的虚拟主播助手。所有回复必须控制在40字以内。"
   context:
     enabled: true
     mode: "isolated"

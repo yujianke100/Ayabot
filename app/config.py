@@ -47,11 +47,15 @@ class FeatureConfig:
     guard_welcome_templates: dict[str, str] | None = None     # captain/commander/governor -> template
     danmaku_log_enabled: bool = False
     danmaku_log_max_entries: int = 1000
-    share_thanks_enabled: bool = True
-    share_template: str = "感谢分享直播间~"
-    like_thanks_enabled: bool = True
-    like_template: str = "感谢50个点赞~"
+    blindbox_no_gift: str = "无送礼记录"  # 无任何送礼时的回复
+    blindbox_no_blindbox: str = "无盲盒记录"  # 有送礼但无盲盒时的回复
+    blindbox_result_monthly: str = "本月盲盒共{count}个，花费{cost}，收益{profit}"  # 本月盲盒统计
+    blindbox_result_today: str = "今日盲盒共{count}个，花费{cost}，收益{profit}"  # 今日盲盒统计
+    use_chinese_numbers: bool = False  # 数字转中文（避开数字拦截）
     uid_configs: list[dict] | None = None  # list of {uid, welcome_template, keyword_rules}
+    allow_bare_commands: bool = False  # 允许不带 # 前缀触发指令
+    llm_bare_trigger: bool = False  # AI回复单独免#：弹幕开头匹配唤醒词即触发
+    llm_keyword_trigger: bool = False  # 允许包含关键词就触发AI回复（需 AI免#前缀唤醒）
 
 
 @dataclass(slots=True)
@@ -134,7 +138,7 @@ class LLMConfig:
     temperature: float = 0.7
     top_p: float = 0.9
     max_tokens: int = 150
-    system_prompt: str = "你是ayabot，一个可爱温柔的虚拟主播助手。"
+    system_prompt: str = "你是ayabot，一个可爱温柔的虚拟主播助手。所有回复必须控制在40字以内。"
     context: LLMContextConfig = None    # type: ignore[assignment]
 
 
@@ -252,15 +256,19 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             periodic_message_enabled=bool(features.get("periodic_message_enabled", True)),
             periodic_message_interval_seconds=int(features.get("periodic_message_interval_seconds", 600)),
             periodic_message_template=str(features.get("periodic_message_template", "")),
-            welcome_templates_for_uids=features.get("welcome_templates_for_uids", None) or None,
+            welcome_templates_for_uids=_ensure_int_keys(features.get("welcome_templates_for_uids", None) or None),
             guard_welcome_templates=features.get("guard_welcome_templates", None) or None,
             danmaku_log_enabled=bool(features.get("danmaku_log_enabled", False)),
             danmaku_log_max_entries=int(features.get("danmaku_log_max_entries", 1000)),
-            share_thanks_enabled=bool(features.get("share_thanks_enabled", True)),
-            share_template=str(features.get("share_template", "感谢分享直播间~")),
-            like_thanks_enabled=bool(features.get("like_thanks_enabled", True)),
-            like_template=str(features.get("like_template", "感谢50个点赞~")),
             uid_configs=features.get("uid_configs", None) or None,
+            allow_bare_commands=bool(features.get("allow_bare_commands", False)),
+            llm_bare_trigger=bool(features.get("llm_bare_trigger", False)),
+            llm_keyword_trigger=bool(features.get("llm_keyword_trigger", False)),
+            blindbox_no_gift=str(features.get("blindbox_no_gift", "无送礼记录")),
+            blindbox_no_blindbox=str(features.get("blindbox_no_blindbox", "无盲盒记录")),
+            blindbox_result_monthly=str(features.get("blindbox_result_monthly", "本月盲盒共{count}个，花费{cost}，收益{profit}")),
+            blindbox_result_today=str(features.get("blindbox_result_today", "今日盲盒共{count}个，花费{cost}，收益{profit}")),
+            use_chinese_numbers=bool(features.get("use_chinese_numbers", False)),
         ),
         cooldown=CooldownConfig(
             welcome_user_seconds=int(cooldown.get("welcome_user_seconds", 600)),
@@ -287,9 +295,9 @@ def load_config(path: str = "config.yaml") -> AppConfig:
         web_ui=WebUIConfig(
             enabled=bool(web_ui.get("enabled", True)),
             host=str(web_ui.get("host", "0.0.0.0")),
-            port=int(web_ui.get("port", 8000)),
-            username=str(web_ui.get("username", "admin")),
-            password=str(web_ui.get("password", "admin")),
+            port=int(web_ui.get("port", 19810)),
+            username=str(web_ui.get("username", "ayabot")),
+            password=str(web_ui.get("password", "123456")),
             session_timeout=int(web_ui.get("session_timeout", 3600)),
             title=str(web_ui.get("title", "Ayabot")),
             bot_name=str(web_ui.get("bot_name", "bot")),
@@ -304,7 +312,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             temperature=float(llm.get("temperature", 0.7)),
             top_p=float(llm.get("top_p", 0.9)),
             max_tokens=int(llm.get("max_tokens", 150)),
-            system_prompt=str(llm.get("system_prompt", "你是ayabot，一个可爱温柔的虚拟主播助手。")),
+            system_prompt=str(llm.get("system_prompt", "你是ayabot，一个可爱温柔的虚拟主播助手。所有回复必须控制在40字以内。")),
             context=LLMContextConfig(
                 enabled=bool(llm_ctx.get("enabled", True)),
                 mode=str(llm_ctx.get("mode", "isolated")),
@@ -330,6 +338,19 @@ def _parse_anchor_reply(raw: Any) -> list[AnchorExclusiveRule]:
             is_regex=bool(item.get("is_regex", False)),
         ))
     return rules
+
+
+def _ensure_int_keys(d: dict | None) -> dict[int, str] | None:
+    """将 YAML 加载后可能为字符串的 dict 键统一转为 int."""
+    if not d:
+        return None
+    result: dict[int, str] = {}
+    for k, v in d.items():
+        try:
+            result[int(k)] = str(v)
+        except (ValueError, TypeError):
+            result[int(k) if isinstance(k, (int, str)) else 0] = str(v)
+    return result if result else None
 
 
 def config_to_dict(config: AppConfig) -> dict[str, Any]:
@@ -368,15 +389,51 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "guard_welcome_templates": config.features.guard_welcome_templates,
             "danmaku_log_enabled": config.features.danmaku_log_enabled,
             "danmaku_log_max_entries": config.features.danmaku_log_max_entries,
-            "share_thanks_enabled": config.features.share_thanks_enabled,
-            "share_template": config.features.share_template,
-            "like_thanks_enabled": config.features.like_thanks_enabled,
-            "like_template": config.features.like_template,
             "uid_configs": config.features.uid_configs,
+            "allow_bare_commands": config.features.allow_bare_commands,
+            "llm_bare_trigger": config.features.llm_bare_trigger,
+            "llm_keyword_trigger": config.features.llm_keyword_trigger,
+            "blindbox_no_gift": config.features.blindbox_no_gift,
+            "blindbox_no_blindbox": config.features.blindbox_no_blindbox,
+            "blindbox_result_monthly": config.features.blindbox_result_monthly,
+            "blindbox_result_today": config.features.blindbox_result_today,
+            "use_chinese_numbers": config.features.use_chinese_numbers,
         },
+        "keyword_reply": {
+            "enabled": config.features.keyword_reply.enabled,
+            "cooldown": config.features.keyword_reply.cooldown_seconds,
+            "rules": [
+                {
+                    "keywords": rule.keywords,
+                    "reply": rule.reply,
+                    "match_mode": rule.match_mode,
+                    "allowed_uids": rule.allowed_uids,
+                }
+                for rule in config.features.keyword_reply.rules
+            ],
+        },
+        "custom_fortunes": config.custom_fortunes,
         "web_ui": {
             "host": config.web_ui.host,
             "port": config.web_ui.port,
+        },
+        "llm": {
+            "enabled": config.llm.enabled,
+            "provider": config.llm.provider,
+            "api_key": config.llm.api_key,
+            "base_url": config.llm.base_url,
+            "model": config.llm.model,
+            "wake_word": config.llm.wake_word,
+            "temperature": config.llm.temperature,
+            "top_p": config.llm.top_p,
+            "max_tokens": config.llm.max_tokens,
+            "system_prompt": config.llm.system_prompt,
+            "context": {
+                "enabled": config.llm.context.enabled,
+                "mode": config.llm.context.mode,
+                "content": config.llm.context.content,
+                "max_messages": config.llm.context.max_messages,
+            },
         },
     }
 
@@ -413,6 +470,8 @@ def update_config_from_dict(raw: dict[str, Any], cfg_path: str) -> bool:
             existing.setdefault("features", {})["keyword_reply"] = raw["keyword_reply"]
         if "custom_fortunes" in raw:
             existing["custom_fortunes"] = raw["custom_fortunes"]
+        if "llm" in raw:
+            existing.setdefault("llm", {}).update(raw["llm"])
 
         Path(cfg_path).write_text(
             yaml.dump(existing, default_flow_style=False, allow_unicode=True),

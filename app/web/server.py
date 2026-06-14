@@ -33,15 +33,16 @@ import uvicorn
 from bilibili_api import live
 
 from app.config import DEFAULT_ROOMS_DIR
+from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room
 
 logger = logging.getLogger("webui")
 
 # 全局配置，由 init_app() 设置
-AUTH_USER = "admin"
-AUTH_PASS = "admin"
+AUTH_USER = "ayabot"
+AUTH_PASS = "123456"
 _SESSION_TIMEOUT = 3600
 _HTTP_HOST = "0.0.0.0"
-_HTTP_PORT = 8000
+_HTTP_PORT = int(os.environ.get("AYABOT_PORT", "19810"))
 _DB_PATH = "data/bot.db"
 
 # LLM 配置（可变引用，webui 可保存更新）
@@ -108,9 +109,14 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
         users[AUTH_USER] = {"password_hash": admin_hash, "role": "admin", "allowed_rooms": []}
     elif users[AUTH_USER].get("password_hash") != admin_hash:
         users[AUTH_USER]["password_hash"] = admin_hash
-    # 默认 wenwen 账号（user 角色，无权访问任何房间）
-    if "wenwen" not in users:
-        users["wenwen"] = {"password_hash": _hash_password("31415926"), "role": "user", "allowed_rooms": []}
+    # 默认 ayabot 账号（admin 角色，首次登录强制改密码）
+    if "ayabot" not in users:
+        users["ayabot"] = {"password_hash": _hash_password("123456"), "role": "admin", "allowed_rooms": [], "must_reset_password": True}
+    else:
+        # 确保 ayabot 账号有 must_reset_password 标记（除非密码已被修改过）
+        ayabot = users["ayabot"]
+        if ayabot.get("password_hash") == _hash_password("123456") and "must_reset_password" not in ayabot:
+            ayabot["must_reset_password"] = True
     _save_users(users)
 
 
@@ -157,9 +163,14 @@ def _fallback_read_config() -> None:
         users[AUTH_USER] = {"password_hash": admin_hash, "role": "admin", "allowed_rooms": []}
     elif users[AUTH_USER].get("password_hash") != admin_hash:
         users[AUTH_USER]["password_hash"] = admin_hash
-    # 默认 wenwen 账号（user 角色，无权访问任何房间）
-    if "wenwen" not in users:
-        users["wenwen"] = {"password_hash": _hash_password("31415926"), "role": "user", "allowed_rooms": []}
+    # 默认 ayabot 账号（admin 角色，首次登录强制改密码）
+    if "ayabot" not in users:
+        users["ayabot"] = {"password_hash": _hash_password("123456"), "role": "admin", "allowed_rooms": [], "must_reset_password": True}
+    else:
+        # 确保 ayabot 账号有 must_reset_password 标记（除非密码已被修改过）
+        ayabot = users["ayabot"]
+        if ayabot.get("password_hash") == _hash_password("123456") and "must_reset_password" not in ayabot:
+            ayabot["must_reset_password"] = True
     _save_users(users)
 
 
@@ -222,11 +233,14 @@ def _save_users(users: dict) -> None:
     # Strip plain-text passwords for safety, keep only password_hash
     clean = {}
     for uname, info in users.items():
-        clean[uname] = {
+        entry = {
             "password_hash": info.get("password_hash", _hash_password(info.get("password", ""))),
             "role": info.get("role", "user"),
             "allowed_rooms": info.get("allowed_rooms", info.get("rooms", [])),
         }
+        if info.get("must_reset_password"):
+            entry["must_reset_password"] = True
+        clean[uname] = entry
     p.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -275,7 +289,11 @@ async def _build_gift_cache() -> None:
     if _GIFT_CACHE_BUILT:
         return
     try:
-        data = await live.get_gift_config()
+        data = await asyncio.wait_for(live.get_gift_config(), timeout=8)
+    except asyncio.TimeoutError:
+        logger.warning("get_gift_config timed out (network issue)")
+        _GIFT_CACHE_BUILT = True
+        return
     except Exception as exc:
         logger.warning("get_gift_config failed: %s", exc)
         _GIFT_CACHE_BUILT = True
@@ -334,10 +352,8 @@ def _safe_int(val: Any) -> int:
 
 @app.on_event("startup")
 async def _startup():
-    try:
-        await _build_gift_cache()
-    except Exception:
-        logger.exception("gift cache init failed")
+    # 后台加载礼物缓存，不阻塞启动
+    asyncio.create_task(_build_gift_cache())
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -411,11 +427,13 @@ async def api_login(request: Request):
     # 检查多用户配置（使用密码哈希比对）
     users = _load_users()
     user_info = users.get(username)
+    must_reset = False
     if user_info:
         stored_hash = user_info.get("password_hash", "")
         if stored_hash and stored_hash == _hash_password(password):
             role = user_info.get("role", "user")
             allowed_rooms = user_info.get("allowed_rooms", [])
+            must_reset = user_info.get("must_reset_password", False)
         else:
             return JSONResponse({"error": "wrong credentials"}, status_code=403)
     elif username == AUTH_USER and password == AUTH_PASS:
@@ -428,7 +446,7 @@ async def api_login(request: Request):
     token = secrets.token_hex(32)
     _SESSIONS[token] = (time.time() + _SESSION_TIMEOUT, username, role, allowed_rooms)
 
-    resp = JSONResponse({"ok": True, "token": token, "role": role, "username": username})
+    resp = JSONResponse({"ok": True, "token": token, "role": role, "username": username, "must_reset_password": must_reset})
     resp.set_cookie(
         key="session", value=token,
         max_age=_SESSION_TIMEOUT,
@@ -641,12 +659,13 @@ async def api_proxy_image(url: str):
 
 @app.get("/api/llm_config")
 async def api_get_llm_config():
-    """返回 LLM 配置（不含 api_key，仅用于展示状态）."""
+    """返回 LLM 配置（含完整 api_key，前端自行决定是否掩码显示）."""
     ctx = _LLM_CONFIG_DICT.get("context", {})
     return {
         "enabled": _LLM_CONFIG_DICT.get("enabled", False),
         "provider": _LLM_CONFIG_DICT.get("provider", "openai"),
         "has_api_key": bool(_LLM_CONFIG_DICT.get("api_key")),
+        "api_key": _LLM_CONFIG_DICT.get("api_key", ""),
         "base_url": _LLM_CONFIG_DICT.get("base_url", ""),
         "model": _LLM_CONFIG_DICT.get("model", ""),
         "wake_word": _LLM_CONFIG_DICT.get("wake_word", "ayabot"),
@@ -736,30 +755,15 @@ async def api_llm_test(request: Request):
     return {"reply": reply or "(无回复)"}
 
 
-import subprocess
-import threading
-
-
 @app.post("/api/restart")
 async def api_restart():
-    """重启 B站 Bot 服务 (在后台线程执行, 避免杀死自身进程)."""
-    def _do_restart():
-        import time
-        time.sleep(0.5)
-        try:
-            subprocess.run(
-                ["systemctl", "restart", "bili-live-bot.service"],
-                capture_output=True, text=True, timeout=30,
-            )
-        except Exception:
-            pass
-
-    threading.Thread(target=_do_restart, daemon=True).start()
-    return {"ok": True, "message": "服务正在重启..."}
+    """重启 B站 Bot 服务（委托 ProcessManager 重新启动当前房间）. """
+    return {"ok": True, "message": "多房间模式下请在房间详情中操作"}
 
 
 # ══════════════════════════════════════════════════════════════
 #  B站 扫码登录 API
+# ══════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════
 
 import io as _io
@@ -879,20 +883,98 @@ async def api_bili_login_save(request: Request):
 
     _BILI_LOGIN_SESSIONS.pop(session_id, None)
 
-    # 重启服务
-    import threading as _threading
-    def _restart():
-        import time as _t
-        _t.sleep(1)
+    return {"ok": True, "message": "凭据已保存"}
+
+
+# ══════════════════════════════════════════════════════════════
+#  预设模板 API
+# ══════════════════════════════════════════════════════════════
+
+_TEMPLATES_PATH: str = "data/templates.json"
+
+
+def _load_templates() -> dict:
+    p = Path(_ROOMS_BASE_DIR).resolve() / _TEMPLATES_PATH
+    if p.exists():
         try:
-            import subprocess as _sp
-            _sp.run(["systemctl", "restart", "bili-live-bot.service"],
-                    capture_output=True, text=True, timeout=30)
+            return json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             pass
-    _threading.Thread(target=_restart, daemon=True).start()
+    return {"llm_templates": [], "bot_templates": []}
 
-    return {"ok": True, "message": "凭据已保存，服务正在重启..."}
+
+def _save_templates(data: dict) -> None:
+    p = Path(_ROOMS_BASE_DIR).resolve() / _TEMPLATES_PATH
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+@app.get("/api/templates")
+async def api_get_templates():
+    """获取所有预设模板."""
+    return _load_templates()
+
+
+@app.post("/api/templates")
+async def api_save_template(request: Request):
+    """保存一个预设模板."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    ttype = body.get("type", "")  # "llm" or "bot"
+    name = body.get("name", "").strip()
+    config = body.get("config", {})
+    if not name or not config:
+        return JSONResponse({"error": "name and config required"}, status_code=400)
+
+    data = _load_templates()
+    key = f"{ttype}_templates"
+    if key not in data:
+        data[key] = []
+
+    # 同名覆盖
+    existing = [t for t in data[key] if t.get("name") == name]
+    if existing:
+        existing[0]["config"] = config
+    else:
+        data[key].append({"name": name, "config": config})
+
+    _save_templates(data)
+    return {"ok": True}
+
+
+@app.delete("/api/templates")
+async def api_delete_template(request: Request):
+    """删除一个预设模板."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    ttype = body.get("type", "")
+    name = body.get("name", "").strip()
+    data = _load_templates()
+    key = f"{ttype}_templates"
+    if key in data:
+        data[key] = [t for t in data[key] if t.get("name") != name]
+    _save_templates(data)
+    return {"ok": True}
+
+
+@app.post("/api/restart_all_bots")
+async def api_restart_all_bots():
+    """重启所有正在运行的 Bot 进程."""
+    from app.process_manager import restart_room
+    rooms = _list_rooms_from_disk()
+    count = 0
+    for r in rooms:
+        if r["status"] == "running":
+            restart_room(r["room_id"])
+            count += 1
+    logger.info("restarted %d bots", count)
+    return {"ok": True, "count": count}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1106,19 +1188,21 @@ async def api_admin_delete_user(username: str):
 
 @app.post("/api/user/password")
 async def api_user_change_password(request: Request):
-    """用户修改自己的密码。需要旧密码验证."""
+    """用户修改自己的密码并可修改用户名。需要旧密码验证."""
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "bad request"}, status_code=400)
 
     token = request.cookies.get("session", "")
-    username, _, _ = _user_role(token)
+    username, role, _ = _user_role(token)
     if not username:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     old_password = body.get("old_password", "")
     new_password = body.get("new_password", "").strip()
+    new_username = body.get("new_username", "").strip()
+
     if not old_password or not new_password:
         return JSONResponse({"error": "old_password and new_password required"}, status_code=400)
     if len(new_password) < 4:
@@ -1133,9 +1217,23 @@ async def api_user_change_password(request: Request):
     if stored_hash and stored_hash != _hash_password(old_password):
         return JSONResponse({"error": "wrong password"}, status_code=403)
 
-    users[username]["password_hash"] = _hash_password(new_password)
-    _save_users(users)
-    return {"ok": True}
+    # 允许修改用户名
+    if new_username and new_username != username:
+        if new_username in users:
+            return JSONResponse({"error": "用户名已存在"}, status_code=400)
+        # 迁移用户信息到新用户名
+        users[new_username] = users.pop(username)
+        users[new_username]["password_hash"] = _hash_password(new_password)
+        users[new_username]["must_reset_password"] = False
+        _save_users(users)
+        # 更新当前session
+        _SESSIONS[token] = (time.time() + _SESSION_TIMEOUT, new_username, role, body.get("allowed_rooms", []))
+        return {"ok": True, "must_reset_password": False, "new_username": new_username}
+    else:
+        users[username]["password_hash"] = _hash_password(new_password)
+        users[username]["must_reset_password"] = False
+        _save_users(users)
+        return {"ok": True, "must_reset_password": False}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1167,24 +1265,6 @@ async def _resolve_room_id(anchor_uid: int) -> int:
         raise ValueError(f"无法解析直播间号 (UID={anchor_uid}): {exc}") from exc
 
 
-def _room_service_name(room_id: str) -> str:
-    return f"bili-live-bot@{room_id}.service"
-
-
-def _room_status(room_id: str) -> str:
-    """查询 systemd 服务状态: running / stopped / not_found."""
-    import subprocess as _sp
-    try:
-        r = _sp.run(
-            ["systemctl", "is-active", _room_service_name(room_id)],
-            capture_output=True, text=True, timeout=5,
-        )
-        out = r.stdout.strip()
-        return "running" if out == "active" else out
-    except Exception:
-        return "unknown"
-
-
 def _list_rooms_from_disk() -> list[dict[str, Any]]:
     """扫描 rooms/ 目录列出所有房间."""
     from app.config import DEFAULT_ROOMS_DIR
@@ -1210,7 +1290,7 @@ def _list_rooms_from_disk() -> list[dict[str, Any]]:
             "anchor_uid": cfg.get("anchor_uid", 0),
             "room_display_id": cfg.get("room_display_id", 0),
             "bot_name": cfg.get("web_ui", {}).get("bot_name", ""),
-            "status": _room_status(room_id),
+            "status": room_status(room_id),
             "port": cfg.get("web_ui", {}).get("port", 8000),
             "account_uid": cfg.get("account_uid", ""),
             "account_nick": "",
@@ -1222,6 +1302,7 @@ def _list_rooms_from_disk() -> list[dict[str, Any]]:
 @app.get("/api/rooms")
 async def api_list_rooms(request: Request):
     """列出所有房间及状态."""
+    # 从 process_manager 查询状态
     rooms = _list_rooms_from_disk()
     # 补齐 account_nick
     accounts_map = {a["uid"]: a.get("nickname", "") for a in _list_accounts()}
@@ -1248,13 +1329,10 @@ async def api_create_room(request: Request):
     if not anchor_uid:
         return JSONResponse({"error": "anchor_uid is required"}, status_code=400)
 
-    # 自动解析直播间号
+    # 检查直播间号
     room_display_id = body.get("room_display_id")
     if not room_display_id:
-        try:
-            room_display_id = await _resolve_room_id(int(anchor_uid))
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"error": "请填写直播间号（room_display_id）"}, status_code=400)
 
     room_id = str(room_display_id)
     from app.config import ensure_room_dirs, get_room_path
@@ -1291,49 +1369,36 @@ async def api_create_room(request: Request):
 
 @app.post("/api/rooms/{room_id}/start")
 async def api_start_room(room_id: str):
-    """启动房间 systemd 服务."""
-    import subprocess as _sp
-    svc = _room_service_name(room_id)
-    r = _sp.run(["systemctl", "start", svc], capture_output=True, text=True, timeout=15)
-    if r.returncode != 0:
-        return JSONResponse({"error": f"启动失败: {r.stderr.strip()}"}, status_code=500)
-    logger.info("room started: %s", room_id)
+    """启动房间 Bot 子进程."""
+    ok = start_room(room_id)
+    if not ok:
+        return JSONResponse({"error": "启动失败，请检查配置"}, status_code=500)
     return {"ok": True, "status": "running"}
 
 
 @app.post("/api/rooms/{room_id}/stop")
 async def api_stop_room(room_id: str):
-    """停止房间 systemd 服务."""
-    import subprocess as _sp
-    svc = _room_service_name(room_id)
-    _sp.run(["systemctl", "stop", svc], capture_output=True, text=True, timeout=15)
-    logger.info("room stopped: %s", room_id)
+    """停止房间 Bot 子进程."""
+    stop_room(room_id)
     return {"ok": True, "status": "stopped"}
 
 
 @app.post("/api/rooms/{room_id}/restart")
 async def api_restart_room(room_id: str):
-    """重启房间 systemd 服务."""
-    import subprocess as _sp
-    svc = _room_service_name(room_id)
-    _sp.run(["systemctl", "restart", svc], capture_output=True, text=True, timeout=15)
-    logger.info("room restarted: %s", room_id)
-    return {"ok": True, "status": "running"}
+    """重启房间 Bot 子进程."""
+    ok = restart_room(room_id)
+    return {"ok": ok, "status": "running" if ok else "stopped"}
 
 
 @app.delete("/api/rooms/{room_id}")
 async def api_delete_room(room_id: str):
-    """删除房间（先停止，再删目录）."""
+    """删除房间（停止进程 + 删目录）."""
     import shutil
-    import subprocess as _sp
+    from app.config import get_room_path
 
-    # 先停止
-    svc = _room_service_name(room_id)
-    _sp.run(["systemctl", "stop", svc], capture_output=True, text=True, timeout=15)
-    _sp.run(["systemctl", "disable", svc], capture_output=True, text=True, timeout=15)
+    clean_room(room_id)
 
     # 删除目录
-    from app.config import get_room_path
     room_dir = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR)
     if room_dir.exists():
         shutil.rmtree(str(room_dir))
@@ -1709,10 +1774,10 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
         params: list[Any] = []
 
         if rStart:
-            where_clauses.append("date(ts, 'unixepoch') >= date(?)")
+            where_clauses.append("date(ts, 'unixepoch', 'localtime') >= date(?)")
             params.append(rStart)
         if rEnd:
-            where_clauses.append("date(ts, 'unixepoch') <= date(?)")
+            where_clauses.append("date(ts, 'unixepoch', 'localtime') <= date(?)")
             params.append(rEnd)
 
         if rType == "gift":
@@ -1765,7 +1830,7 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
         cur.execute(f"""
             SELECT uid, uname, gift_name, gift_num, actual_value, ts, is_blind_box, id, raw_json
             FROM gift_events
-            WHERE uid = ? AND date(ts, 'unixepoch') = date(?) AND event_type = 'SEND_GIFT'{where_extra}
+            WHERE uid = ? AND date(ts, 'unixepoch', 'localtime') = date(?) AND event_type = 'SEND_GIFT'{where_extra}
             ORDER BY ts
         """, (uid, date))
         rows = cur.fetchall()
@@ -1844,7 +1909,7 @@ async def api_room_user_dates(room_id: str, uid: int = 0):
         conn = sqlite3.connect(str(db_path))
         cur = conn.cursor()
         cur.execute(
-            "SELECT DISTINCT date(ts, 'unixepoch') FROM gift_events WHERE uid = ? ORDER BY date(ts, 'unixepoch')",
+            "SELECT DISTINCT date(ts, 'unixepoch', 'localtime') FROM gift_events WHERE uid = ? ORDER BY date(ts, 'unixepoch', 'localtime')",
             (uid,),
         )
         dates = [r[0] for r in cur.fetchall()]
@@ -1888,10 +1953,13 @@ async def api_room_delete_old(room_id: str, request: Request):
 
 
 @app.get("/api/danmaku_log")
-async def api_get_danmaku_log(limit: int = 50, offset: int = 0):
+async def api_get_danmaku_log(room_id: str = "", limit: int = 50, offset: int = 0):
     try:
+        db_path = _room_db_path(room_id) if room_id else Path(_DB_PATH)
+        if not db_path.exists():
+            return {"rows": []}
         from app.storage import StatsStore
-        store = StatsStore(_DB_PATH)
+        store = StatsStore(str(db_path))
         rows = store.get_danmaku_log(limit=limit, offset=offset)
         store.close()
         return {"rows": rows}
@@ -1901,10 +1969,13 @@ async def api_get_danmaku_log(limit: int = 50, offset: int = 0):
 
 
 @app.delete("/api/danmaku_log")
-async def api_clear_danmaku_log():
+async def api_clear_danmaku_log(room_id: str = ""):
     try:
+        db_path = _room_db_path(room_id) if room_id else Path(_DB_PATH)
+        if not db_path.exists():
+            return {"deleted": 0}
         from app.storage import StatsStore
-        store = StatsStore(_DB_PATH)
+        store = StatsStore(str(db_path))
         count = store.clear_danmaku_log()
         store.close()
         return {"deleted": count}
@@ -2033,12 +2104,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
 }
 </style>
 </head>
-<body class="bg-gray-100 p-4">
+<body class="bg-gray-100 p-2 sm:p-4">
 <div id="app" class="max-w-6xl mx-auto">
 
 <!-- ══════ 登录页 ══════ -->
-<div v-if="!loggedIn" class="flex items-center justify-center min-h-[80vh]">
-    <div class="bg-white p-8 rounded-xl shadow-md w-80">
+<div v-if="!loggedIn" class="flex items-center justify-center min-h-[80vh] px-4">
+    <div class="bg-white p-6 sm:p-8 rounded-xl shadow-md w-full max-w-sm">
         <h1 class="text-xl font-bold text-center text-blue-600 mb-6">Ayabot 管理后台</h1>
         <div class="space-y-4">
             <input v-model="loginUser" placeholder="账号" class="border p-2 rounded w-full text-sm" @keyup.enter="doLogin">
@@ -2051,37 +2122,48 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
 <!-- ══════ 主界面 ══════ -->
 <div v-if="loggedIn">
-<header class="mb-6 flex justify-between items-center bg-white p-4 rounded-xl shadow-sm">
-    <h1 class="text-xl font-bold text-blue-600">🎯 Ayabot 管理后台</h1>
-    <div class="flex items-center gap-4 text-sm">
-        <button @click="tab='rooms'" :class="tab==='rooms'?'text-blue-600 font-bold border-b-2 border-blue-600':''">🏠 房间管理</button>
-        <button @click="tab='accounts'" :class="tab==='accounts'?'text-blue-600 font-bold border-b-2 border-blue-600':''">🤖 B站账号</button>
-        <button @click="tab='global'" :class="tab==='global'?'text-blue-600 font-bold border-b-2 border-blue-600':''">⚙️ 全局配置</button>
-        <button v-if="userRole === 'admin'" @click="tab='users'" :class="tab==='users'?'text-blue-600 font-bold border-b-2 border-blue-600':''">👥 用户管理</button>
-        <button @click="tab='help'"  :class="tab==='help' ?'text-blue-600 font-bold border-b-2 border-blue-600':''">帮助</button>
-        <div class="relative ml-2">
-            <button @click="showUserMenu = !showUserMenu" class="text-gray-600 hover:text-gray-800 border rounded px-2 py-1 text-xs">
-                {{ loginUser }} ▾
-            </button>
-            <div v-if="showUserMenu" class="absolute right-0 mt-1 bg-white border rounded shadow-lg z-50 w-36 text-sm" @click.stop>
-                <button @click="openChangePwd" class="block w-full text-left px-3 py-2 hover:bg-gray-50">🔑 修改密码</button>
-                <button @click="doLogout" class="block w-full text-left px-3 py-2 hover:bg-gray-50 text-red-500">退出登录</button>
-            </div>
+<header class="mb-4 sm:mb-6 flex items-center bg-white p-3 sm:p-4 rounded-xl shadow-sm gap-2">
+    <h1 class="text-base sm:text-xl font-bold text-blue-600 flex-shrink-0">🎯 Ayabot</h1>
+    <div class="flex-1 min-w-0"></div>
+    <div class="flex items-center gap-1 sm:gap-4 text-xs sm:text-sm overflow-x-auto no-scrollbar mr-1 sm:mr-2">
+        <button @click="tab='rooms'" :class="tab==='rooms'?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">🏠 房间管理</button>
+        <button @click="tab='global'" :class="tab==='global'?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">⚙️ 全局配置</button>
+        <button v-if="userRole === 'admin'" @click="tab='users'" :class="tab==='users'?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">👥 用户管理</button>
+        <button @click="tab='help'"  :class="tab==='help' ?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">帮助</button>
+    </div>
+    <div class="relative flex-shrink-0">
+        <button @click="showUserMenu = !showUserMenu" class="text-gray-600 hover:text-gray-800 border rounded px-2 py-1 text-xs whitespace-nowrap">
+            {{ loginUser }} ▾
+        </button>
+        <div v-if="showUserMenu" class="absolute right-0 top-full mt-1 bg-white border rounded-xl shadow-lg w-44 text-sm overflow-hidden z-[100]" @click.stop>
+            <div class="px-4 py-2.5 border-b text-xs text-gray-400 font-medium truncate">{{ loginUser }}</div>
+            <button @click="openChangePwd(); showUserMenu=false" class="block w-full text-left px-4 py-2.5 hover:bg-gray-50 border-b">🔑 修改密码</button>
+            <button @click="doLogout" class="block w-full text-left px-4 py-2.5 hover:bg-gray-50 text-red-500">退出登录</button>
         </div>
     </div>
 </header>
 
+<style>
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+</style>
+
 <!-- ══════ 修改密码弹窗 ══════ -->
-<div v-if="showChangePwd" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showChangePwd = false">
+<div v-if="showChangePwd" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" :style="mustResetPwd ? 'backdrop-filter:blur(4px);' : ''" @click="mustResetPwd || (showChangePwd = false)">
     <div class="bg-white p-6 rounded-xl shadow-lg w-80" @click.stop>
-        <h3 class="font-bold text-lg mb-4">🔑 修改密码</h3>
+        <h3 class="font-bold text-lg mb-4">🔑 {{ mustResetPwd ? '⚠️ 首次登录请重置密码' : '修改密码' }}</h3>
         <div class="space-y-3">
-            <input type="password" v-model="changePwdOld" placeholder="当前密码" class="border p-2 rounded w-full text-sm">
+            <label class="text-xs text-gray-500 block">用户名
+                <input type="text" v-model="changePwdNewUser" placeholder="用户名" class="border p-2 rounded w-full text-sm">
+                <span class="text-gray-400" v-if="mustResetPwd">可修改为你想要的用户名</span>
+            </label>
+            <input type="password" v-model="changePwdOld" placeholder="当前密码" class="border p-2 rounded w-full text-sm" :disabled="mustResetPwd">
             <input type="password" v-model="changePwdNew" placeholder="新密码（至少4位）" class="border p-2 rounded w-full text-sm">
+            <input type="password" v-model="changePwdConfirm" placeholder="再次输入新密码" class="border p-2 rounded w-full text-sm" @keyup.enter="doChangePwd">
             <div v-if="changePwdMsg" class="text-sm" :class="changePwdOk ? 'text-green-600' : 'text-red-500'">{{ changePwdMsg }}</div>
             <div class="flex gap-2">
                 <button @click="doChangePwd" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm flex-1">确认</button>
-                <button @click="showChangePwd = false" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
+                <button v-if="!mustResetPwd" @click="showChangePwd = false" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
             </div>
         </div>
     </div>
@@ -2092,11 +2174,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     <!-- ── 房间列表 ── -->
     <div v-if="!selectedRoom">
-        <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
-            <div class="flex items-center justify-between">
+        <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm space-y-4">
+            <div class="flex items-center justify-between flex-wrap gap-2">
                 <h2 class="text-lg font-bold">🏠 房间管理</h2>
                 <button @click="toggleCreateRoom"
-                        class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">
+                        class="bg-green-500 hover:bg-green-600 text-white px-3 sm:px-4 py-2 rounded text-xs sm:text-sm">
                     {{ showCreateRoom ? '取消' : '➕ 新建房间' }}
                 </button>
             </div>
@@ -2104,15 +2186,31 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <!-- 新建表单 -->
             <div v-if="showCreateRoom" class="border rounded-lg p-4 bg-gray-50 space-y-3">
                 <h3 class="text-sm font-bold">新建直播间</h3>
-                <div class="grid grid-cols-2 gap-3">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <label class="text-xs text-gray-500">主播 UID
                         <input type="number" v-model.number="newRoomUid" placeholder="B站 主播 UID"
+                               class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">直播间号
+                        <input type="number" v-model.number="newRoomDisplayId" placeholder="B站 直播间号，如 1946287911"
                                class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                     <label class="text-xs text-gray-500">关联 B站 账号
                         <select v-model="newRoomAccount" class="border p-2 rounded w-full text-sm mt-1">
                             <option value="">暂不关联</option>
                             <option v-for="a in accounts" :key="a.uid" :value="a.uid">{{ a.nickname || 'UID:'+a.uid }}</option>
+                        </select>
+                    </label>
+                    <label class="text-xs text-gray-500">AI回复模板
+                        <select v-model="newRoomLlmTemplate" class="border p-2 rounded w-full text-sm mt-1">
+                            <option value="">默认（无模板）</option>
+                            <option v-for="t in llmTemplates" :key="t.name" :value="t.name">{{ t.name }}</option>
+                        </select>
+                    </label>
+                    <label class="text-xs text-gray-500">机器人配置模板
+                        <select v-model="newRoomBotTemplate" class="border p-2 rounded w-full text-sm mt-1">
+                            <option value="">默认（无模板）</option>
+                            <option v-for="t in botTemplates" :key="t.name" :value="t.name">{{ t.name }}</option>
                         </select>
                     </label>
                 </div>
@@ -2188,13 +2286,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     | 状态: {{ selectedRoom.status === 'running' ? '🟢 运行中' : '⏹️ 已停止' }}
                 </div>
             </div>
-            <div class="flex items-center gap-2">
+            <div class="flex items-center gap-2 flex-wrap">
                 <span class="text-xs text-gray-500">B站账号:</span>
                 <select v-model="selectedRoomAccount" class="border p-1 rounded text-sm">
                     <option value="">不关联</option>
                     <option v-for="a in accounts" :key="a.uid" :value="a.uid">{{ a.nickname || 'UID:'+a.uid }}</option>
                 </select>
-                <button @click="assignAccountAndRestart" class="bg-green-600 hover:bg-green-700 text-white px-2 py-0.5 rounded text-xs" :disabled="accountRestarting">{{ accountRestarting ? '重启中...' : '✅ 保存并重启' }}</button>
+                <button @click="assignAccountToRoom" class="bg-blue-500 hover:bg-blue-600 text-white px-2 py-0.5 rounded text-xs">保存</button>
+                <button @click="assignAccountAndRestart" class="bg-green-600 hover:bg-green-700 text-white px-2 py-0.5 rounded text-xs" :disabled="accountRestarting">{{ accountRestarting ? '重启中...' : '保存并重启' }}</button>
                 <span v-if="accountAssignMsg" class="text-xs" :class="accountAssignOk ? 'text-green-600' : 'text-red-500'">{{ accountAssignMsg }}</span>
             </div>
         </div>
@@ -2210,8 +2309,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
 
         <!-- 送礼排行 -->
-        <div v-if="roomSubTab==='ranking'" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div class="bg-white p-4 rounded-xl shadow-sm">
+        <div v-if="roomSubTab==='ranking'" class="grid grid-cols-1 gap-6">
+            <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm">
                 <div class="flex flex-wrap gap-2 mb-3">
                     <input type="date" v-model="rStart" class="border p-2 rounded text-sm flex-1 min-w-0">
                     <input type="date" v-model="rEnd"   class="border p-2 rounded text-sm flex-1 min-w-0">
@@ -2224,7 +2323,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
                 <div v-if="errRanking" class="text-red-500 text-sm mb-2">{{ errRanking }}</div>
                 <div class="overflow-y-auto max-h-[520px]" v-if="ranking.length">
-                    <table class="w-full text-sm">
+                    <div class="overflow-x-auto">
+                    <table class="w-full text-xs sm:text-sm">
                         <thead><tr class="bg-gray-50 sticky top-0"><th class="p-2 text-left">#</th><th class="p-2 text-left">用户</th><th class="p-2 text-right">价值</th><th class="p-2 text-right">利润</th></tr></thead>
                         <tbody>
                             <tr v-for="(u,i) in ranking" :key="u.uid"
@@ -2237,6 +2337,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                             </tr>
                         </tbody>
                     </table>
+                    </div>
                 </div>
                 <div v-else-if="!errRanking" class="text-gray-400 text-center py-8">暂无数据</div>
             </div>
@@ -2355,17 +2456,24 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
 
         <!-- AI 回复 -->
-        <div v-if="roomSubTab==='llm'" class="max-w-2xl mx-auto">
-            <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
+        <div v-if="roomSubTab==='llm'" class="max-w-full sm:max-w-2xl mx-auto">
+            <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm space-y-4">
                 <h2 class="text-lg font-bold">🤖 AI 回复设置</h2>
-                <p class="text-xs text-gray-400">用户发送 <code class="bg-gray-100 px-1 rounded">#{{ llmWakeWord || 'ayabot' }} &lt;聊天内容&gt;</code> 时调用 LLM API 自动回复。</p>
+                <p class="text-xs text-gray-400 mb-2">用户发送 <code class="bg-gray-100 px-1 rounded">#{{ llmWakeWord || 'ayabot' }} &lt;聊天内容&gt;</code> 时调用 LLM API 自动回复。</p>
+                <div class="flex flex-wrap gap-1 mb-3 text-xs">
+                    <span class="text-gray-500 mr-1">当前触发模式：</span>
+                    <span class="bg-blue-50 px-2 py-0.5 rounded">#唤醒词</span>
+                    <span v-if="roomConfig?.features?.llm_bare_trigger" class="bg-green-50 px-2 py-0.5 rounded">唤醒词开头</span>
+                    <span v-if="roomConfig?.features?.llm_bare_trigger && roomConfig?.features?.llm_keyword_trigger" class="bg-purple-50 px-2 py-0.5 rounded">含唤醒词触发</span>
+                    <span v-if="!roomConfig?.features?.llm_bare_trigger && !roomConfig?.features?.llm_keyword_trigger" class="text-gray-400">仅 #唤醒词</span>
+                </div>
 
                 <label class="flex items-center gap-2 text-sm">
                     <input type="checkbox" v-model="llmEnabled" class="w-4 h-4">
                     启用 AI 回复
                 </label>
 
-                <div class="grid grid-cols-2 gap-4">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <label class="text-xs text-gray-500">接口格式
                         <select v-model="llmProvider" class="border p-2 rounded w-full text-sm mt-1">
                             <option value="openai">OpenAI 格式</option>
@@ -2402,7 +2510,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </label>
 
                 <label class="text-xs text-gray-500">人设（System Prompt）
-                    <textarea v-model="llmPrompt" rows="3" class="border p-2 rounded w-full text-sm mt-1" placeholder="你是ayabot，一个可爱温柔的虚拟主播助手。"></textarea>
+                    <textarea v-model="llmPrompt" rows="3" class="border p-2 rounded w-full text-sm mt-1" placeholder="你是ayabot，一个可爱温柔的虚拟主播助手。所有回复必须控制在40字以内。"></textarea>
                 </label>
 
                 <hr class="my-2">
@@ -2413,7 +2521,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     开启上下文记忆
                 </label>
 
-                <div v-if="ctxEnabled" class="grid grid-cols-2 gap-4">
+                <div v-if="ctxEnabled" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <label class="text-xs text-gray-500">隔离方式
                         <select v-model="ctxMode" class="border p-2 rounded w-full text-sm mt-1">
                             <option value="isolated">按用户隔离</option>
@@ -2432,9 +2540,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <input type="number" v-model.number="ctxMaxMsg" min="1" max="50" class="border p-2 rounded w-full text-sm mt-1">
                 </label>
 
-                <div class="flex items-center gap-4">
+                <div class="flex items-center gap-4 flex-wrap">
                     <button @click="saveLlmConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
                     <span v-if="llmSaveMsg" class="text-sm" :class="llmSaveOk ? 'text-green-600' : 'text-red-500'">{{ llmSaveMsg }}</span>
+                    <span v-if="llmSaveOk" class="text-xs text-green-600">✅ 即时生效，无需重启</span>
+                    <select v-model="applyLlmTemplate" class="border p-1 rounded text-xs">
+                        <option value="">套用AI模板...</option>
+                        <option v-for="t in llmTemplates" :key="t.name" :value="t.name">{{ t.name }}</option>
+                    </select>
+                    <button v-if="applyLlmTemplate" @click="applyTemplateToLlm" class="bg-purple-500 hover:bg-purple-600 text-white px-3 py-1.5 rounded text-xs">应用</button>
                 </div>
 
                 <hr class="my-2">
@@ -2449,12 +2563,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
 
         <!-- 机器人配置 -->
-        <div v-if="roomSubTab==='config'" class="max-w-2xl mx-auto">
-            <div v-if="roomConfig" class="bg-white p-6 rounded-xl shadow-sm space-y-4">
+        <div v-if="roomSubTab==='config'" class="max-w-full sm:max-w-2xl mx-auto">
+            <div v-if="roomConfig" class="bg-white p-4 sm:p-6 rounded-xl shadow-sm space-y-4">
                 <h2 class="text-lg font-bold">⚙️ 机器人配置</h2>
                 <p class="text-xs text-gray-500">配置保存后需重启对应房间服务才能生效。</p>
 
-                <div class="grid grid-cols-2 gap-4">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <label class="text-xs text-gray-500">主播 UID
                         <input type="number" v-model.number="roomConfig.anchor_uid" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
@@ -2462,7 +2576,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
                 <hr>
                 <h3 class="text-sm font-bold">⏱️ 冷却时间（秒）</h3>
-                <div class="grid grid-cols-2 gap-4">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <label class="text-xs text-gray-500">欢迎同用户间隔
                         <input type="number" v-model.number="roomConfig.cooldown.welcome_user_seconds" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
@@ -2473,7 +2587,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
                 <hr>
                 <h3 class="text-sm font-bold">🚦 限流</h3>
-                <div class="grid grid-cols-2 gap-4">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <label class="text-xs text-gray-500">弹幕发送间隔(秒)
                         <input type="number" v-model="roomConfig.rate_limit.send_interval_seconds" step="0.1" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
@@ -2490,17 +2604,20 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
                 <hr>
                 <h3 class="text-sm font-bold">🎛️ 功能开关</h3>
-                <div class="grid grid-cols-2 gap-2 text-sm">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.welcome_enabled" class="w-4 h-4"> 欢迎</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.thanks_enabled" class="w-4 h-4"> 感谢</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.blindbox_enabled" class="w-4 h-4"> 盲盒统计</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.guard_thanks_enabled" class="w-4 h-4"> 大航海感谢</label>
-                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.share_thanks_enabled" class="w-4 h-4"> 分享感谢</label>
-                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.like_thanks_enabled" class="w-4 h-4"> 点赞感谢</label>
+
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.connected_message_enabled" class="w-4 h-4"> 连接消息</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.danmaku_log_enabled" class="w-4 h-4"> 弹幕记录</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.allow_bare_commands" class="w-4 h-4"> 免#指令</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.llm_bare_trigger" class="w-4 h-4"> AI免#前缀唤醒</label>
+                    <label class="flex items-center gap-2" v-if="roomConfig.features.llm_bare_trigger"><input type="checkbox" v-model="roomConfig.features.llm_keyword_trigger" class="w-4 h-4"> 包含关键词触AI</label>
                 </div>
-                <div v-if="roomConfig.features.danmaku_log_enabled" class="grid grid-cols-2 gap-4">
+                <div class="text-xs text-gray-400 mb-2">免#指令：开启后可不带 # 使用指令（签到、今日盲盒等） | AI免#：弹幕开头匹配唤醒词即触发AI | 包含关键词：弹幕含唤醒词即触发AI（需免#指令）</div>
+                <div v-if="roomConfig.features.danmaku_log_enabled" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <label class="text-xs text-gray-500">弹幕记录最大条数
                         <input type="number" v-model.number="roomConfig.features.danmaku_log_max_entries" min="100" max="100000" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
@@ -2527,13 +2644,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="text-xs text-gray-500 block">大航海 - 默认
                         <input type="text" v-model="roomConfig.features.guard_thanks_template_default" placeholder="感谢{uname}开通大航海！" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
-                    <label class="text-xs text-gray-500 block">分享感谢
-                        <input type="text" v-model="roomConfig.features.share_template" placeholder="感谢分享直播间~" class="border p-2 rounded w-full text-sm mt-1">
-                    </label>
-                    <label class="text-xs text-gray-500 block">点赞感谢（达到50点赞触发一次）
-                        <input type="text" v-model="roomConfig.features.like_template" placeholder="感谢50个点赞~" class="border p-2 rounded w-full text-sm mt-1">
-                    </label>
-
                     <h4 class="text-xs font-bold text-gray-600 mt-2">大航海欢迎（优先级高于默认欢迎模板）</h4>
                     <label class="text-xs text-gray-500 block">舰长欢迎
                         <input type="text" v-model="roomConfig.features.guard_welcome_templates.captain" placeholder="欢迎舰长{uname}！" class="border p-2 rounded w-full text-sm mt-1">
@@ -2548,6 +2658,24 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="text-xs text-gray-500 block">连接消息
                         <input type="text" v-model="roomConfig.features.connected_message" placeholder="来了喵~" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
+
+                    <h4 class="text-xs font-bold text-gray-600 mt-2">📦 盲盒统计（支持 {count} {cost} {profit} 占位符）</h4>
+                    <p class="text-[10px] text-gray-400">修改盲盒指令的回复文本。如发送失败可尝试开启「数字转中文」或使用简短表述。</p>
+                    <label class="flex items-center gap-2 text-xs mb-2">
+                        <input type="checkbox" v-model="roomConfig.features.use_chinese_numbers" class="w-4 h-4"> 数字转中文（六→六而非6，避开数字拦截）
+                    </label>
+                    <label class="text-xs text-gray-500 block">#本月盲盒 有数据
+                        <input type="text" v-model="roomConfig.features.blindbox_result_monthly" placeholder="本月盲盒共{count}个，花费{cost}，收益{profit}" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500 block">#今日盲盒 有数据
+                        <input type="text" v-model="roomConfig.features.blindbox_result_today" placeholder="今日盲盒共{count}个，花费{cost}，收益{profit}" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500 block">有送礼无盲盒
+                        <input type="text" v-model="roomConfig.features.blindbox_no_blindbox" placeholder="无盲盒记录" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500 block">无任何送礼记录
+                        <input type="text" v-model="roomConfig.features.blindbox_no_gift" placeholder="无送礼记录" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
                 </div>
 
                 <hr>
@@ -2557,7 +2685,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                         <input type="checkbox" v-model="roomConfig.features.periodic_message_enabled" class="w-4 h-4">
                         启用定时消息（仅在开播时发送）
                     </label>
-                    <div class="grid grid-cols-2 gap-4">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <label class="text-xs text-gray-500">间隔（秒）
                             <input type="number" v-model.number="roomConfig.features.periodic_message_interval_seconds" min="30" max="86400" class="border p-2 rounded w-full text-sm mt-1">
                             <span class="text-xs text-gray-400">默认 600 秒（10 分钟）</span>
@@ -2572,79 +2700,95 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <hr>
                 <h3 class="text-sm font-bold">👤 UID特定欢迎模板</h3>
                 <p class="text-xs text-gray-500">为特定UID的用户设置专属欢迎词（优先级高于默认和大航海欢迎）。</p>
-                <div v-for="(wt, wti) in roomConfig.features.welcome_templates_for_uids_entries" :key="wti" class="border rounded p-3 bg-gray-50 space-y-2">
-                    <div class="flex items-center justify-between">
-                        <span class="text-xs font-bold">UID欢迎 #{{ wti+1 }}</span>
-                        <button @click="removeUidWelcomeTemplate(wti)" class="text-red-400 text-xs underline">删除</button>
-                    </div>
-                    <div class="grid grid-cols-2 gap-2">
-                        <label class="text-xs text-gray-500">UID
-                            <input type="number" v-model.number="wt.uid" class="border p-1 rounded w-full text-sm mt-1" placeholder="用户UID">
-                        </label>
-                        <label class="text-xs text-gray-500">欢迎模板
-                            <input type="text" v-model="wt.template" class="border p-1 rounded w-full text-sm mt-1" placeholder="欢迎{uname}！">
-                        </label>
+                <div class="border rounded p-3 bg-gray-50 flex items-center justify-between">
+                    <span class="text-xs text-gray-500">共 {{ (roomConfig.features.welcome_templates_for_uids_entries||[]).length }} 条配置</span>
+                    <button @click="openUidWelcomeModal" class="text-blue-500 text-xs underline">✏️ 编辑</button>
+                </div>
+
+                <!-- UID欢迎模板编辑弹窗 -->
+                <div v-if="showUidWelcomeModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showUidWelcomeModal = false">
+                    <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4 max-h-[80vh] flex flex-col" @click.stop>
+                        <div class="p-4 border-b flex items-center justify-between">
+                            <h3 class="font-bold text-lg">👤 UID特定欢迎模板</h3>
+                            <button @click="closeUidWelcomeModal" class="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+                        </div>
+                        <div class="p-4 overflow-y-auto flex-1 space-y-3">
+                            <div v-for="(wt, wti) in uidWelcomeEditEntries" :key="wti" class="border rounded p-3 bg-gray-50 space-y-2">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-xs font-bold">#{{ wti+1 }}</span>
+                                    <button @click="uidWelcomeEditEntries.splice(wti, 1)" class="text-red-400 text-xs underline">删除</button>
+                                </div>
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                    <label class="text-xs text-gray-500">UID
+                                        <input type="number" v-model.number="wt.uid" class="border p-1 rounded w-full text-sm mt-1" placeholder="用户UID">
+                                    </label>
+                                    <label class="text-xs text-gray-500">欢迎模板
+                                        <input type="text" v-model="wt.template" class="border p-1 rounded w-full text-sm mt-1" placeholder="欢迎{uname}！">
+                                    </label>
+                                </div>
+                            </div>
+                            <button @click="uidWelcomeEditEntries.push({uid: 0, template: ''})" class="text-blue-500 text-xs underline">➕ 添加</button>
+                        </div>
+                        <div class="p-4 border-t flex items-center gap-2 justify-end">
+                            <button @click="closeUidWelcomeModal" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
+                            <button @click="saveUidWelcomeModal" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">保存</button>
+                        </div>
                     </div>
                 </div>
-                <button @click="addUidWelcomeTemplate" class="text-blue-500 text-xs underline">➕ 添加UID欢迎模板</button>
-
-                <hr>
-                <h3 class="text-sm font-bold">🎯 UID 自定义配置</h3>
-                <p class="text-xs text-gray-500">为特定UID的用户设置专属欢迎词和关键词触发规则。关键词用逗号分隔。</p>
-                <details class="border rounded p-3 bg-gray-50">
-                    <summary class="text-sm font-medium cursor-pointer">点击展开编辑</summary>
-                    <div class="mt-3 space-y-3">
-                        <div v-for="(uc, uci) in roomConfig.features.uid_configs_entries" :key="uci" class="border rounded p-3 bg-white space-y-2">
-                            <div class="flex items-center justify-between">
-                                <span class="text-xs font-bold">配置 #{{ uci+1 }}</span>
-                                <button @click="removeUidConfig(uci)" class="text-red-400 text-xs underline">删除</button>
-                            </div>
-                            <div class="grid grid-cols-3 gap-2">
-                                <label class="text-xs text-gray-500">UID
-                                    <input type="number" v-model.number="uc.uid" class="border p-1 rounded w-full text-sm mt-1" placeholder="用户UID">
-                                </label>
-                                <label class="text-xs text-gray-500">欢迎模板
-                                    <input type="text" v-model="uc.welcome_template" class="border p-1 rounded w-full text-sm mt-1" placeholder="欢迎{uname}！">
-                                </label>
-                                <label class="text-xs text-gray-500">关键词（逗号分隔）
-                                    <input type="text" v-model="uc.keyword_rules_str" class="border p-1 rounded w-full text-sm mt-1" placeholder="价格,多少钱,优惠">
-                                </label>
-                            </div>
-                        </div>
-                        <button @click="addUidConfig" class="text-blue-500 text-xs underline">➕ 添加UID配置</button>
-                    </div>
-                </details>
 
                 <hr>
                 <h3 class="text-sm font-bold">🔑 关键词回复</h3>
-                <label class="flex items-center gap-2 text-xs">
-                    <input type="checkbox" v-model="roomConfig.keyword_reply.enabled" class="w-4 h-4"> 启用
-                </label>
-                <label class="text-xs text-gray-500">冷却时间(秒)
-                    <input type="number" v-model.number="roomConfig.keyword_reply.cooldown" class="border p-2 rounded w-full text-sm mt-1">
-                </label>
-                <div v-for="(rule, ri) in roomConfig.keyword_reply.rules" :key="ri" class="border rounded p-3 bg-gray-50 space-y-2">
-                    <div class="flex items-center justify-between">
-                        <span class="text-xs font-bold">规则 #{{ ri+1 }}</span>
-                        <button @click="removeKeywordRule(ri)" class="text-red-400 text-xs underline">删除</button>
+                <p class="text-xs text-gray-500">设置弹幕关键词自动回复。支持包含、精确匹配。</p>
+                <div class="border rounded p-3 bg-gray-50 space-y-2">
+                    <label class="flex items-center gap-2 text-xs">
+                        <input type="checkbox" v-model="roomConfig.keyword_reply.enabled" class="w-4 h-4"> 启用
+                    </label>
+                    <label class="text-xs text-gray-500">冷却时间(秒)
+                        <input type="number" v-model.number="roomConfig.keyword_reply.cooldown" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <div class="flex items-center justify-between pt-1">
+                        <span class="text-xs text-gray-500">共 {{ (roomConfig.keyword_reply.rules||[]).length }} 条规则</span>
+                        <button @click="openKeywordModal" class="text-blue-500 text-xs underline">✏️ 编辑</button>
                     </div>
-                    <label class="text-xs text-gray-500">触发关键词（逗号分隔）
-                        <input type="text" v-model="rule.keywordsStr" class="border p-1 rounded w-full text-sm mt-1" placeholder="价格,多少钱">
-                    </label>
-                    <label class="text-xs text-gray-500">回复内容
-                        <textarea v-model="rule.reply" class="border p-1 rounded w-full text-sm mt-1" rows="2"></textarea>
-                    </label>
-                    <label class="text-xs text-gray-500">匹配模式
-                        <select v-model="rule.match_mode" class="border p-1 rounded text-sm">
-                            <option value="contains">包含</option>
-                            <option value="exact">精确</option>
-                        </select>
-                    </label>
-                    <label class="text-xs text-gray-500">限制UID（逗号分隔，留空=全部用户）
-                        <input type="text" v-model="rule.allowedUidsStr" class="border p-1 rounded w-full text-sm mt-1" placeholder="12345, 67890">
-                    </label>
                 </div>
-                <button @click="addKeywordRule" class="text-blue-500 text-xs underline">➕ 添加规则</button>
+
+                <!-- 关键词回复编辑弹窗 -->
+                <div v-if="showKeywordModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showKeywordModal = false">
+                    <div class="bg-white rounded-xl shadow-lg w-full max-w-xl mx-4 max-h-[80vh] flex flex-col" @click.stop>
+                        <div class="p-4 border-b flex items-center justify-between">
+                            <h3 class="font-bold text-lg">🔑 关键词规则</h3>
+                            <button @click="closeKeywordModal" class="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+                        </div>
+                        <div class="p-4 overflow-y-auto flex-1 space-y-3">
+                            <div v-for="(rule, ri) in keywordEditRules" :key="ri" class="border rounded p-3 bg-gray-50 space-y-2">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-xs font-bold">规则 #{{ ri+1 }}</span>
+                                    <button @click="keywordEditRules.splice(ri, 1)" class="text-red-400 text-xs underline">删除</button>
+                                </div>
+                                <label class="text-xs text-gray-500">触发关键词（逗号分隔）
+                                    <input type="text" v-model="rule.keywordsStr" class="border p-1 rounded w-full text-sm mt-1" placeholder="价格,多少钱">
+                                </label>
+                                <label class="text-xs text-gray-500">回复内容
+                                    <textarea v-model="rule.reply" class="border p-1 rounded w-full text-sm mt-1" rows="2"></textarea>
+                                </label>
+                                <label class="text-xs text-gray-500">匹配模式
+                                    <select v-model="rule.match_mode" class="border p-1 rounded text-sm">
+                                        <option value="contains">包含</option>
+                                        <option value="exact">精确</option>
+                                    </select>
+                                </label>
+                                <label class="text-xs text-gray-500">限制UID（逗号分隔，留空=全部用户）
+                                    <input type="text" v-model="rule.allowedUidsStr" class="border p-1 rounded w-full text-sm mt-1" placeholder="12345, 67890">
+                                </label>
+                            </div>
+                            <button @click="keywordEditRules.push({keywordsStr: '', reply: '', match_mode: 'contains', allowedUidsStr: ''})" class="text-blue-500 text-xs underline">➕ 添加规则</button>
+                        </div>
+                        <div class="p-4 border-t flex items-center gap-2 justify-end">
+                            <button @click="closeKeywordModal" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
+                            <button @click="saveKeywordModal" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">保存</button>
+                        </div>
+                    </div>
+                </div>
 
                 <hr>
                 <h3 class="text-sm font-bold">🎴 自定义签文</h3>
@@ -2668,16 +2812,29 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <input type="text" v-model="roomConfig.custom_fortunes.daxiong" class="border p-2 rounded w-full text-sm mt-1">
                 </label>
 
-                <div class="flex items-center gap-4 mt-4">
+                <div class="flex items-center gap-4 mt-4 flex-wrap">
                     <button @click="saveRoomConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
                     <span v-if="roomSaveMsg" class="text-sm" :class="roomSaveOk ? 'text-green-600' : 'text-red-500'">{{ roomSaveMsg }}</span>
+                    <span v-if="roomSaveOk" class="text-xs text-yellow-600">💡 配置已保存，需重启机器人才能生效</span>
+                    <button v-if="selectedRoom" @click="restartSingleBot(selectedRoom.room_id)" class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-2 rounded text-sm text-xs">🔄 重启此机器人</button>
                     <button @click="editRoomConfig(selectedRoom?.room_id)" class="text-gray-500 hover:text-gray-700 underline text-sm">刷新</button>
+                </div>
+
+                <hr>
+                <h3 class="text-sm font-bold">📋 套用预设模板</h3>
+                <div class="flex items-center gap-2 flex-wrap">
+                    <select v-model="applyBotTemplate" class="border p-1 rounded text-xs">
+                        <option value="">选择机器人模板...</option>
+                        <option v-for="t in botTemplates" :key="t.name" :value="t.name">{{ t.name }}</option>
+                    </select>
+                    <button v-if="applyBotTemplate" @click="applyTemplateToBot" class="bg-purple-500 hover:bg-purple-600 text-white px-3 py-1.5 rounded text-xs">应用</button>
+                    <span v-if="applyTemplateMsg" class="text-xs" :class="applyTemplateOk ? 'text-green-600' : 'text-red-500'">{{ applyTemplateMsg }}</span>
                 </div>
             </div>
         </div>
 
         <!-- 数据管理 -->
-        <div v-if="roomSubTab==='manage'" class="max-w-lg mx-auto bg-white p-6 rounded-xl shadow-sm">
+        <div v-if="roomSubTab==='manage'" class="max-w-full sm:max-w-lg mx-auto bg-white p-4 sm:p-6 rounded-xl shadow-sm">
             <h2 class="text-lg font-bold mb-4 text-red-600">⚠️ 数据管理</h2>
             <p class="text-sm text-gray-500 mb-4">注意：删除操作不可恢复。</p>
             <div class="flex gap-2 items-end">
@@ -2688,8 +2845,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
 
         <!-- 弹幕记录 -->
-        <div v-if="roomSubTab==='danmaku'" class="max-w-4xl mx-auto">
-            <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
+        <div v-if="roomSubTab==='danmaku'" class="max-w-full sm:max-w-4xl mx-auto">
+            <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm space-y-4">
                 <div class="flex items-center justify-between">
                     <h2 class="text-lg font-bold">💬 弹幕记录</h2>
                     <div class="flex items-center gap-2">
@@ -2733,18 +2890,189 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </div>
 </div>
 
-<!-- ══════ B站账号管理 ══════ -->
-<div v-if="tab==='accounts'" class="max-w-3xl mx-auto">
+<!-- ══════ B站账号管理（已合并到 用户管理） ══════ -->
+
+<!-- ══════ 全局配置 ══════ -->
+<div v-if="tab==='global'" class="max-w-3xl mx-auto">
     <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
+        <h2 class="text-lg font-bold">⚙️ 全局配置</h2>
+        <div class="text-sm space-y-2">
+            <div class="flex items-center gap-2">
+                <span class="text-gray-500">Web 端口:</span>
+                <span class="font-mono font-bold">{{ cfgPort }}</span>
+            </div>
+            <div class="flex items-center gap-2">
+                <span class="text-gray-500">监听地址:</span>
+                <span class="font-mono">{{ cfgHost }}</span>
+            </div>
+        </div>
+        <div class="bg-yellow-50 border border-yellow-200 rounded p-3 text-xs text-yellow-700">
+            💡 端口和监听地址通过 <code class="bg-yellow-100 px-1 rounded">config.yaml</code> 或环境变量
+            <code class="bg-yellow-100 px-1 rounded">AYABOT_PORT</code> 配置，修改后需重启服务生效。
+        </div>
+    </div>
+
+    <!-- ══════ 预设模板 ══════ -->
+    <div class="bg-white p-6 rounded-xl shadow-sm space-y-4 mt-4">
         <div class="flex items-center justify-between">
-            <h2 class="text-lg font-bold">🤖 机器人B站账号</h2>
+            <h2 class="text-lg font-bold">📋 预设模板</h2>
+            <div class="flex gap-2">
+                <button @click="showAddTemplate = 'llm'" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1.5 rounded text-xs">➕ AI模板</button>
+                <button @click="showAddTemplate = 'bot'" class="bg-green-500 hover:bg-green-600 text-white px-3 py-1.5 rounded text-xs">➕ 机器人模板</button>
+            </div>
+        </div>
+        <p class="text-xs text-gray-500">新建直播间时可选择预设模板快速配置。</p>
+
+        <!-- AI模板列表 -->
+        <div>
+            <h3 class="text-sm font-bold mb-2">🤖 AI回复模板</h3>
+            <div v-if="llmTemplates.length === 0" class="text-xs text-gray-400 py-2">暂无模板</div>
+            <div v-for="(t, ti) in llmTemplates" :key="ti" class="border rounded p-3 flex items-center justify-between mb-2">
+                <div>
+                    <span class="font-bold text-sm">{{ t.name }}</span>
+                    <span class="text-xs text-gray-400 ml-2">{{ t.config.model || t.config.provider || '' }}</span>
+                </div>
+                <button @click="deleteTemplate('llm', t.name)" class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
+            </div>
+        </div>
+
+        <!-- 机器人模板列表 -->
+        <div>
+            <h3 class="text-sm font-bold mb-2">🤖 机器人配置模板</h3>
+            <div v-if="botTemplates.length === 0" class="text-xs text-gray-400 py-2">暂无模板</div>
+            <div v-for="(t, ti) in botTemplates" :key="ti" class="border rounded p-3 flex items-center justify-between mb-2">
+                <div>
+                    <span class="font-bold text-sm">{{ t.name }}</span>
+                    <span class="text-xs text-gray-400 ml-2">{{ Object.keys(t.config).length }} 项配置</span>
+                </div>
+                <button @click="deleteTemplate('bot', t.name)" class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
+            </div>
+        </div>
+
+        <!-- 添加模板弹窗 -->
+        <div v-if="showAddTemplate" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showAddTemplate = null">
+            <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4" @click.stop>
+                <div class="p-4 border-b flex items-center justify-between">
+                    <h3 class="font-bold text-lg">📋 {{ showAddTemplate === 'llm' ? 'AI回复模板' : '机器人配置模板' }}</h3>
+                    <button @click="showAddTemplate = null" class="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+                </div>
+                <div class="p-4 space-y-3">
+                    <label class="text-xs text-gray-500 block">模板名称
+                        <input type="text" v-model="templateFormName" class="border p-2 rounded w-full text-sm mt-1" placeholder="例如：标准AI配置">
+                    </label>
+                    <div class="text-xs text-gray-500">
+                        从已有房间导入配置：
+                        <select v-model="templateFormImportRoom" class="border p-2 rounded w-full text-sm mt-1">
+                            <option value="">请选择房间...</option>
+                            <option v-for="r in rooms" :key="r.room_id" :value="r.room_id">#{{ r.room_id }} {{ r.room_name || '' }}</option>
+                        </select>
+                    </div>
+                    <button @click="saveTemplate" :disabled="savingTemplate"
+                            class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
+                        {{ savingTemplate ? '保存中...' : '保存模板' }}
+                    </button>
+                    <div v-if="templateFormMsg" class="text-sm" :class="templateFormOk ? 'text-green-600' : 'text-red-500'">{{ templateFormMsg }}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ══════ 全局控制 ══════ -->
+    <div class="bg-white p-6 rounded-xl shadow-sm space-y-4 mt-4">
+        <h2 class="text-lg font-bold">🔄 全局控制</h2>
+        <div class="flex flex-wrap gap-3 items-center">
+            <button @click="restartAllBots" :disabled="restartingAll"
+                    class="bg-yellow-500 hover:bg-yellow-600 text-white px-5 py-2 rounded text-sm">
+                {{ restartingAll ? '重启中...' : '🔄 重启所有机器人' }}
+            </button>
+            <span v-if="restartAllMsg" class="text-sm" :class="restartAllOk ? 'text-green-600' : 'text-red-500'">{{ restartAllMsg }}</span>
+        </div>
+    </div>
+</div>
+
+<!-- ══════ 用户管理 ══════ -->
+<div v-if="tab==='users'" class="max-w-full sm:max-w-3xl mx-auto px-2 sm:px-0">
+    <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm space-y-4">
+        <div class="flex items-center justify-between">
+            <h2 class="text-lg font-bold">👥 用户管理</h2>
+            <button @click="openAddUser" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">➕ 添加用户</button>
+        </div>
+
+        <div v-if="showUserForm" class="border rounded-lg p-4 bg-gray-50 space-y-3">
+            <h3 class="text-sm font-bold">{{ editingUser ? '编辑用户' : '添加用户' }}</h3>
+            <div class="grid grid-cols-2 gap-3">
+                <label class="text-xs text-gray-500">用户名
+                    <input type="text" v-model="userFormUsername" :disabled="!!editingUser" class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+                <label class="text-xs text-gray-500">密码 <span v-if="editingUser" class="text-gray-400">(留空不修改)</span>
+                    <input type="password" v-model="userFormPassword" :placeholder="editingUser ? '留空不修改' : ''" class="border p-2 rounded w-full text-sm mt-1">
+                </label>
+                <label class="text-xs text-gray-500">角色
+                    <select v-model="userFormRole" class="border p-2 rounded w-full text-sm mt-1">
+                        <option value="user">普通用户</option>
+                        <option value="admin">管理员</option>
+                    </select>
+                </label>
+            </div>
+            <label class="text-xs text-gray-500">授权直播间</label>
+            <div v-if="userFormRole === 'user'" class="relative">
+                <button @click="showUserRoomDropdown = !showUserRoomDropdown"
+                        class="border rounded w-full text-sm p-2 text-left bg-white flex items-center justify-between">
+                    <span v-if="userFormRooms.length === 0" class="text-gray-400">选择房间...</span>
+                    <span v-else class="text-gray-700">{{ userFormRooms.length }} 个房间已选</span>
+                    <span class="text-gray-400">▼</span>
+                </button>
+                <div v-if="showUserRoomDropdown" class="absolute z-50 mt-1 bg-white border rounded shadow-lg w-full max-h-48 overflow-y-auto">
+                    <div v-for="r in allRooms" :key="r.room_id"
+                         class="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 cursor-pointer text-sm"
+                         @click="toggleUserRoom(r.room_id)">
+                        <input type="checkbox" :checked="userFormRooms.includes(r.room_id)" class="w-3.5 h-3.5">
+                        <span>{{ r.room_name || ('#'+r.room_id) }}</span>
+                    </div>
+                    <div v-if="!allRooms.length" class="text-xs text-gray-400 px-3 py-2">暂无房间</div>
+                </div>
+            </div>
+            <div v-if="userFormRole !== 'user'" class="text-xs text-gray-400 mt-1">管理员可查看所有直播间</div>
+            <div class="flex gap-2 mt-2">
+                <button @click="saveUserForm" :disabled="savingUserForm"
+                        class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
+                    {{ savingUserForm ? '保存中...' : (editingUser ? '保存' : '添加') }}
+                </button>
+                <button @click="showUserForm = false; editingUser = null" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
+            </div>
+            <div v-if="userFormMsg" class="text-sm" :class="userFormOk ? 'text-green-600' : 'text-red-500'">{{ userFormMsg }}</div>
+        </div>
+
+        <div v-if="adminUsers.length === 0" class="text-sm text-gray-400 text-center py-8">暂无用户</div>
+        <div v-for="u in adminUsers" :key="u.username"
+             class="border rounded-lg p-4 flex items-center justify-between">
+            <div>
+                <div class="font-bold text-sm">
+                    {{ u.username }}
+                    <span class="text-xs ml-2 px-2 py-0.5 rounded"
+                          :class="u.role === 'admin' ? 'bg-red-100 text-red-600' : 'bg-blue-100 text-blue-600'">{{ u.role === 'admin' ? '管理员' : '普通用户' }}</span>
+                </div>
+                <div class="text-xs text-gray-500 mt-1">
+                    授权房间: {{ u.role === 'admin' ? '全部直播间' : (u.allowed_rooms?.length ? u.allowed_rooms.join(', ') : '无') }}
+                </div>
+            </div>
+            <div class="flex gap-2">
+                <button @click="editUser(u)" class="text-blue-500 hover:text-blue-700 text-xs underline">编辑</button>
+                <button v-if="u.username !== loginUser" @click="deleteUser(u.username)" class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── B站账号（合并到用户管理） ── -->
+    <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm space-y-4 mt-4">
+        <div class="flex items-center justify-between">
+            <h2 class="text-lg font-bold">🤖 B站账号</h2>
             <button @click="toggleNewAccount"
                     class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
                 {{ showNewAccount ? '取消' : '📱 扫码登录' }}
             </button>
         </div>
 
-        <!-- 扫码登录 -->
         <div v-if="showNewAccount" class="border rounded-lg p-4 bg-gray-50 space-y-3">
             <h3 class="text-sm font-bold">扫码登录 B站 账号</h3>
             <p class="text-xs text-gray-500">用 B站 App 扫描二维码即可登录，系统自动识别账号。</p>
@@ -2752,43 +3080,29 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
                 {{ accountLoggingIn ? '请稍候...' : '生成二维码' }}
             </button>
-
             <div v-if="accountQrImage" class="flex flex-col items-center space-y-2">
                 <img :src="accountQrImage" class="border-2 border-gray-200 rounded-lg" style="width:180px;height:180px">
                 <div class="flex items-center gap-2">
                     <span class="inline-block w-3 h-3 rounded-full bg-green-400 animate-pulse"></span>
                     <span class="text-sm">请用 B站 App 扫码</span>
                 </div>
-                <div v-if="accountQrState === 'scanned'" class="text-yellow-600 text-sm">
-                    已扫码，请在手机上确认
-                </div>
-                <div v-if="accountQrState === 'done'" class="text-green-600 text-sm font-bold">
-                    ✅ 登录成功，即将返回...
-                </div>
-                <div v-if="accountQrState === 'timeout' || accountQrState === 'expired'" class="text-red-500 text-sm">
-                    ⏰ 二维码已过期
-                </div>
-                <div v-if="accountQrState === 'error'" class="text-red-500 text-sm">
-                    {{ accountQrError }}
-                </div>
+                <div v-if="accountQrState === 'scanned'" class="text-yellow-600 text-sm">已扫码，请在手机上确认</div>
+                <div v-if="accountQrState === 'done'" class="text-green-600 text-sm font-bold">✅ 登录成功，即将返回...</div>
+                <div v-if="accountQrState === 'timeout' || accountQrState === 'expired'" class="text-red-500 text-sm">⏰ 二维码已过期</div>
+                <div v-if="accountQrState === 'error'" class="text-red-500 text-sm">{{ accountQrError }}</div>
                 <div v-if="accountQrState === 'waiting' || accountQrState === 'scanned' || accountQrState === 'timeout' || accountQrState === 'expired'" class="flex gap-2 justify-center">
                     <button @click="refreshQrCode" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-1.5 rounded text-sm">🔄 刷新二维码</button>
                 </div>
             </div>
         </div>
 
-        <!-- 账号列表 -->
-        <div v-if="!accounts || accounts.length === 0" class="text-sm text-gray-400 text-center py-8">
-            暂无已登录的 B站 账号。
-        </div>
+        <div v-if="!accounts || accounts.length === 0" class="text-sm text-gray-400 text-center py-8">暂无已登录的 B站 账号。</div>
         <div v-if="accounts && accounts.length > 1" class="flex justify-end">
-            <button @click="verifyAllAccounts" :disabled="verifyingAll"
-                    class="text-blue-500 hover:text-blue-700 text-xs underline">
+            <button @click="verifyAllAccounts" :disabled="verifyingAll" class="text-blue-500 hover:text-blue-700 text-xs underline">
                 {{ verifyingAll ? (`验证中 ${verifyQueue.length + 1}/${accounts.length}...`) : '🔍 一键检测所有' }}
             </button>
         </div>
-        <div v-for="a in accounts" :key="a.uid"
-             class="border rounded-lg p-4 flex items-center justify-between">
+        <div v-for="a in accounts" :key="a.uid" class="border rounded-lg p-4 flex items-center justify-between">
             <div>
                 <div class="font-bold text-sm">
                     <template v-if="editingNickname === a.uid">
@@ -2811,172 +3125,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <button @click="verifyAccount(a.uid)" :disabled="a.verifying" class="text-green-500 hover:text-green-700 text-xs underline">
                     {{ a.verifying ? '验证中...' : (a.credential_ok === true ? '✅ 有效' : (a.credential_ok === false ? '❌ 失效' : '验证')) }}
                 </button>
-                <button @click="deleteAccount(a.uid, a.nickname)"
-                        class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
+                <button @click="deleteAccount(a.uid, a.nickname)" class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
             </div>
         </div>
     </div>
 </div>
-
-<!-- ══════ 全局配置 ══════ -->
-<div v-if="tab==='global'" class="max-w-2xl mx-auto">
-    <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
-        <h2 class="text-lg font-bold">⚙️ 全局配置</h2>
-        <div class="grid grid-cols-2 gap-4">
-            <label class="text-xs text-gray-500">Web 端口
-                <input type="number" v-model.number="cfgPort" min="1024" max="65535" class="border p-2 rounded w-full text-sm mt-1">
-            </label>
-            <label class="text-xs text-gray-500">监听地址
-                <input type="text" v-model="cfgHost" class="border p-2 rounded w-full text-sm mt-1" placeholder="0.0.0.0">
-            </label>
-        </div>
-        <div class="flex items-center gap-4">
-            <button @click="saveGlobalConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
-            <span v-if="cfgSaveMsg" class="text-sm" :class="cfgSaveOk ? 'text-green-600' : 'text-red-500'">{{ cfgSaveMsg }}</span>
-        </div>
-    </div>
-
-    <div class="bg-white p-6 rounded-xl shadow-sm space-y-4 mt-4">
-        <h2 class="text-lg font-bold">👥 账号管理</h2>
-        <p class="text-xs text-gray-500">管理员可查看所有房间。主播只能看到自己被分配的直播间。</p>
-
-        <!-- 主播账号列表 -->
-        <div class="space-y-2">
-            <div class="flex items-center justify-between">
-                <h3 class="text-sm font-bold">主播账号</h3>
-                <button @click="showStreamerForm = 'add'" class="text-blue-500 hover:text-blue-700 text-xs underline">➕ 添加主播</button>
-            </div>
-
-            <div v-if="showStreamerForm" class="border rounded-lg p-3 bg-gray-50 space-y-2">
-                <h4 class="text-sm font-bold">{{ showStreamerForm === 'add' ? '添加主播' : '编辑主播' }}</h4>
-                <div class="grid grid-cols-2 gap-2">
-                    <label class="text-xs text-gray-500">用户名
-                        <input type="text" v-model="editStreamerUser" :disabled="showStreamerForm==='edit'" class="border p-1 rounded w-full text-sm mt-1">
-                    </label>
-                    <label class="text-xs text-gray-500">密码
-                        <input type="password" v-model="editStreamerPass" :placeholder="showStreamerForm==='edit' ? '留空不修改' : ''" class="border p-1 rounded w-full text-sm mt-1">
-                    </label>
-                </div>
-                <label class="text-xs text-gray-500">可查看的房间</label>
-                <div class="relative">
-                    <button @click="showRoomDropdown = !showRoomDropdown"
-                            class="border rounded w-full text-sm mt-1 p-2 text-left bg-white flex items-center justify-between">
-                        <span v-if="editStreamerRooms.length === 0" class="text-gray-400">选择房间...</span>
-                        <span v-else class="text-gray-700">{{ editStreamerRooms.length }} 个房间已选</span>
-                        <span class="text-gray-400">▼</span>
-                    </button>
-                    <div v-if="showRoomDropdown" class="absolute z-50 mt-1 bg-white border rounded shadow-lg w-full max-h-48 overflow-y-auto">
-                        <div v-for="r in allRooms" :key="r.room_id"
-                             class="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 cursor-pointer text-sm"
-                             @click="toggleStreamerRoom(r.room_id)">
-                            <input type="checkbox" :checked="editStreamerRooms.includes(r.room_id)" class="w-3.5 h-3.5">
-                            <span>{{ r.room_name || ('#'+r.room_id) }}</span>
-                        </div>
-                        <div v-if="!allRooms.length" class="text-xs text-gray-400 px-3 py-2">暂无房间</div>
-                    </div>
-                </div>
-                <div class="flex gap-2 mt-2">
-                    <button @click="saveStreamer" :disabled="savingStreamer"
-                            class="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded text-sm">
-                        {{ savingStreamer ? '保存中...' : (showStreamerForm === 'add' ? '添加' : '保存') }}
-                    </button>
-                    <button @click="showStreamerForm = null" class="bg-gray-300 hover:bg-gray-400 px-3 py-1 rounded text-sm">取消</button>
-                </div>
-                <div v-if="streamerMsg" class="text-sm" :class="streamerOk ? 'text-green-600' : 'text-red-500'">{{ streamerMsg }}</div>
-            </div>
-
-            <div v-if="!streamers || streamers.length === 0" class="text-sm text-gray-400 text-center py-4">
-                暂无主播账号。
-            </div>
-            <div v-for="s in streamers" :key="s.username"
-                 class="border rounded p-3 flex items-center justify-between">
-                <div>
-                    <div class="font-bold text-sm">{{ s.username }}</div>
-                    <div class="text-xs text-gray-500">可查看: {{ s.rooms?.join(', ') || '无' }}</div>
-                </div>
-                <div class="flex gap-2">
-                    <button @click="editStreamer(s)" class="text-blue-500 hover:text-blue-700 text-xs underline">编辑</button>
-                    <button @click="deleteStreamer(s.username)" class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- ══════ 用户管理 ══════ -->
-<div v-if="tab==='users'" class="max-w-3xl mx-auto">
-    <div class="bg-white p-6 rounded-xl shadow-sm space-y-4">
-        <div class="flex items-center justify-between">
-            <h2 class="text-lg font-bold">👥 用户管理</h2>
-            <button @click="openAddUser" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">➕ 添加用户</button>
-        </div>
-
-        <div v-if="showUserForm" class="border rounded-lg p-4 bg-gray-50 space-y-3">
-            <h3 class="text-sm font-bold">{{ editingUser ? '编辑用户' : '添加用户' }}</h3>
-            <div class="grid grid-cols-2 gap-3">
-                <label class="text-xs text-gray-500">用户名
-                    <input type="text" v-model="userFormUsername" :disabled="!!editingUser" class="border p-2 rounded w-full text-sm mt-1">
-                </label>
-                <label class="text-xs text-gray-500">密码 <span v-if="editingUser" class="text-gray-400">(留空不修改)</span>
-                    <input type="password" v-model="userFormPassword" :placeholder="editingUser ? '留空不修改' : ''" class="border p-2 rounded w-full text-sm mt-1">
-                </label>
-                <label class="text-xs text-gray-500">角色
-                    <select v-model="userFormRole" class="border p-2 rounded w-full text-sm mt-1">
-                        <option value="user">普通用户</option>
-                        <option value="admin">管理员</option>
-                    </select>
-                </label>
-            </div>
-            <label class="text-xs text-gray-500">授权直播间（普通用户可选）</label>
-            <div class="relative">
-                <button @click="showUserRoomDropdown = !showUserRoomDropdown"
-                        class="border rounded w-full text-sm p-2 text-left bg-white flex items-center justify-between">
-                    <span v-if="userFormRooms.length === 0" class="text-gray-400">选择房间...</span>
-                    <span v-else class="text-gray-700">{{ userFormRooms.length }} 个房间已选</span>
-                    <span class="text-gray-400">▼</span>
-                </button>
-                <div v-if="showUserRoomDropdown" class="absolute z-50 mt-1 bg-white border rounded shadow-lg w-full max-h-48 overflow-y-auto">
-                    <div v-for="r in allRooms" :key="r.room_id"
-                         class="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 cursor-pointer text-sm"
-                         @click="toggleUserRoom(r.room_id)">
-                        <input type="checkbox" :checked="userFormRooms.includes(r.room_id)" class="w-3.5 h-3.5">
-                        <span>{{ r.room_name || ('#'+r.room_id) }}</span>
-                    </div>
-                    <div v-if="!allRooms.length" class="text-xs text-gray-400 px-3 py-2">暂无房间</div>
-                </div>
-            </div>
-            <div class="flex gap-2 mt-2">
-                <button @click="saveUserForm" :disabled="savingUserForm"
-                        class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
-                    {{ savingUserForm ? '保存中...' : (editingUser ? '保存' : '添加') }}
-                </button>
-                <button @click="showUserForm = false; editingUser = null" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
-            </div>
-            <div v-if="userFormMsg" class="text-sm" :class="userFormOk ? 'text-green-600' : 'text-red-500'">{{ userFormMsg }}</div>
-        </div>
-
-        <div v-if="adminUsers.length === 0" class="text-sm text-gray-400 text-center py-8">暂无用户</div>
-        <div v-for="u in adminUsers" :key="u.username"
-             class="border rounded-lg p-4 flex items-center justify-between">
-            <div>
-                <div class="font-bold text-sm">
-                    {{ u.username }}
-                    <span class="text-xs ml-2 px-2 py-0.5 rounded"
-                          :class="u.role === 'admin' ? 'bg-red-100 text-red-600' : 'bg-blue-100 text-blue-600'">{{ u.role === 'admin' ? '管理员' : '普通用户' }}</span>
-                </div>
-                <div class="text-xs text-gray-500 mt-1">
-                    授权房间: {{ u.allowed_rooms?.length ? u.allowed_rooms.join(', ') : '无' }}
-                </div>
-            </div>
-            <div class="flex gap-2">
-                <button @click="editUser(u)" class="text-blue-500 hover:text-blue-700 text-xs underline">编辑</button>
-                <button v-if="u.username !== 'admin'" @click="deleteUser(u.username)" class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- ══════ 帮助页面 ══════ -->
 <div v-if="tab==='help'" class="max-w-3xl mx-auto">
     <div class="bg-white p-6 rounded-xl shadow-sm space-y-6 text-sm leading-relaxed">
         <h2 class="text-lg font-bold">📖 使用指南</h2>
@@ -3020,11 +3173,14 @@ createApp({
         const loginErr = ref('');
         const tab = ref('rooms');
         const userRole = ref('');
+        const mustResetPwd = ref(false);
 
         // 修改密码
         const showChangePwd = ref(false);
         const changePwdOld = ref('');
         const changePwdNew = ref('');
+        const changePwdConfirm = ref('');
+        const changePwdNewUser = ref('');
         const changePwdMsg = ref('');
         const changePwdOk = ref(false);
 
@@ -3152,10 +3308,30 @@ createApp({
         const editingRoomName = ref(false);
         const roomNameEdit = ref('');
 
+        // 模板管理
+        const llmTemplates = ref([]);
+        const botTemplates = ref([]);
+        const showAddTemplate = ref(null);  // 'llm' | 'bot' | null
+        const templateFormName = ref('');
+        const templateFormImportRoom = ref('');
+        const savingTemplate = ref(false);
+        const templateFormMsg = ref('');
+        const templateFormOk = ref(false);
+        const newRoomLlmTemplate = ref('');
+        const newRoomBotTemplate = ref('');
+        const restartingAll = ref(false);
+        const restartAllMsg = ref('');
+        const restartAllOk = ref(false);
+        const applyLlmTemplate = ref('');
+        const applyBotTemplate = ref('');
+        const applyTemplateMsg = ref('');
+        const applyTemplateOk = ref(false);
+
         // LLM Config
         const llmEnabled = ref(false);
         const llmProvider = ref('openai');
         const llmApiKey = ref('');
+        const llmApiKeyReal = ref('');  // 真实的 API key（不掩码）
         const llmBaseUrl = ref('');
         const llmModel = ref('');
         const llmWakeWord = ref('ayabot');
@@ -3176,7 +3352,7 @@ createApp({
 
         // General Config
         const cfgHost = ref('0.0.0.0');
-        const cfgPort = ref(8000);
+        const cfgPort = ref(19810);
         const cfgRoomId = ref(0);
         const cfgAnchorUid = ref(0);
         const cfgWelcomeCd = ref(600);
@@ -3228,11 +3404,23 @@ createApp({
                 loggedIn.value = true;
                 userRole.value = data.role || '';
                 if (!loginUser.value && data.username) loginUser.value = data.username;
+                if (data.must_reset_password) {
+                    mustResetPwd.value = true;
+                    showChangePwd.value = true;
+                    changePwdNewUser.value = loginUser.value;
+                    changePwdOld.value = loginPass.value; // 默认密码即登录密码
+                    changePwdNew.value = '';
+                    changePwdConfirm.value = '';
+                    changePwdMsg.value = '⚠️ 首次登录请先修改默认密码';
+                    changePwdOk.value = false;
+                    return;
+                }
                 await loadLlmConfig();
                 await loadGeneralConfig();
                 await loadRooms();
                 await loadAccounts();
                 await loadUsers();
+                await loadTemplates();
             } catch(e) { loginErr.value = '登录失败: ' + e.message; }
         }
         function doLogout() {
@@ -3669,8 +3857,10 @@ createApp({
         // ── Danmaku Log ──
         async function loadDanmakuLog() {
             danmakuErr.value = '';
+            const roomId = selectedRoom.value?.room_id;
+            if (!roomId) return;
             try {
-                const res = await fetch(`/api/danmaku_log?limit=${danmakuLimit.value}&offset=${danmakuOffset.value}`, {credentials: 'include'});
+                const res = await fetch(`/api/danmaku_log?room_id=${roomId}&limit=${danmakuLimit.value}&offset=${danmakuOffset.value}`, {credentials: 'include'});
                 if (res.status === 401) { loggedIn.value = false; return; }
                 if (!res.ok) throw new Error((await res.text()).slice(0,80));
                 const data = await res.json();
@@ -3679,9 +3869,11 @@ createApp({
         }
         async function clearDanmakuLog() {
             if (!confirm('确定清空所有弹幕记录？此操作不可恢复！')) return;
+            const roomId = selectedRoom.value?.room_id;
+            if (!roomId) return;
             danmakuErr.value = '';
             try {
-                const res = await fetch('/api/danmaku_log', {method: 'DELETE', credentials: 'include'});
+                const res = await fetch(`/api/danmaku_log?room_id=${roomId}`, {method: 'DELETE', credentials: 'include'});
                 if (res.status === 401) { loggedIn.value = false; return; }
                 if (!res.ok) throw new Error((await res.text()).slice(0,80));
                 const data = await res.json();
@@ -3698,6 +3890,28 @@ createApp({
 
         // ── LLM Config ──
         async function loadLlmConfig() {
+            // 如果当前在房间详情中，从房间配置加载 LLM 设置
+            if (selectedRoom.value && roomConfig.value?.llm) {
+                const llm = roomConfig.value.llm;
+                llmEnabled.value = llm.enabled ?? false;
+                llmProvider.value = llm.provider || 'openai';
+                llmBaseUrl.value = llm.base_url || '';
+                llmModel.value = llm.model || '';
+                llmWakeWord.value = llm.wake_word || 'ayabot';
+                llmTemp.value = llm.temperature ?? 0.7;
+                llmTopP.value = llm.top_p ?? 0.9;
+                llmMaxTokens.value = llm.max_tokens ?? 150;
+                llmPrompt.value = llm.system_prompt || '';
+                llmApiKeyReal.value = llm.api_key || '';
+                llmApiKey.value = llm.api_key ? '********' : '';
+                if (llm.context) {
+                    ctxEnabled.value = llm.context.enabled ?? true;
+                    ctxMode.value = llm.context.mode || 'isolated';
+                    ctxContent.value = llm.context.content || 'llm_only';
+                    ctxMaxMsg.value = llm.context.max_messages ?? 10;
+                }
+                return;
+            }
             try {
                 const res = await fetch('/api/llm_config', {credentials: 'include'});
                 if (res.status === 401) { loggedIn.value = false; return; }
@@ -3712,6 +3926,7 @@ createApp({
                 llmTopP.value = data.top_p ?? 0.9;
                 llmMaxTokens.value = data.max_tokens ?? 150;
                 llmPrompt.value = data.system_prompt;
+                llmApiKeyReal.value = data.api_key || '';
                 if (data.has_api_key) {
                     llmApiKey.value = '********';
                 }
@@ -3744,6 +3959,21 @@ createApp({
             };
             if (llmApiKey.value && llmApiKey.value !== '********') {
                 body.api_key = llmApiKey.value;
+            }
+            // 如果在房间内，同时保存到房间配置
+            if (selectedRoom.value) {
+                try {
+                    const roomBody = JSON.parse(JSON.stringify(roomConfig.value || {}));
+                    roomBody.llm = JSON.parse(JSON.stringify(body));
+                    const res2 = await fetch(`/api/rooms/${selectedRoom.value.room_id}/config`, {
+                        method: 'POST', headers: {'Content-Type':'application/json'},
+                        credentials: 'include', body: JSON.stringify(roomBody),
+                    });
+                    if (res2.ok) {
+                        // 更新内存中的 roomConfig
+                        if (roomConfig.value) roomConfig.value.llm = JSON.parse(JSON.stringify(body));
+                    }
+                } catch(e) { /* room save best-effort */ }
             }
             try {
                 const res = await fetch('/api/llm_config', {
@@ -3810,7 +4040,7 @@ createApp({
                 const data = await res.json();
                 if (data.error) return;
                 cfgHost.value = data.web_ui?.host || '0.0.0.0';
-                cfgPort.value = data.web_ui?.port || 8000;
+                cfgPort.value = data.web_ui?.port || 19810;
                 cfgRoomId.value = data.room_display_id || 0;
                 cfgAnchorUid.value = data.anchor_uid || 0;
                 cfgWelcomeCd.value = data.cooldown?.welcome_user_seconds ?? 600;
@@ -3906,6 +4136,7 @@ createApp({
         }
         async function createRoom() {
             if (!newRoomUid.value) { createRoomMsg.value = '请填写主播 UID'; createRoomOk.value = false; return; }
+            if (!newRoomDisplayId.value) { createRoomMsg.value = '请填写直播间号'; createRoomOk.value = false; return; }
             creatingRoom.value = true;
             createRoomMsg.value = '';
             try {
@@ -3924,7 +4155,7 @@ createApp({
                 if (res.status === 401) { loggedIn.value = false; return; }
                 const data = await res.json();
                 if (data.ok) {
-                    createRoomMsg.value = `✅ 房间 ${data.room_id}（${data.room_display_id}）创建成功！`;
+                    createRoomMsg.value = `✅ 房间 ${data.room_id} 创建成功！`;
                     createRoomOk.value = true;
                     showCreateRoom.value = false;
                     // 关联 B站 账号
@@ -3938,11 +4169,35 @@ createApp({
                             });
                         } catch(e) { /* ignore */ }
                     }
+                    // 应用预设模板
+                    if (newRoomLlmTemplate.value || newRoomBotTemplate.value) {
+                        const tplRes = await fetch('/api/templates', {credentials: 'include'});
+                        const tplData = await tplRes.json();
+                        const body = {};
+                        if (newRoomLlmTemplate.value) {
+                            const tpl = (tplData.llm_templates || []).find(t => t.name === newRoomLlmTemplate.value);
+                            if (tpl) body.llm = tpl.config;
+                        }
+                        if (newRoomBotTemplate.value) {
+                            const tpl = (tplData.bot_templates || []).find(t => t.name === newRoomBotTemplate.value);
+                            if (tpl) body.features = tpl.config;
+                        }
+                        if (Object.keys(body).length) {
+                            await fetch(`/api/rooms/${data.room_id}/config`, {
+                                method: 'POST',
+                                headers: {'Content-Type':'application/json'},
+                                credentials: 'include',
+                                body: JSON.stringify(body),
+                            });
+                        }
+                    }
                     newRoomUid.value = 0;
                     newRoomName.value = '';
                     newRoomPort.value = 8001;
                     newRoomDisplayId.value = 0;
                     newRoomAccount.value = '';
+                    newRoomLlmTemplate.value = '';
+                    newRoomBotTemplate.value = '';
                     await loadRooms();
                 } else {
                     createRoomMsg.value = '❌ ' + (data.error || '创建失败');
@@ -3998,15 +4253,18 @@ createApp({
                 const data = await res.json();
                 if (data.error) throw new Error(data.error);
                 roomConfig.value = data;
-                // 确保默认结构存在
-                if (!roomConfig.value.keyword_reply) {
+                // 确保 keyword_reply 存在（优先从 features 读取，兼容旧格式）
+                const kr = data.keyword_reply || data.features?.keyword_reply;
+                if (kr) {
+                    roomConfig.value.keyword_reply = JSON.parse(JSON.stringify(kr));
+                    roomConfig.value.keyword_reply.rules = (kr.rules || []).map(r => ({
+                        ...r,
+                        keywordsStr: (r.keywords || []).join(", "),
+                        allowedUidsStr: (r.allowed_uids || []).join(", "),
+                    }));
+                } else {
                     roomConfig.value.keyword_reply = {enabled: false, cooldown: 30, rules: []};
                 }
-                roomConfig.value.keyword_reply.rules = (roomConfig.value.keyword_reply.rules || []).map(r => ({
-                    ...r,
-                    keywordsStr: (r.keywords || []).join(", "),
-                    allowedUidsStr: (r.allowed_uids || []).join(", "),
-                }));
                 if (!roomConfig.value.custom_fortunes) {
                     roomConfig.value.custom_fortunes = {daiji: "", zhongji: "", xiaoji: "", moji: "", xiong: "", daxiong: ""};
                 }
@@ -4014,13 +4272,6 @@ createApp({
                 // 转换 UID 欢迎模板 dict → entries 数组
                 const wtfu = roomConfig.value.features.welcome_templates_for_uids || {};
                 roomConfig.value.features.welcome_templates_for_uids_entries = Object.entries(wtfu).map(([uid, tmpl]) => ({uid: Number(uid), template: tmpl}));
-                // 转换 uid_configs array → entries with keyword_rules_str
-                const ucfgs = roomConfig.value.features.uid_configs || [];
-                roomConfig.value.features.uid_configs_entries = ucfgs.map(uc => ({
-                    uid: uc.uid || 0,
-                    welcome_template: uc.welcome_template || "",
-                    keyword_rules_str: (uc.keyword_rules || []).join(", "),
-                }));
                 // 确保大航海欢迎模板存在
                 if (!roomConfig.value.features.guard_welcome_templates) {
                     roomConfig.value.features.guard_welcome_templates = {captain: "", commander: "", governor: ""};
@@ -4048,15 +4299,6 @@ createApp({
                 }
                 body.features.welcome_templates_for_uids = Object.keys(wtfu).length ? wtfu : null;
                 delete body.features.welcome_templates_for_uids_entries;
-            }
-            // 转换 uid_configs_entries → array
-            if (body.features && body.features.uid_configs_entries) {
-                body.features.uid_configs = body.features.uid_configs_entries.map(uc => ({
-                    uid: Number(uc.uid) || 0,
-                    welcome_template: uc.welcome_template || "",
-                    keyword_rules: uc.keyword_rules_str ? uc.keyword_rules_str.split(/[,，]\s*/).filter(Boolean) : [],
-                })).filter(uc => uc.uid > 0);
-                delete body.features.uid_configs_entries;
             }
             try {
                 const res = await fetch(`/api/rooms/${editingRoom.value}/config`, {
@@ -4177,56 +4419,61 @@ createApp({
             }
         }
 
-        async function saveGlobalConfig() {
-            cfgSaveMsg.value = '';
-            try {
-                const res = await fetch('/api/general_config', {
-                    method: 'POST',
-                    headers: {'Content-Type':'application/json'},
-                    credentials: 'include',
-                    body: JSON.stringify({web_ui: {host: cfgHost.value, port: cfgPort.value}}),
-                });
-                if (res.status === 401) { loggedIn.value = false; return; }
-                if (!res.ok) throw new Error((await res.text()).slice(0,80));
-                const data = await res.json();
-                if (data.ok) {
-                    cfgSaveMsg.value = '已保存';
-                    cfgSaveOk.value = true;
-                } else {
-                    cfgSaveMsg.value = '保存失败';
-                    cfgSaveOk.value = false;
-                }
-            } catch(e) {
-                cfgSaveMsg.value = '保存失败: ' + e.message;
-                cfgSaveOk.value = false;
-            }
-        }
-
         // ── Change Password ──
         function openChangePwd() {
             showUserMenu.value = false;
             showChangePwd.value = true;
             changePwdOld.value = '';
             changePwdNew.value = '';
+            changePwdConfirm.value = '';
+            changePwdNewUser.value = loginUser.value;
             changePwdMsg.value = '';
             changePwdOk.value = false;
         }
         async function doChangePwd() {
-            if (!changePwdOld.value || !changePwdNew.value) { changePwdMsg.value = '请填写当前密码和新密码'; changePwdOk.value = false; return; }
-            if (changePwdNew.value.length < 4) { changePwdMsg.value = '密码至少4位'; changePwdOk.value = false; return; }
+            // 清理两端空格避免输入法或粘贴导致不一致
+            const newPwd = String(changePwdNew.value || '').trim();
+            const confirmPwd = String(changePwdConfirm.value || '').trim();
+            changePwdNew.value = newPwd;
+            changePwdConfirm.value = confirmPwd;
+            if (!changePwdOld.value || !newPwd) { changePwdMsg.value = '请填写当前密码和新密码'; changePwdOk.value = false; return; }
+            if (newPwd.length < 4) { changePwdMsg.value = '密码至少4位'; changePwdOk.value = false; return; }
+            if (newPwd !== confirmPwd) { changePwdMsg.value = '两次输入的密码不一致'; changePwdOk.value = false; return; }
+            if (!changePwdNewUser.value) { changePwdMsg.value = '请输入用户名'; changePwdOk.value = false; return; }
             changePwdMsg.value = '';
             try {
+                const body = {old_password: changePwdOld.value, new_password: changePwdNew.value};
+                if (changePwdNewUser.value !== loginUser.value) {
+                    body.new_username = changePwdNewUser.value;
+                }
                 const res = await fetch('/api/user/password', {
                     method: 'POST',
                     headers: {'Content-Type':'application/json'},
                     credentials: 'include',
-                    body: JSON.stringify({old_password: changePwdOld.value, new_password: changePwdNew.value}),
+                    body: JSON.stringify(body),
                 });
                 const data = await res.json();
                 if (data.ok) {
                     changePwdMsg.value = '✅ 密码已修改';
                     changePwdOk.value = true;
-                    setTimeout(() => { showChangePwd.value = false; }, 1500);
+                    if (data.new_username) {
+                        loginUser.value = data.new_username;
+                    }
+                    if (mustResetPwd.value) {
+                        mustResetPwd.value = false;
+                        changePwdMsg.value = '✅ 密码已修改，即将进入管理后台...';
+                        setTimeout(() => {
+                            showChangePwd.value = false;
+                            loadLlmConfig();
+                            loadGeneralConfig();
+                            loadRooms();
+                            loadAccounts();
+                            loadUsers();
+                            loadTemplates();
+                        }, 1000);
+                    } else {
+                        setTimeout(() => { showChangePwd.value = false; }, 1500);
+                    }
                 } else {
                     changePwdMsg.value = '❌ ' + (data.error || '修改失败');
                     changePwdOk.value = false;
@@ -4440,6 +4687,21 @@ createApp({
         function removeKeywordRule(idx) {
             roomConfig.value.keyword_reply.rules.splice(idx, 1);
         }
+        // ── UID欢迎模板弹窗 ──
+        const showUidWelcomeModal = ref(false);
+        const uidWelcomeEditEntries = ref([]);
+        function openUidWelcomeModal() {
+            uidWelcomeEditEntries.value = JSON.parse(JSON.stringify(roomConfig.value.features.welcome_templates_for_uids_entries || []));
+            showUidWelcomeModal.value = true;
+        }
+        function closeUidWelcomeModal() {
+            showUidWelcomeModal.value = false;
+            uidWelcomeEditEntries.value = [];
+        }
+        function saveUidWelcomeModal() {
+            roomConfig.value.features.welcome_templates_for_uids_entries = JSON.parse(JSON.stringify(uidWelcomeEditEntries.value));
+            closeUidWelcomeModal();
+        }
         function addUidWelcomeTemplate() {
             if (!roomConfig.value.features.welcome_templates_for_uids_entries) roomConfig.value.features.welcome_templates_for_uids_entries = [];
             roomConfig.value.features.welcome_templates_for_uids_entries.push({uid: 0, template: ""});
@@ -4447,17 +4709,183 @@ createApp({
         function removeUidWelcomeTemplate(idx) {
             roomConfig.value.features.welcome_templates_for_uids_entries.splice(idx, 1);
         }
-        function addUidConfig() {
-            if (!roomConfig.value.features.uid_configs_entries) roomConfig.value.features.uid_configs_entries = [];
-            roomConfig.value.features.uid_configs_entries.push({uid: 0, welcome_template: "", keyword_rules_str: ""});
+        // ── 关键词回复弹窗 ──
+        const showKeywordModal = ref(false);
+        const keywordEditRules = ref([]);
+        function openKeywordModal() {
+            keywordEditRules.value = JSON.parse(JSON.stringify((roomConfig.value.keyword_reply.rules || []).map(r => ({
+                ...r,
+                keywordsStr: r.keywordsStr || (r.keywords || []).join(", "),
+                allowedUidsStr: r.allowedUidsStr || (r.allowed_uids || []).join(", "),
+            }))));
+            showKeywordModal.value = true;
         }
-        function removeUidConfig(idx) {
-            roomConfig.value.features.uid_configs_entries.splice(idx, 1);
+        function closeKeywordModal() {
+            showKeywordModal.value = false;
+            keywordEditRules.value = [];
+        }
+        function saveKeywordModal() {
+            roomConfig.value.keyword_reply.rules = JSON.parse(JSON.stringify(keywordEditRules.value));
+            closeKeywordModal();
+        }
+
+        // ── 预设模板管理 ──
+        async function loadTemplates() {
+            try {
+                const res = await fetch('/api/templates', {credentials: 'include'});
+                if (res.status === 401) { loggedIn.value = false; return; }
+                if (!res.ok) return;
+                const data = await res.json();
+                llmTemplates.value = data.llm_templates || [];
+                botTemplates.value = data.bot_templates || [];
+            } catch(e) { /* ignore */ }
+        }
+        async function saveTemplate() {
+            if (!templateFormName.value) { templateFormMsg.value = '请输入模板名称'; templateFormOk.value = false; return; }
+            if (!templateFormImportRoom.value) { templateFormMsg.value = '请选择要导入的房间'; templateFormOk.value = false; return; }
+            const ttype = showAddTemplate.value;
+            if (!ttype) return;
+            savingTemplate.value = true;
+            templateFormMsg.value = '';
+            try {
+                // 从房间导入配置
+                const configRes = await fetch(`/api/rooms/${templateFormImportRoom.value}/config`, {credentials: 'include'});
+                if (!configRes.ok) {
+                    const errText = await configRes.text().catch(() => '');
+                    throw new Error('读取房间配置失败: ' + (errText || configRes.status));
+                }
+                const roomCfg = await configRes.json();
+                let config = {};
+                if (ttype === 'llm') {
+                    // AI 配置是全局的（存于 _LLM_CONFIG_DICT），使用当前表单值
+                    config = {
+                        enabled: llmEnabled.value,
+                        provider: llmProvider.value,
+                        base_url: llmBaseUrl.value,
+                        model: llmModel.value,
+                        wake_word: llmWakeWord.value,
+                        temperature: llmTemp.value,
+                        top_p: llmTopP.value,
+                        max_tokens: llmMaxTokens.value,
+                        system_prompt: llmPrompt.value,
+                        context: {
+                            enabled: ctxEnabled.value,
+                            mode: ctxMode.value,
+                            content: ctxContent.value,
+                            max_messages: ctxMaxMsg.value,
+                        },
+                    };
+                    // API key：表单里如果是掩码则用真实值
+                    if (llmApiKey.value && llmApiKey.value !== '********') {
+                        config.api_key = llmApiKey.value;
+                    } else if (llmApiKeyReal.value) {
+                        config.api_key = llmApiKeyReal.value;
+                    }
+                } else {
+                    config = roomCfg.features || {};
+                }
+                const res = await fetch('/api/templates', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    credentials: 'include',
+                    body: JSON.stringify({type: ttype, name: templateFormName.value, config}),
+                });
+                if (!res.ok) throw new Error('保存失败');
+                templateFormMsg.value = '✅ 模板已保存';
+                templateFormOk.value = true;
+                showAddTemplate.value = null;
+                templateFormName.value = '';
+                templateFormImportRoom.value = '';
+                await loadTemplates();
+            } catch(e) {
+                templateFormMsg.value = '❌ ' + e.message;
+                templateFormOk.value = false;
+            } finally { savingTemplate.value = false; }
+        }
+        async function deleteTemplate(ttype, name) {
+            try {
+                await fetch('/api/templates', {
+                    method: 'DELETE',
+                    headers: {'Content-Type':'application/json'},
+                    credentials: 'include',
+                    body: JSON.stringify({type: ttype, name}),
+                });
+                await loadTemplates();
+            } catch(e) { /* ignore */ }
+        }
+        async function restartAllBots() {
+            restartingAll.value = true;
+            restartAllMsg.value = '';
+            try {
+                const res = await fetch('/api/restart_all_bots', {method: 'POST', credentials: 'include'});
+                const data = await res.json();
+                if (data.ok) {
+                    restartAllMsg.value = `✅ 已触发 ${data.count} 个机器人重启`;
+                    restartAllOk.value = true;
+                } else {
+                    restartAllMsg.value = '❌ 重启失败';
+                    restartAllOk.value = false;
+                }
+            } catch(e) {
+                restartAllMsg.value = '❌ ' + e.message;
+                restartAllOk.value = false;
+            } finally { restartingAll.value = false; }
+        }
+        async function restartSingleBot(roomId) {
+            try {
+                await fetch(`/api/rooms/${roomId}/restart`, {method: 'POST', credentials: 'include'});
+                roomSaveMsg.value = '✅ 已触发重启';
+                roomSaveOk.value = true;
+                setTimeout(() => { roomSaveMsg.value = ''; }, 3000);
+            } catch(e) { /* ignore */ }
+        }
+        // ── 套用模板 ──
+        async function applyTemplateToLlm() {
+            const tpl = llmTemplates.value.find(t => t.name === applyLlmTemplate.value);
+            if (!tpl) return;
+            const c = tpl.config;
+            llmEnabled.value = c.enabled ?? false;
+            llmProvider.value = c.provider || 'openai';
+            if (c.api_key) llmApiKey.value = c.api_key;
+            llmBaseUrl.value = c.base_url || '';
+            llmModel.value = c.model || '';
+            llmWakeWord.value = c.wake_word || 'ayabot';
+            llmTemp.value = c.temperature ?? 0.7;
+            llmTopP.value = c.top_p ?? 0.9;
+            llmMaxTokens.value = c.max_tokens ?? 150;
+            llmPrompt.value = c.system_prompt || '';
+            if (c.context) {
+                ctxEnabled.value = c.context.enabled ?? true;
+                ctxMode.value = c.context.mode || 'isolated';
+                ctxContent.value = c.context.content || 'llm_only';
+                ctxMaxMsg.value = c.context.max_messages ?? 10;
+            }
+            applyLlmTemplate.value = '';
+            llmSaveMsg.value = '✅ 已套用模板，请点击保存生效';
+            llmSaveOk.value = true;
+        }
+        async function applyTemplateToBot() {
+            const tpl = botTemplates.value.find(t => t.name === applyBotTemplate.value);
+            if (!tpl || !roomConfig.value) return;
+            const c = tpl.config;
+            // 套用到 roomConfig（注意先转成 entries 格式）
+            for (const key of Object.keys(c)) {
+                if (key === 'welcome_templates_for_uids') {
+                    roomConfig.value.features.welcome_templates_for_uids_entries = Object.entries(c[key] || {}).map(([uid, tmpl]) => ({uid: Number(uid), template: tmpl}));
+                } else {
+                    roomConfig.value.features[key] = c[key];
+                }
+            }
+            applyBotTemplate.value = '';
+            applyTemplateMsg.value = '✅ 已套用模板，请点击保存';
+            applyTemplateOk.value = true;
+            setTimeout(() => { applyTemplateMsg.value = ''; }, 5000);
         }
 
         return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
                 tab, userRole,
-                showUserMenu, showChangePwd, changePwdOld, changePwdNew, changePwdMsg, changePwdOk,
+                showUserMenu, showChangePwd, changePwdOld, changePwdNew, changePwdNewUser, changePwdMsg, changePwdOk,
+                mustResetPwd,
                 openChangePwd, doChangePwd,
                 adminUsers, showUserForm, editingUser, userFormUsername, userFormPassword,
                 userFormRole, userFormRooms, showUserRoomDropdown, savingUserForm, userFormMsg, userFormOk,
@@ -4481,7 +4909,7 @@ createApp({
                 cfgWelcomeTmpl, cfgThanksTmpl, cfgGuardCaptain, cfgGuardCommander, cfgGuardGovernor, cfgGuardDefault, cfgConnMsg,
                 cfgPeriodicOn, cfgPeriodicInterval, cfgPeriodicTmpl,
                 cfgHost, cfgPort,
-                cfgSaveMsg, cfgSaveOk, loadGeneralConfig, saveGlobalConfig,
+                cfgSaveMsg, cfgSaveOk, loadGeneralConfig,
                 restartMsg, restartOk, restartService,
                 selectedRoom, roomSubTab, roomSubTabs, newRoomAccount, selectedRoomAccount,
                 selectRoom, assignAccountToRoom, toggleCreateRoom, toggleNewAccount,
@@ -4499,9 +4927,15 @@ createApp({
                 streamers, allRooms, showStreamerForm, editStreamerUser, editStreamerPass,
                 editStreamerRooms, savingStreamer, streamerMsg, streamerOk,
                 loadUsers, saveStreamer, editStreamer, deleteStreamer, toggleStreamerRoom, showRoomDropdown,
-                addKeywordRule, removeKeywordRule,
                 addUidWelcomeTemplate, removeUidWelcomeTemplate,
-                addUidConfig, removeUidConfig};
+                showUidWelcomeModal, uidWelcomeEditEntries, openUidWelcomeModal, closeUidWelcomeModal, saveUidWelcomeModal,
+                showKeywordModal, keywordEditRules, openKeywordModal, closeKeywordModal, saveKeywordModal,
+                llmTemplates, botTemplates, showAddTemplate, templateFormName, templateFormImportRoom,
+                savingTemplate, templateFormMsg, templateFormOk, newRoomLlmTemplate, newRoomBotTemplate,
+                restartingAll, restartAllMsg, restartAllOk,
+                loadTemplates, saveTemplate, deleteTemplate, restartAllBots, restartSingleBot,
+                applyLlmTemplate, applyBotTemplate, applyTemplateMsg, applyTemplateOk,
+                applyTemplateToLlm, applyTemplateToBot};
     }
 }).mount('#app');
 </script>

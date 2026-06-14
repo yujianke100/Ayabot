@@ -8,3 +8,5 @@ data/*.db
 data/credential.json
 *.bak
 data/
+rooms/*
+accounts/*

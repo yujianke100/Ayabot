@@ -10,49 +10,79 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow" alt="License"></a>
 </p>
 
-B 站直播间弹幕机器人，支持签到抽签、盲盒统计、AI 对话、自动欢迎/感谢、定时消息、Web 后台管理。开箱即用，小白友好。
+B 站直播间弹幕机器人，支持签到抽签、盲盒统计、AI 对话、自动欢迎/感谢、定时消息、Web 后台管理。开箱即用，小白友好。纯 Python 跨平台实现，无需 systemd / sudo。
+
+---
+
+## 初始账号
+
+| 用户名 | 密码 | 说明 |
+|--------|------|------|
+| `ayabot` | `123456` | 管理员账号，首次登录强制修改密码 |
+
+> 密码忘记或想重置？运行 `python -m app.reset_admin` 即可重置为随机密码。
 
 ---
 
 ## 🚀 快速上手
- 
-### 把机器人跑起来（Docker，推荐）
 
-```bash
-# 1. 创建文件夹，下载配置模板
-mkdir ayabot && cd ayabot
-wget https://raw.githubusercontent.com/yujianke100/ayabot/main/config.example.yaml -O config.yaml
-
-# 2. 编辑 config.yaml，填三个东西：
-#    房间号（room_display_id）和主播 UID（anchor_uid），在直播间 URL 里能看到
-#    Web 后台密码（web_ui.password），设一个你自己记得的
-
-# 3. 启动！
-docker run -d \
-  --name ayabot \
-  -v ./config.yaml:/app/config.yaml \
-  -v ./data:/app/data \
-  -p 8000:8000 \
-  ghcr.io/yujianke100/ayabot:latest
-```
-
-启动后浏览器打开 `http://你的IP:8000` 就能看到 Web 后台了。
-
-第一次启动时，机器人会在终端打印一个二维码，用 B 站 App 扫码登录。之后会自动保存凭据，下次重启不用再扫。
-
-> **国内拉取镜像慢？** 见下方[镜像加速](#-docker-镜像)章节。
-
-### 或用 Python 直接跑
+### 用 Python 直接跑（推荐开发）
 
 ```bash
 git clone https://github.com/yujianke100/ayabot.git
 cd ayabot
-python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp config.example.yaml config.yaml
-# 编辑 config.yaml ...
+# 编辑 config.yaml：填直播间号和主播 UID
 python -m app.main
 ```
+
+启动后浏览器打开 `http://localhost:19810` 进入 Web 后台。
+
+> **端口被占用了？** 启动前运行 `export AYABOT_PORT=你想要的端口号` 即可修改。
+
+第一次启动时，机器人会在终端打印二维码，用 B 站 App 扫码登录。之后会自动保存凭据。
+
+### 或用 Docker 跑
+
+```bash
+mkdir ayabot && cd ayabot
+wget https://raw.githubusercontent.com/yujianke100/ayabot/main/config.example.yaml -O config.yaml
+# 编辑 config.yaml，填直播间号和主播 UID
+docker run -d \
+  --name ayabot \
+  -v ./config.yaml:/app/config.yaml \
+  -v ./data:/app/data \
+  -p 19810:19810 \
+  -e AYABOT_PORT=19810 \
+  ghcr.io/yujianke100/ayabot:latest
+```
+
+---
+
+## 🛠️ 命令行工具
+
+### 重置管理员密码
+
+```bash
+# 重置为随机密码（自动生成并打印）
+python -m app.reset_admin
+
+# 重置为指定密码
+python -m app.reset_admin --password mypass
+
+# 重置指定用户
+python -m app.reset_admin --username ayabot --password mypass
+
+# 重置但不强制首次改密码
+python -m app.reset_admin --no-reset-flag
+```
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `AYABOT_PORT` | `19810` | Web 管理后台监听端口。**启动前设置**，避免端口冲突进不去后台 |
 
 ---
 
@@ -64,113 +94,94 @@ python -m app.main
 |--------|----------|
 | `#签到` | 签到 + 显示连续天数 + 排名 |
 | `#抽签` | 今日运势 |
-| `#今日盲盒` | 统计今日送的盲盒 |
-| `#本月盲盒` | 本月盲盒汇总 |
-| `#ayabot <说点啥>` | AI 聊天（需要在后台先配置 API Key） |
+| `#今日盲盒[:用户名]` | 统计自己或指定用户今日盲盒 |
+| `#本月盲盒[:用户名]` | 本月盲盒汇总 |
+| `#文文 <说点啥>` | AI 聊天（唤醒词可在后台修改） |
 | `#帮助` | 列出所有命令 |
 
 > 中文 `#` 和英文 `#` 都行，`＃签到` 也能识别。
-> 机器人的名字（唤醒词）可以在 Web 后台 → AI 回复设置 里自由修改。
+> 开启「免#指令」后，不带 `#` 前缀也能触发（如直接发「签到」）。
+> 开启「AI免#前缀唤醒」后，弹幕以唤醒词开头即触发 AI 回复。
 
 ---
 
 ## ⚙️ Web 管理后台
 
-浏览器打开 `http://你的IP:8000` 进入后台（账号密码在 config.yaml 里配置）。
+浏览器打开 `http://你的IP:19810` 进入后台（初始账号 `ayabot` / `123456`，首次登录强制修改）。
 
 | 页面 | 能干嘛 |
 |------|--------|
 | 📊 **送礼排行** | 按日期看谁送了多少礼物/盲盒，带柱状图 |
 | 🎨 **精美导出** | 导出送礼明细卡片，可直接打印或截图 |
-| 🤖 **AI 回复** | 开关、改唤醒词、配 API Key、调温度、改人设 |
-| ⚙️ **机器人配置** | 改房间号、冷却时间、欢迎/感谢模板、定时消息 |
-| 🅱️ **B站登录** | 扫码登录（凭据过期时用） |
-| 🗑️ **数据管理** | 删旧数据 |
+| 🤖 **AI 回复** | 开关、改唤醒词、配 API Key、调温度、改人设。支持三种触发方式 |
+| ⚙️ **机器人配置** | 功能开关、冷却时间、弹幕限流、欢迎/感谢/盲盒模板、定时消息、关键词回复、签文 |
+| 👥 **用户管理** | 管理员增删改查、B站账号登录/验证 |
+| 💬 **弹幕记录** | 查看直播间历史弹幕 |
+| 🗑️ **数据管理** | 清理旧数据 |
+
+### 功能开关
+
+| 功能 | 说明 |
+|------|------|
+| 免#指令 | 不带 `#` 也能触发签到、盲盒等指令 |
+| AI免#前缀唤醒 | 弹幕以唤醒词开头即触发 AI 回复 |
+| 包含关键词触AI | 弹幕任何位置含唤醒词即触发 AI 回复 |
+| 弹幕记录 | 开启后记录所有弹幕到数据库，可在 Web 查看 |
+| 大航海欢迎/感谢 | 舰长/提督/总督专属模板 |
+| 自定义签文 | 修改抽签结果的六种签文内容 |
+| 盲盒统计（今日/本月） | 区分今日和本月的盲盒统计，支持自定义回复文本 |
+
+### 关键词回复
+
+支持：
+- **包含匹配** / **精确匹配**
+- 可限制仅特定 UID 触发
+- 可配置冷却时间
+- **模态框编辑**，与 UID 特定欢迎模板风格一致
 
 ---
 
-## 📝 config.yaml 快速说明
+## 📝 配置说明
 
 ```yaml
 room_display_id: 1946287911        # ← 改成你的直播间号
 anchor_uid: 1000000                # ← 改成主播的 UID
-
-web_ui:
-  username: "admin"                # 后台登录账号
-  password: "设一个复杂密码"        # ← 记得改！
-  bot_name: "ayabot"               # 机器人名字
-
-llm:
-  enabled: false                   # AI 对话，在后台开启即可
 ```
 
-完整的配置说明见 [config.example.yaml](config.example.yaml)。
+> 用户名密码不写在配置里，初始密码见上方表格，也可通过 `python -m app.reset_admin` 随时重置。
+> 所有配置均可通过 Web 后台修改，无需手动编辑 YAML。
+
+完整的配置示例见 [config.example.yaml](config.example.yaml)。
 
 ---
 
-## 🐳 Docker 镜像
-
-自动构建推送到 GitHub Container Registry（ghcr.io）：
-
-```bash
-docker pull ghcr.io/yujianke100/ayabot:latest     # 最新版
-docker pull ghcr.io/yujianke100/ayabot:<sha>       # 指定版本（在 Actions 构建日志里看）
-```
-
-也支持 Docker Hub（需在 GitHub Secrets 中配置 `DOCKER_USERNAME` + `DOCKER_PASSWORD` 后才会推送）：
-
-```bash
-# ⚠️ 需要管理员在 GitHub 仓库 Settings → Secrets 配好 Docker Hub 凭据才会推送
-docker pull yujianke100/ayabot:latest
-```
-
-如果你在 GitHub 上，可以直接点 badge 去看镜像包：
-
-[![ghcr.io](https://img.shields.io/badge/docker-ghcr.io-blue?logo=github)](https://github.com/yujianke100/ayabot/pkgs/container/ayabot)
-
-### 🇨🇳 国内镜像加速
-
-ghcr.io 国内拉取可能很慢，推荐以下方式：
-
-**方式一：配置 Docker 全局镜像加速**（改镜像源为国内源）
-
-编辑 `/etc/docker/daemon.json`：
-
-```json
-{
-  "registry-mirrors": [
-    "https://docker.mirrors.ustc.edu.cn",
-    "https://hub-mirror.c.163.com"
-  ]
-}
-```
-
-> ⚠️ 注意：registry-mirrors 只对 Docker Hub（`docker.io`）生效，对 `ghcr.io` 无效。ghcr.io 国内加速见下方。
-
-**方式二：通过 ghcr.io 镜像站拉取**
-
-```bash
-# 中科大 ghcr.io 镜像
-docker pull docker.mirrors.ustc.edu.cn/ghcr.io/yujianke100/ayabot:latest
-
-# 网易 ghcr.io 镜像
-docker pull hub-mirror.c.163.com/ghcr.io/yujianke100/ayabot:latest
-```
-
-**方式三：查询最新可用镜像站**
-→ [demo.kentxxq.com/app/mirror](https://demo.kentxxq.com/app/mirror)（实时检测国内各镜像站可用性）
-
----
-
-## 💾 数据文件
+## 💾 数据与进程管理
 
 | 文件 | 说明 |
 |------|------|
-| `data/bot.db` | SQLite 数据库，所有签到/盲盒/送礼数据都在这里 |
-| `data/credential.json` | B 站登录凭据，扫码后自动生成 |
-| `config.yaml` | 所有配置 |
+| `rooms/<id>/data/bot.db` | 房间独立 SQLite 数据库 |
+| `rooms/<id>/bot.pid` | Bot 进程 PID 文件 |
+| `rooms/<id>/bot.log` | Bot 运行日志 |
+| `accounts/<uid>/credential.json` | B 站扫码登录凭据 |
+| `data/users.json` | WebUI 用户账号 |
+| `data/templates.json` | 预设模板 |
 
-数据都不会自动删除，可以在 Web 后台手动清理。
+### 跨平台进程管理
+
+纯 Python 实现（`app/process_manager.py`），用 `subprocess.Popen` 管理 Bot 子进程：
+- **无需 systemd**，Linux / macOS / Windows 通用
+- **无需 sudo / root**
+- Docker 环境同样适用
+
+---
+
+## 🐳 Docker
+
+自动构建推送到 GitHub Container Registry (ghcr.io)：
+
+```bash
+docker pull ghcr.io/yujianke100/ayabot:latest
+```
 
 ---
 
