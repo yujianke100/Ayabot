@@ -34,29 +34,30 @@ cd ayabot
 pip install -r requirements.txt
 cp config.example.yaml config.yaml
 # 编辑 config.yaml：填直播间号和主播 UID
+
+# 终端 1：启动 Web 管理后台
+python -m uvicorn app.web.server:app --host 0.0.0.0 --port 19810
+
+# 终端 2（或 Docker）：启动 Bot 机器人
 python -m app.main
 ```
 
-启动后浏览器打开 `http://localhost:19810` 进入 Web 后台。
+浏览器打开 `http://localhost:19810` 进入 Web 后台，在「B站账号」扫码登录，然后在「房间管理」中创建房间、启动机器人。
 
 > **端口被占用了？** 启动前运行 `export AYABOT_PORT=你想要的端口号` 即可修改。
-
-首次启动后，在 WebUI → **B站账号** 中扫码登录即可。凭据会自动保存。
 
 ### 或用 Docker 跑
 
 ```bash
 mkdir ayabot && cd ayabot
 wget https://raw.githubusercontent.com/yujianke100/ayabot/main/config.example.yaml -O config.yaml
+wget https://raw.githubusercontent.com/yujianke100/ayabot/main/docker-compose.yml -O docker-compose.yml
 # 编辑 config.yaml，填直播间号和主播 UID
-docker run -d \
-  --name ayabot \
-  -v ./config.yaml:/app/config.yaml \
-  -v ./data:/app/data \
-  -p 19810:19810 \
-  -e AYABOT_PORT=19810 \
-  ghcr.io/yujianke100/ayabot:latest
+mkdir -p data rooms accounts
+docker compose up -d
 ```
+
+容器运行 WebUI（Bot 子进程由 ProcessManager 自动管理）。浏览器打开 `http://localhost:19810`。
 
 ---
 
@@ -182,6 +183,15 @@ anchor_uid: 1000000                # ← 改成主播的 UID
 ```bash
 docker pull ghcr.io/yujianke100/ayabot:latest
 ```
+
+### docker-compose
+
+```bash
+wget https://raw.githubusercontent.com/yujianke100/ayabot/main/docker-compose.yml
+docker compose up -d
+```
+
+容器启动后，通过 WebUI → **B站账号** 扫码登录，然后在 **房间管理** 创建房间并启动机器人。
 
 ### 🇨🇳 国内镜像加速
 
