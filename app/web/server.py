@@ -2781,6 +2781,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div v-if="!accounts || accounts.length === 0" class="text-sm text-gray-400 text-center py-8">
             暂无已登录的 B站 账号。
         </div>
+        <div v-if="accounts && accounts.length > 1" class="flex justify-end">
+            <button @click="verifyAllAccounts" :disabled="verifyingAll"
+                    class="text-blue-500 hover:text-blue-700 text-xs underline">
+                {{ verifyingAll ? (`验证中 ${verifyQueue.length + 1}/${accounts.length}...`) : '🔍 一键检测所有' }}
+            </button>
+        </div>
         <div v-for="a in accounts" :key="a.uid"
              class="border rounded-lg p-4 flex items-center justify-between">
             <div>
@@ -3503,18 +3509,46 @@ createApp({
                 editingNickname.value = null;
             } catch(e) { alert('修改失败: ' + e.message); }
         }
+        // ── 验证队列（串行执行，避免并发卡顿） ──
+        const verifyQueue = ref([]);
+        const verifyingAll = ref(false);
+        let _verifyProcessing = false;
+        async function _processVerifyQueue() {
+            if (_verifyProcessing || verifyQueue.value.length === 0) return;
+            _verifyProcessing = true;
+            while (verifyQueue.value.length > 0) {
+                const uid = verifyQueue.value.shift();
+                const acct = accounts.value.find(a => a.uid === uid);
+                if (!acct) continue;
+                acct.verifying = true;
+                try {
+                    const res = await fetch(`/api/bili_accounts/${uid}/verify`, {
+                        method: 'POST', credentials: 'include',
+                    });
+                    const data = await res.json();
+                    acct.credential_ok = data.valid;
+                } catch(e) { acct.credential_ok = false; }
+                finally { acct.verifying = false; }
+            }
+            verifyingAll.value = false;
+            _verifyProcessing = false;
+        }
         async function verifyAccount(uid) {
             const acct = accounts.value.find(a => a.uid === uid);
-            if (!acct) return;
-            acct.verifying = true;
-            try {
-                const res = await fetch(`/api/bili_accounts/${uid}/verify`, {
-                    method: 'POST', credentials: 'include',
-                });
-                const data = await res.json();
-                acct.credential_ok = data.valid;
-            } catch(e) { acct.credential_ok = false; }
-            finally { acct.verifying = false; }
+            if (!acct || acct.verifying) return;
+            if (verifyQueue.value.includes(uid)) return;
+            verifyQueue.value.push(uid);
+            _processVerifyQueue();
+        }
+        async function verifyAllAccounts() {
+            if (!accounts.value.length) return;
+            verifyingAll.value = true;
+            for (const a of accounts.value) {
+                if (!a.verifying && !verifyQueue.value.includes(a.uid)) {
+                    verifyQueue.value.push(a.uid);
+                }
+            }
+            _processVerifyQueue();
         }
 
         // ── Ranking ──
