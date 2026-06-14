@@ -2840,18 +2840,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <h2 class="text-lg font-bold">👥 账号管理</h2>
         <p class="text-xs text-gray-500">管理员可查看所有房间。主播只能看到自己被分配的直播间。</p>
 
-        <!-- 管理员密码 -->
-        <div class="border rounded-lg p-4 bg-gray-50 space-y-3">
-            <h3 class="text-sm font-bold">管理员密码</h3>
-            <div class="flex gap-2 items-end">
-                <label class="text-xs text-gray-500 flex-1">新密码
-                    <input type="password" v-model="adminPass" placeholder="留空不修改" class="border p-2 rounded w-full text-sm mt-1">
-                </label>
-                <button @click="saveAdminPass" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm h-[38px]">保存</button>
-            </div>
-            <div v-if="adminPassMsg" class="text-sm" :class="adminPassOk ? 'text-green-600' : 'text-red-500'">{{ adminPassMsg }}</div>
-        </div>
-
         <!-- 主播账号列表 -->
         <div class="space-y-2">
             <div class="flex items-center justify-between">
@@ -4507,9 +4495,10 @@ createApp({
                 accountQrState, accountQrError, startAccountLogin, refreshAccount, deleteAccount,
                 loadAccounts, loadRooms, refreshQrCode,
                 editingNickname, startEditNickname, saveNickname, verifyAccount,
+                verifyQueue, verifyingAll, verifyAllAccounts,
                 streamers, allRooms, showStreamerForm, editStreamerUser, editStreamerPass,
-                editStreamerRooms, savingStreamer, streamerMsg, streamerOk, adminPass, adminPassMsg, adminPassOk,
-                loadUsers, saveStreamer, editStreamer, deleteStreamer, toggleStreamerRoom, saveAdminPass, showRoomDropdown,
+                editStreamerRooms, savingStreamer, streamerMsg, streamerOk,
+                loadUsers, saveStreamer, editStreamer, deleteStreamer, toggleStreamerRoom, showRoomDropdown,
                 addKeywordRule, removeKeywordRule,
                 addUidWelcomeTemplate, removeUidWelcomeTemplate,
                 addUidConfig, removeUidConfig};
