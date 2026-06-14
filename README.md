@@ -57,7 +57,11 @@ mkdir -p data rooms accounts
 docker compose up -d
 ```
 
-容器运行 WebUI（Bot 子进程由 ProcessManager 自动管理）。浏览器打开 `http://localhost:19810`。
+容器运行 WebUI（端口 19810），Bot 子进程由 WebUI 内建的 ProcessManager 自动管理。
+浏览器打开 `http://localhost:19810`。
+
+> **改端口？** 编辑 `docker-compose.yml`，修改 `ports` 左侧值和 `AYABOT_PORT` 环境变量。
+> 例如 Nginx 反向代理用 8000 → 容器内 19810：`"8000:19810"` + `AYABOT_PORT=19810`
 
 ---
 
@@ -176,22 +180,16 @@ anchor_uid: 1000000                # ← 改成主播的 UID
 
 ---
 
-## 🐳 Docker
+## 🐳 Docker 镜像
 
-自动构建推送到 GitHub Container Registry (ghcr.io)：
+自动构建推送到 GitHub Container Registry：
 
 ```bash
 docker pull ghcr.io/yujianke100/ayabot:latest
 ```
 
-### docker-compose
-
-```bash
-wget https://raw.githubusercontent.com/yujianke100/ayabot/main/docker-compose.yml
-docker compose up -d
-```
-
-容器启动后，通过 WebUI → **B站账号** 扫码登录，然后在 **房间管理** 创建房间并启动机器人。
+容器启动后即可在 WebUI 中管理机器人。
+完整部署步骤见上方的 [快速上手 → 用 Docker 跑](#-快速上手)。
 
 ### 🇨🇳 国内镜像加速
 

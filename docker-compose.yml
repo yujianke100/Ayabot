@@ -1,29 +1,24 @@
 services:
-  bili-bot:
-    # ── 镜像来源 ──
-    #    docker pull ghcr.io/yujianke100/ayabot:latest
-    # 国内加速（ghcr.io 镜像站）:
-    #    docker pull docker.mirrors.ustc.edu.cn/ghcr.io/yujianke100/ayabot:latest
-    # 手动构建:
-    #    docker build -t ayabot . ; 然后改 image: ayabot
+  ayabot:
     image: ghcr.io/yujianke100/ayabot:latest
-
     container_name: ayabot
     restart: unless-stopped
 
     ports:
-      - "19810:19810"          # Web 管理后台
+      # Web 管理后台 — 外部端口可自定义，如 "8000:19810"
+      - "19810:19810"
 
     volumes:
-      # 根配置文件（必须）— 从 config.example.yaml 复制修改
+      # 根配置文件（必须）— 从 config.example.yaml 复制
       - ./config.yaml:/app/config.yaml
       # 数据持久化（users.json, templates.json）
       - ./data:/app/data
-      # 房间配置和数据（SQLite 数据库、房间专属 config.yaml）
+      # 房间配置和数据（SQLite、房间 config.yaml、logs）
       - ./rooms:/app/rooms
       # B站扫码登录凭据
       - ./accounts:/app/accounts
 
     environment:
       - TZ=Asia/Shanghai
+      # 容器内部监听端口，与 ports 右侧值保持一致
       - AYABOT_PORT=19810

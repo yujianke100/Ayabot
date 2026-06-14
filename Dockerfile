@@ -32,5 +32,6 @@ EXPOSE 19810
 # 数据卷（配置文件 + 房间数据 + 账号凭证）
 VOLUME ["/app/data", "/app/rooms", "/app/accounts"]
 
-# 启动入口：运行 WebUI（Bot 子进程由 ProcessManager 自动管理）
-CMD ["python", "-m", "uvicorn", "app.web.server:app", "--host", "0.0.0.0", "--port", "19810"]
+# 启动入口：运行 WebUI（端口通过环境变量 AYABOT_PORT 配置，默认 19810）
+# Bot 子进程由 ProcessManager 在 WebUI 中自动管理
+CMD ["python", "web_serve.py"]
