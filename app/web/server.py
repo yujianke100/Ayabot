@@ -2157,9 +2157,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <input type="text" v-model="changePwdNewUser" placeholder="用户名" class="border p-2 rounded w-full text-sm">
                 <span class="text-gray-400" v-if="mustResetPwd">可修改为你想要的用户名</span>
             </label>
-            <input type="password" :value="changePwdOld" placeholder="当前密码" class="border p-2 rounded w-full text-sm" :disabled="mustResetPwd" @input="changePwdOld = $event.target.value">
-            <input type="password" :value="changePwdNew" placeholder="新密码（至少4位）" class="border p-2 rounded w-full text-sm" @input="changePwdNew = $event.target.value">
-            <input type="password" :value="changePwdConfirm" placeholder="再次输入新密码" class="border p-2 rounded w-full text-sm" @keyup.enter="doChangePwd" @input="changePwdConfirm = $event.target.value">
+            <input type="password" id="inpOldPwd" v-model="changePwdOld" placeholder="当前密码" class="border p-2 rounded w-full text-sm" :disabled="mustResetPwd">
+            <input type="password" id="inpNewPwd" v-model="changePwdNew" placeholder="新密码（至少4位）" class="border p-2 rounded w-full text-sm">
+            <input type="password" id="inpCfmPwd" v-model="changePwdConfirm" placeholder="再次输入新密码" class="border p-2 rounded w-full text-sm" @keyup.enter="doChangePwd">
             <div v-if="changePwdMsg" class="text-sm" :class="changePwdOk ? 'text-green-600' : 'text-red-500'">{{ changePwdMsg }}</div>
             <div class="flex gap-2">
                 <button @click="doChangePwd" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm flex-1">确认</button>
@@ -4431,9 +4431,10 @@ createApp({
             changePwdOk.value = false;
         }
         async function doChangePwd() {
-            const oldPwd = String(changePwdOld.value || '').trim();
-            const newPwd = String(changePwdNew.value || '').trim();
-            const confirmPwd = String(changePwdConfirm.value || '').trim();
+            // 从 DOM 读取（id 选择器最可靠）
+            const oldPwd = (document.getElementById('inpOldPwd')?.value || '').trim();
+            const newPwd = (document.getElementById('inpNewPwd')?.value || '').trim();
+            const confirmPwd = (document.getElementById('inpCfmPwd')?.value || '').trim();
             if (!oldPwd || !newPwd) { changePwdMsg.value = '请填写当前密码和新密码'; changePwdOk.value = false; return; }
             if (newPwd.length < 4) { changePwdMsg.value = '密码至少4位'; changePwdOk.value = false; return; }
             if (newPwd !== confirmPwd) {
