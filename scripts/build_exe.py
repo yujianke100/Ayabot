@@ -38,6 +38,8 @@ def main() -> None:
         "--hidden-import", "aiohttp",
         "--hidden-import", "pystray",
         "--hidden-import", "PIL",
+        "--hidden-import", "sqlite3",
+        "--hidden-import", "_sqlite3",
         "--collect-all", "bilibili_api",
         "--collect-all", "pystray",
     ]
