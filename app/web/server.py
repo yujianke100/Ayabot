@@ -2127,7 +2127,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <div class="flex-1 min-w-0"></div>
     <div class="flex items-center gap-1 sm:gap-4 text-xs sm:text-sm overflow-x-auto no-scrollbar mr-1 sm:mr-2">
         <button @click="tab='rooms'" :class="tab==='rooms'?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">🏠 房间管理</button>
-        <button @click="tab='global'" :class="tab==='global'?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">⚙️ 全局配置</button>
+        <button v-if="userRole === 'admin'" @click="tab='global'" :class="tab==='global'?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">⚙️ 全局配置</button>
         <button v-if="userRole === 'admin'" @click="tab='users'" :class="tab==='users'?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">👥 用户管理</button>
         <button @click="tab='help'"  :class="tab==='help' ?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">帮助</button>
     </div>
@@ -2249,12 +2249,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <div class="flex gap-2 items-center" @click.stop>
                     <button v-if="r.status !== 'running'"
                             @click="startRoom(r.room_id)"
-                            class="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded text-xs">启动</button>
+                            class="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded text-xs"
+                            v-show="userRole === 'admin'">启动</button>
                     <button v-if="r.status === 'running'"
                             @click="stopRoom(r.room_id)"
-                            class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-xs">停止</button>
+                            class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-xs"
+                            v-show="userRole === 'admin'">停止</button>
                     <button @click="deleteRoom(r.room_id, r.room_id)"
-                            class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
+                            class="text-red-400 hover:text-red-600 text-xs underline"
+                            v-show="userRole === 'admin'">删除</button>
                 </div>
             </div>
         </div>
@@ -2278,7 +2281,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     </template>
                     <template v-else>
                         {{ selectedRoom.room_name || ('房间 #'+selectedRoom.room_id) }}
-                        <button @click="startEditRoomName" class="text-gray-400 hover:text-blue-500 text-xs ml-1">✏️</button>
+                        <button v-show="userRole === 'admin'" @click="startEditRoomName" class="text-gray-400 hover:text-blue-500 text-xs ml-1">✏️</button>
                     </template>
                 </h2>
                 <div class="text-xs text-gray-500 mt-1">
@@ -2286,7 +2289,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     | 状态: {{ selectedRoom.status === 'running' ? '🟢 运行中' : '⏹️ 已停止' }}
                 </div>
             </div>
-            <div class="flex items-center gap-2 flex-wrap">
+            <div class="flex items-center gap-2 flex-wrap" v-show="userRole === 'admin'">
                 <span class="text-xs text-gray-500">B站账号:</span>
                 <select v-model="selectedRoomAccount" class="border p-1 rounded text-sm">
                     <option value="">不关联</option>
@@ -3203,14 +3206,21 @@ createApp({
         // Room detail
         const selectedRoom = ref(null);
         const roomSubTab = ref('ranking');
-        const roomSubTabs = [
-            {key: 'ranking', label: '送礼排行'},
-            {key: 'export', label: '精美导出'},
-            {key: 'llm', label: 'AI回复'},
-            {key: 'config', label: '机器人配置'},
-            {key: 'danmaku', label: '弹幕记录'},
-            {key: 'manage', label: '数据管理'},
-        ];
+        const roomSubTabs = computed(() => {
+            const tabs = [
+                {key: 'ranking', label: '送礼排行'},
+                {key: 'export', label: '精美导出'},
+                {key: 'danmaku', label: '弹幕记录'},
+            ];
+            if (userRole.value === 'admin') {
+                tabs.push(
+                    {key: 'llm', label: 'AI回复'},
+                    {key: 'config', label: '机器人配置'},
+                    {key: 'manage', label: '数据管理'},
+                );
+            }
+            return tabs;
+        });
         const newRoomAccount = ref('');
         const selectedRoomAccount = ref('');
         const accountAssignMsg = ref('');
