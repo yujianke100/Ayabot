@@ -140,13 +140,23 @@ _stop_event = threading.Event()
 # ── In-process uvicorn ──
 
 
-def _start_webui() -> None:
+def _start_webui(config_path: str | None = None) -> None:
     """在后台线程启动 WebUI（in-process，兼容 PyInstaller）。
-    使用 queue 确认线程内启动成功，否则日志记录具体异常。
+    必须先调用 init_app 初始化配置，再启动 uvicorn。
     """
     import queue as _queue
     import uvicorn
-    from app.web.server import app
+    from app.web.server import app, init_app
+
+    # 关键: 初始化配置 (DB路径、认证信息、LLM配置等)
+    try:
+        from app.config import load_config
+        cfg = load_config(config_path or "config.yaml")
+        init_app(config=cfg, config_path=config_path or "config.yaml")
+        logger.info("init_app done, config_path=%s", config_path)
+    except Exception as exc:
+        logger.error("init_app failed: %s", exc, exc_info=True)
+        return
 
     logger.info("starting WebUI in-process: port=%s", _port)
     q: _queue.Queue = _queue.Queue()
@@ -390,8 +400,9 @@ def main() -> None:
         shutil.copy2(str(cfg_src), str(cfg_dst))
         logger.info("copied config to %s", cfg_dst)
 
-    # 启动 WebUI
-    _start_webui()
+    # 启动 WebUI — 传入配置路径确保 init_app 能正确解析
+    cfg_path = str(DATA_DIR / "config.yaml")
+    _start_webui(config_path=cfg_path)
 
     # 延迟打开浏览器
     threading.Thread(target=_delayed_open_browser, daemon=True).start()
