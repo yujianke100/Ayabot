@@ -44,6 +44,7 @@ def main() -> None:
 
     if icon_path.exists():
         cmd.extend(["--icon", str(icon_path)])
+        cmd.extend(["--add-data", f"{icon_path}{os.pathsep}."])
 
     cmd.append(str(entry))
 

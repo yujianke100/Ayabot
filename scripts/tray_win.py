@@ -22,7 +22,6 @@ import argparse
 import logging
 import os
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -136,54 +135,41 @@ def _release_lock() -> None:
 
 # ── 全局状态 ──
 _port = _read_port()
-_webui_proc: subprocess.Popen | None = None
 _stop_event = threading.Event()
+
+# ── In-process uvicorn ──
 
 
 def _start_webui() -> None:
-    """在后台线程启动 WebUI."""
-    global _webui_proc
-    python = sys.executable
+    """在后台线程启动 WebUI（in-process，兼容 PyInstaller）。
+    不能用 subprocess，因为 PyInstaller 的 sys.executable 是 .exe 而非 Python。
+    """
+    import uvicorn
+    from app.web.server import app
 
-    cmd = [
-        python, "-m", "uvicorn", "app.web.server:app",
-        "--host", "0.0.0.0",
-        "--port", str(_port),
-    ]
-
-    env = os.environ.copy()
-    if getattr(sys, "frozen", False):
-        env["PYTHONPATH"] = str(BASE_DIR)
-
-    env["AYABOT_PORT"] = str(_port)
-
-    logger.info("starting WebUI: port=%s", _port)
+    logger.info("starting WebUI in-process: port=%s", _port)
     try:
-        _webui_proc = subprocess.Popen(
-            cmd,
-            cwd=str(BASE_DIR),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        config = uvicorn.Config(
+            app,
+            host="0.0.0.0",
+            port=_port,
+            log_level="info",
         )
-        logger.info("WebUI started, PID=%d", _webui_proc.pid)
+        server = uvicorn.Server(config)
+        _start_webui._server = server
+        thread = threading.Thread(target=server.run, daemon=True, name="uvicorn")
+        thread.start()
+        logger.info("WebUI started (in-process)")
     except Exception as exc:
         logger.error("failed to start WebUI: %s", exc)
 
 
 def _stop_webui() -> None:
-    global _webui_proc
-    if _webui_proc and _webui_proc.poll() is None:
+    server = getattr(_start_webui, "_server", None)
+    if server:
         logger.info("stopping WebUI...")
-        _webui_proc.terminate()
-        try:
-            _webui_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _webui_proc.kill()
-            _webui_proc.wait()
-        logger.info("WebUI stopped")
-    _webui_proc = None
+        server.should_exit = True
+        logger.info("WebUI stop signaled")
 
 
 def _restart_webui() -> None:
@@ -197,19 +183,17 @@ def _open_webui() -> None:
 
 
 def _reset_admin_password() -> None:
-    """运行 reset_admin 重置密码，显示结果弹窗."""
-    python = sys.executable
-    cmd = [python, "-m", "app.reset_admin"]
-    env = os.environ.copy()
-    if getattr(sys, "frozen", False):
-        env["PYTHONPATH"] = str(BASE_DIR)
-
+    """直接调用 reset_admin 模块重置密码（兼容 PyInstaller）。"""
     try:
-        result = subprocess.run(
-            cmd, cwd=str(BASE_DIR), env=env,
-            capture_output=True, text=True, timeout=30,
-        )
-        msg = result.stdout.strip() or result.stderr.strip() or "密码已重置"
+        import io
+        from contextlib import redirect_stdout
+
+        from app.reset_admin import reset_admin as do_reset
+
+        stdout_buf = io.StringIO()
+        with redirect_stdout(stdout_buf):
+            do_reset(username="ayabot")
+        msg = stdout_buf.getvalue().strip() or "密码已重置"
     except Exception as exc:
         msg = f"重置失败: {exc}"
 
@@ -312,7 +296,10 @@ def _create_tray_icon() -> None:
     icon_size = 64
     icon_img = Image.new("RGBA", (icon_size, icon_size), (0, 0, 0, 0))
 
-    logo_paths = [
+    logo_paths = []
+    if getattr(sys, "_MEIPASS", None):
+        logo_paths.append(Path(sys._MEIPASS) / "icon.png")
+    logo_paths += [
         BASE_DIR / "icon.png",
         BASE_DIR / "assets" / "icon.png",
     ]
@@ -361,7 +348,7 @@ def _create_tray_icon() -> None:
 def main() -> None:
     # 单实例检查
     if not _acquire_lock():
-        _show_message("Ayabot", "程序已在运行中\n请检查系统托盘图标")
+        logger.warning("another instance already running, exiting")
         return
 
     logger.info("Ayabot starting… data dir: %s", DATA_DIR)
