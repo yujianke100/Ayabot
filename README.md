@@ -215,6 +215,15 @@ docker pull hub-mirror.c.163.com/ghcr.io/yujianke100/ayabot:latest
 
 ---
 
+## windows上构建exe版本
+
+```
+pip install pyinstaller pystray pillow
+python scripts/build_exe.py
+```
+
+exe文件会输出在 `dist/` 目录下。
+
 ## 📄 License
 
 MIT
