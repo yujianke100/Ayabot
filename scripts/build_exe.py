@@ -36,6 +36,7 @@ def main() -> None:
         "--onefile",
         "--windowed",
         "--name", "Ayabot",
+        "-p", str(base_dir),
         "--add-data", f"{base_dir / 'app'}{os.pathsep}app",
         "--hidden-import", "app.main",
         "--hidden-import", "app.bot",
