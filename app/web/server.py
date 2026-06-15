@@ -3143,9 +3143,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <tbody>
                     <tr><td class="border p-1"><code>#签到</code></td><td class="border p-1">每日签到（直播场次连续签到）</td></tr>
                     <tr><td class="border p-1"><code>#抽签</code></td><td class="border p-1">今日运势抽签（支持自定义签文）</td></tr>
-                    <tr><td class="border p-1"><code>#今日盲盒[:用户名]</code></td><td class="border p-1">今日盲盒统计，不加用户名查自己</td></tr>
-                    <tr><td class="border p-1"><code>#本月盲盒[:用户名]</code></td><td class="border p-1">本月盲盒统计，不加用户名查自己</td></tr>
-                    <tr><td class="border p-1"><code>#{{ llmWakeWord || 'ayabot' }} &lt;聊天&gt;</code></td><td class="border p-1">AI 智能回复</td></tr>
+                    <tr><td class="border p-1"><code>#今日盲盒:用户名</code></td><td class="border p-1">今日盲盒统计，不加用户名查自己</td></tr>
+                    <tr><td class="border p-1"><code>#本月盲盒:用户名</code></td><td class="border p-1">本月盲盒统计，不加用户名查自己</td></tr>
+                    <tr><td class="border p-1"><code>#&lt;唤醒词&gt; &lt;聊天&gt;</code></td><td class="border p-1">AI 智能回复</td></tr>
                     <tr><td class="border p-1"><code>#帮助</code></td><td class="border p-1">显示所有命令</td></tr>
                 </tbody>
             </table>
