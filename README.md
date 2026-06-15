@@ -8,7 +8,7 @@
   <a href="https://github.com/yujianke100/ayabot/releases"><img src="https://img.shields.io/github/v/release/yujianke100/ayabot" alt="Release"></a>
   <a href="https://github.com/yujianke100/ayabot/pkgs/container/ayabot"><img src="https://img.shields.io/badge/docker-ghcr.io-blue?logo=github" alt="ghcr.io"></a>
   <a href="https://hub.docker.com/r/yujianke100/ayabot"><img src="https://img.shields.io/badge/docker-hub-blue?logo=docker" alt="Docker Hub"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow" alt="License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue" alt="License"></a>
 </p>
 
 B 站直播间弹幕机器人，支持签到抽签、盲盒统计、AI 对话、自动欢迎/感谢、定时消息、Web 后台管理。
@@ -290,4 +290,17 @@ exe 包含以下内容，启动时自动释放到 `%LOCALAPPDATA%\Ayabot\`：
 
 ## 📄 License
 
-MIT
+GNU General Public License v3.0 — 详见 [LICENSE](LICENSE)。
+
+本软件是自由软件，您可以自由使用、修改和分发，但**任何衍生作品也必须以 GPLv3 开源**。
+
+---
+
+## ☕ 打赏支持
+
+如果觉得 Ayabot 有帮助，欢迎请作者喝杯咖啡 ❤️
+
+<p align="center">
+  <img src="alipay.jpg" width="200" alt="支付宝打赏">
+  <img src="wechat.png" width="200" alt="微信打赏">
+</p>

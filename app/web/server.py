@@ -2020,6 +2020,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ayabot 直播间机器人</title>
+<link rel="icon" href="/favicon.ico">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
@@ -3215,8 +3216,21 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 Ayabot v0.1.0 —
                 <a href="https://github.com/yujianke100/ayabot" target="_blank" class="text-blue-500 hover:underline">⭐ 去 GitHub 给个 Star</a>
                 <span class="mx-1">·</span>
-                本软件完全免费，开源在 MIT 许可证下
+                本软件完全免费，以 GPLv3 协议开源
             </p>
+            <div class="mt-4 pt-4 border-t border-gray-100 text-center">
+                <p class="text-xs text-gray-500 mb-3">☕ 觉得好用？请作者喝杯咖啡吧 ❤️</p>
+                <div class="flex justify-center gap-6">
+                    <div class="text-center">
+                        <img src="/alipay.jpg" width="150" height="150" alt="支付宝" class="rounded-xl border inline-block">
+                        <p class="text-xs text-gray-400 mt-1">支付宝</p>
+                    </div>
+                    <div class="text-center">
+                        <img src="/wechat.png" width="150" height="150" alt="微信" class="rounded-xl border inline-block">
+                        <p class="text-xs text-gray-400 mt-1">微信</p>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 </div>
@@ -5046,7 +5060,29 @@ async def index():
 
 @app.get("/favicon.ico")
 async def favicon():
+    favicon_path = Path(__file__).resolve().parent.parent.parent / "icon.png"
+    if favicon_path.exists():
+        return FastResponse(content=favicon_path.read_bytes(), media_type="image/x-icon")
     return Response(status_code=204)
+
+
+# ── 打赏二维码 ──
+
+
+@app.get("/alipay.jpg")
+async def alipay_qr():
+    p = Path(__file__).resolve().parent.parent.parent / "alipay.jpg"
+    if p.exists():
+        return FastResponse(content=p.read_bytes(), media_type="image/jpeg")
+    return Response(status_code=404)
+
+
+@app.get("/wechat.png")
+async def wechat_qr():
+    p = Path(__file__).resolve().parent.parent.parent / "wechat.png"
+    if p.exists():
+        return FastResponse(content=p.read_bytes(), media_type="image/png")
+    return Response(status_code=404)
 
 
 if __name__ == "__main__":
