@@ -32,6 +32,7 @@ from pathlib import Path
 # ── 解析参数 ──
 parser = argparse.ArgumentParser(description="Ayabot Windows Tray App")
 parser.add_argument("--port", type=int, default=None, help="WebUI port")
+parser.add_argument("--room", type=str, default=None, help="Room ID")
 args, _ = parser.parse_known_args()
 
 # ── 路径 ──
@@ -50,8 +51,6 @@ _DEFAULT_PORT = 19810
 
 
 def _read_port() -> int:
-    if args.port:
-        return args.port
     if _PORT_FILE.exists():
         try:
             return int(_PORT_FILE.read_text(encoding="utf-8").strip())
@@ -78,47 +77,61 @@ logger = logging.getLogger("tray")
 
 # ── 单实例锁（防止双击导致无限进程）─
 _LOCK_FILE = DATA_DIR / "tray.lock"
+_MUTEX_NAME = "AyabotTrayApp"
 
 
 def _acquire_lock() -> bool:
     """尝试获取互斥锁。返回 True 表示本实例是第一个。"""
+    # Windows: 使用内核命名互斥体（最可靠）
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            handle = ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+            if ctypes.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+                ctypes.windll.kernel32.CloseHandle(handle)
+                logger.warning("another instance already running (mutex)")
+                return False
+            _acquire_lock._mutex_handle = handle
+            return True
+        except Exception as exc:
+            logger.warning("mutex failed, fallback to file lock: %s", exc)
+
+    # Linux / macOS / fallback: 文件锁
     try:
         _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-        # 用独占创建 + 写入 PID 作为锁
         fd = os.open(str(_LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_RDWR)
         os.write(fd, str(os.getpid()).encode())
         os.close(fd)
         return True
     except FileExistsError:
-        # 锁文件已存在，检查进程是否存活
         try:
             old_pid = int(_LOCK_FILE.read_text(encoding="utf-8").strip())
-            # Windows 下用 tasklist 检查进程，Linux 用 kill 0
-            if sys.platform == "win32":
-                r = subprocess.run(["tasklist", "/FI", f"PID eq {old_pid}"],
-                                   capture_output=True, text=True, timeout=5)
-                if str(old_pid) in r.stdout:
-                    logger.warning("another instance already running (PID=%d)", old_pid)
-                    return False
-            else:
-                try:
-                    os.kill(old_pid, 0)
-                    logger.warning("another instance already running (PID=%d)", old_pid)
-                    return False
-                except ProcessLookupError:
-                    pass
-        except (ValueError, OSError, subprocess.TimeoutExpired):
+            try:
+                os.kill(old_pid, 0)
+                logger.warning("another instance already running (PID=%d)", old_pid)
+                return False
+            except (ProcessLookupError, OSError):
+                pass
+        except (ValueError, OSError):
             pass
-        # 进程已死或无法检查，清理旧锁
         _LOCK_FILE.unlink(missing_ok=True)
         return _acquire_lock()
     except OSError as exc:
         logger.warning("lock acquire failed: %s", exc)
-        return True  # 非致命，继续启动
+        return True  # 非致命
 
 
 def _release_lock() -> None:
     _LOCK_FILE.unlink(missing_ok=True)
+    if sys.platform == "win32":
+        try:
+            handle = getattr(_acquire_lock, "_mutex_handle", None)
+            if handle:
+                import ctypes
+                ctypes.windll.kernel32.ReleaseMutex(handle)
+                ctypes.windll.kernel32.CloseHandle(handle)
+        except Exception:
+            pass
 
 
 # ── 全局状态 ──
@@ -247,35 +260,36 @@ def _prompt_port() -> None:
 
 def _setup_room() -> str | None:
     """初始化房间: 复制 config.yaml + 迁移旧数据，返回 config_path."""
-    if ROOM_ID:
-        from app.config import ensure_room_dirs, migrate_legacy_data  # noqa: PLC0415
+    if args.room:
+        from app.config import ensure_room_dirs, migrate_legacy_data
 
-        # 确保房间目录存在
-        room_dir = ensure_room_dirs(ROOM_ID, base_dir=BASE_DIR if getattr(sys, "frozen", False) else ".")
+        room_dir = ensure_room_dirs(
+            args.room,
+            base_dir=BASE_DIR if getattr(sys, "frozen", False) else ".",
+        )
         target_cfg = room_dir / "config.yaml"
 
-        # 如果房间没有 config.yaml，从 .exe 同级复制
         if not target_cfg.exists():
             src = BASE_DIR / "config.yaml"
             if src.exists():
-                import shutil  # noqa: PLC0415
+                import shutil
                 shutil.copy2(str(src), str(target_cfg))
                 logger.info("copied default config to %s", target_cfg)
             else:
                 logger.warning("no config.yaml found at %s", src)
 
-        # 迁移旧 data/ 到房间目录
-        migrate_legacy_data(ROOM_ID, base_dir=BASE_DIR if getattr(sys, "frozen", False) else ".")
-
+        migrate_legacy_data(
+            args.room,
+            base_dir=BASE_DIR if getattr(sys, "frozen", False) else ".",
+        )
         os.chdir(room_dir)
         return str(target_cfg)
     else:
-        # 传统模式: config.yaml 在 DATA_DIR
         cfg_path = DATA_DIR / "config.yaml"
         if not cfg_path.exists():
             src = BASE_DIR / "config.yaml"
             if src.exists():
-                import shutil  # noqa: PLC0415
+                import shutil
                 shutil.copy2(str(src), str(cfg_path))
                 logger.info("copied default config to %s", cfg_path)
             else:
@@ -310,7 +324,6 @@ def _create_tray_icon() -> None:
             except Exception:
                 continue
     else:
-        # 无 logo 文件时生成一个字母 A 图标
         draw = ImageDraw.Draw(icon_img)
         draw.ellipse([0, 0, icon_size - 1, icon_size - 1], fill="#00A1D6")
         draw.text((16, 12), "A", fill="white")
