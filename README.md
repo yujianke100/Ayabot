@@ -7,6 +7,7 @@
 <p align="center">
   <a href="https://github.com/yujianke100/ayabot/releases"><img src="https://img.shields.io/github/v/release/yujianke100/ayabot" alt="Release"></a>
   <a href="https://github.com/yujianke100/ayabot/pkgs/container/ayabot"><img src="https://img.shields.io/badge/docker-ghcr.io-blue?logo=github" alt="ghcr.io"></a>
+  <a href="https://hub.docker.com/r/yujianke100/ayabot"><img src="https://img.shields.io/badge/docker-hub-blue?logo=docker" alt="Docker Hub"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow" alt="License"></a>
 </p>
 
