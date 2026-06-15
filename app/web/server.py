@@ -1348,7 +1348,7 @@ async def api_create_room(request: Request):
 
     # 写入房间配置
     port = body.get("port", 8000)
-    bot_name = body.get("bot_name", f"文文{room_id[:4]}")
+    bot_name = body.get("bot_name", f"ayabot{room_id[:4]}")
     from app.config import update_config_from_dict
     update_config_from_dict({
         "room_display_id": int(room_display_id),
