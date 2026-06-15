@@ -2,49 +2,67 @@
 Ayabot Windows Tray App
 ──────────────────────
 Entry point for PyInstaller-packaged .exe.
-- Runs the bot + Web UI in background
-- System tray icon with right-click menu
-- Opens browser on startup
-- Per-room data isolation: %USERPROFILE%\\.ayabot\\rooms\\<room_id>\\
-
-Usage:
-    python scripts/tray_win.py                    # 默认加载 config.yaml
-    python scripts/tray_win.py --room 12345       # 加载 rooms/12345/config.yaml
+- Runs WebUI (uvicorn) in background via subprocess
+- System tray icon with right-click menu:
+  - 打开管理后台 (Open WebUI)
+  - 设置端口 (Set Port)
+  - 重置管理员密码 (Reset Admin Password)
+  - 退出 (Exit)
 
 Dependencies: pystray, Pillow
   pip install pystray pillow
+
+PyInstaller:
+  python scripts/build_exe.py
 """
 
+from __future__ import annotations
+
 import argparse
-import asyncio
 import logging
 import os
+import socket
+import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
 # ── 解析参数 ──
 parser = argparse.ArgumentParser(description="Ayabot Windows Tray App")
-parser.add_argument("--room", type=str, default=None,
-                    help="Room ID for per-room data isolation")
+parser.add_argument("--port", type=int, default=None, help="WebUI port")
 args, _ = parser.parse_known_args()
-ROOM_ID = args.room
 
 # ── 路径 ──
 if getattr(sys, "frozen", False):
     BASE_DIR = Path(sys.executable).parent
-    APP_DATA = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Ayabot"
+    DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Ayabot"
 else:
     BASE_DIR = Path(__file__).resolve().parent.parent
-    APP_DATA = BASE_DIR / "data"
-
-if ROOM_ID:
-    DATA_DIR = APP_DATA / "rooms" / ROOM_ID
-else:
-    DATA_DIR = APP_DATA
+    DATA_DIR = BASE_DIR / "data"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── 端口 ──
+_PORT_FILE = DATA_DIR / "port.txt"
+_DEFAULT_PORT = 19810
+
+
+def _read_port() -> int:
+    if args.port:
+        return args.port
+    if _PORT_FILE.exists():
+        try:
+            return int(_PORT_FILE.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            pass
+    return _DEFAULT_PORT
+
+
+def _save_port(port: int) -> None:
+    _PORT_FILE.write_text(str(port), encoding="utf-8")
+
 
 # ── 日志 ──
 log_path = DATA_DIR / "ayabot.log"
@@ -57,6 +75,129 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("tray")
+
+# ── 全局状态 ──
+_port = _read_port()
+_webui_proc: subprocess.Popen | None = None
+_stop_event = threading.Event()
+
+
+def _start_webui() -> None:
+    """在后台线程启动 WebUI."""
+    global _webui_proc
+    python = sys.executable
+
+    cmd = [
+        python, "-m", "uvicorn", "app.web.server:app",
+        "--host", "0.0.0.0",
+        "--port", str(_port),
+    ]
+
+    env = os.environ.copy()
+    if getattr(sys, "frozen", False):
+        env["PYTHONPATH"] = str(BASE_DIR)
+
+    env["AYABOT_PORT"] = str(_port)
+
+    logger.info("starting WebUI: port=%s", _port)
+    try:
+        _webui_proc = subprocess.Popen(
+            cmd,
+            cwd=str(BASE_DIR),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        logger.info("WebUI started, PID=%d", _webui_proc.pid)
+    except Exception as exc:
+        logger.error("failed to start WebUI: %s", exc)
+
+
+def _stop_webui() -> None:
+    global _webui_proc
+    if _webui_proc and _webui_proc.poll() is None:
+        logger.info("stopping WebUI...")
+        _webui_proc.terminate()
+        try:
+            _webui_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _webui_proc.kill()
+            _webui_proc.wait()
+        logger.info("WebUI stopped")
+    _webui_proc = None
+
+
+def _restart_webui() -> None:
+    _stop_webui()
+    time.sleep(1)
+    _start_webui()
+
+
+def _open_webui() -> None:
+    webbrowser.open(f"http://127.0.0.1:{_port}")
+
+
+def _reset_admin_password() -> None:
+    """运行 reset_admin 重置密码，显示结果弹窗."""
+    python = sys.executable
+    cmd = [python, "-m", "app.reset_admin"]
+    env = os.environ.copy()
+    if getattr(sys, "frozen", False):
+        env["PYTHONPATH"] = str(BASE_DIR)
+
+    try:
+        result = subprocess.run(
+            cmd, cwd=str(BASE_DIR), env=env,
+            capture_output=True, text=True, timeout=30,
+        )
+        msg = result.stdout.strip() or result.stderr.strip() or "密码已重置"
+    except Exception as exc:
+        msg = f"重置失败: {exc}"
+
+    logger.info("reset admin password: %s", msg)
+    _show_message("密码重置", msg)
+
+
+def _show_message(title: str, message: str) -> None:
+    """显示消息框."""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo(title, message)
+        root.destroy()
+    except Exception:
+        logger.info("%s: %s", title, message)
+
+
+def _prompt_port() -> None:
+    """弹窗让用户输入端口号."""
+    global _port
+    try:
+        import tkinter as tk
+        from tkinter import simpledialog
+
+        root = tk.Tk()
+        root.withdraw()
+        new_port = simpledialog.askinteger(
+            "设置端口",
+            f"当前端口: {_port}\n输入新的 WebUI 端口号:",
+            initialvalue=_port,
+            minvalue=1024,
+            maxvalue=65535,
+            parent=root,
+        )
+        root.destroy()
+
+        if new_port and new_port != _port:
+            _port = new_port
+            _save_port(_port)
+            _restart_webui()
+            _show_message("端口已更改", f"WebUI 已切换到端口 {_port}")
+    except Exception as exc:
+        logger.error("port prompt failed: %s", exc)
 
 
 def _setup_room() -> str | None:
@@ -99,77 +240,59 @@ def _setup_room() -> str | None:
         return str(cfg_path)
 
 
-def _start_bot(config_path: str) -> asyncio.AbstractEventLoop:
-    """在独立线程中启动 asyncio 事件循环 + bot."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    from app.web.server import app as fastapi_app, init_app, _HTTP_HOST, _HTTP_PORT  # noqa: PLC0415, PLC2701
-    from app.main import _run  # noqa: PLC0415, PLC2701
-
-    loop.create_task(_run(config_path))
-    loop.run_forever()
-    return loop
-
-
-def _open_webui() -> None:
-    """在浏览器中打开 Web UI."""
-    webbrowser.open(f"http://127.0.0.1:8000")
-
-
-def _create_tray_icon(stop_event: threading.Event) -> None:
+def _create_tray_icon() -> None:
     """创建系统托盘图标."""
     try:
         import pystray
-        from PIL import Image
+        from PIL import Image, ImageDraw
     except ImportError:
-        logger.error(
-            "pystray or Pillow not installed. Run: pip install pystray pillow"
-        )
+        logger.error("pystray or Pillow not installed. Run: pip install pystray pillow")
         return
 
-    # 生成图标（或从文件加载）
+    # 生成图标
     icon_size = 64
     icon_img = Image.new("RGBA", (icon_size, icon_size), (0, 0, 0, 0))
-    # 尝试加载 logo
+
     logo_paths = [
         BASE_DIR / "logo.png",
         BASE_DIR / "assets" / "logo.png",
-        BASE_DIR / "app" / "web" / "static" / "logo.png",
-        DATA_DIR / "logo.png",
     ]
     for lp in logo_paths:
         if lp.exists():
             try:
                 icon_img = Image.open(lp).resize((icon_size, icon_size))
-                logger.info("loaded icon from %s", lp)
                 break
             except Exception:
                 continue
     else:
-        # 如果没有 logo 文件，生成一个简单的 A 字母图标
-        try:
-            from PIL import ImageDraw
-            draw = ImageDraw.Draw(icon_img)
-            draw.ellipse([0, 0, icon_size - 1, icon_size - 1], fill="#00A1D6")
-            draw.text((16, 12), "A", fill="white", font=None)
-        except Exception:
-            pass
+        # 无 logo 文件时生成一个字母 A 图标
+        draw = ImageDraw.Draw(icon_img)
+        draw.ellipse([0, 0, icon_size - 1, icon_size - 1], fill="#00A1D6")
+        draw.text((16, 12), "A", fill="white")
 
-    def on_open(icon: pystray.Icon, item: pystray.MenuItem) -> None:  # noqa: ARG001
+    def on_open(icon: pystray.Icon, item: pystray.MenuItem) -> None:
         _open_webui()
 
-    def on_exit(icon: pystray.Icon, item: pystray.MenuItem) -> None:  # noqa: ARG001
+    def on_set_port(icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        _prompt_port()
+
+    def on_reset_pwd(icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        _reset_admin_password()
+
+    def on_exit(icon: pystray.Icon, item: pystray.MenuItem) -> None:
         icon.stop()
-        stop_event.set()
-        # 强制退出（asyncio 循环在另一个线程）
+        _stop_webui()
+        _stop_event.set()
         os._exit(0)
 
-    label = f"Ayabot{' [' + ROOM_ID + ']' if ROOM_ID else ''} 直播间机器人"
+    label = f"Ayabot 直播间机器人 (端口 {_port})"
     menu = pystray.Menu(
-        pystray.MenuItem("打开管理后台", on_open, default=True),
+        pystray.MenuItem("🌐 打开管理后台", on_open, default=True),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("退出", on_exit),
+        pystray.MenuItem("🔌 设置端口", on_set_port),
+        pystray.MenuItem("🔑 重置管理员密码", on_reset_pwd),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("❌ 退出", on_exit),
     )
 
     icon = pystray.Icon("ayabot", icon_img, label, menu)
@@ -177,28 +300,37 @@ def _create_tray_icon(stop_event: threading.Event) -> None:
 
 
 def main() -> None:
-    config_path = _setup_room()
     logger.info("Ayabot starting… data dir: %s", DATA_DIR)
-    if ROOM_ID:
-        logger.info("room mode: %s, config: %s", ROOM_ID, config_path)
 
-    stop_event = threading.Event()
+    # 确保 config.yaml 存在
+    cfg_src = BASE_DIR / "config.yaml"
+    cfg_dst = DATA_DIR / "config.yaml"
+    if not cfg_dst.exists() and cfg_src.exists():
+        import shutil
+        shutil.copy2(str(cfg_src), str(cfg_dst))
+        logger.info("copied config to %s", cfg_dst)
 
-    # 在后台线程启动 bot
-    bot_thread = threading.Thread(target=_start_bot, args=(config_path,), daemon=True)
-    bot_thread.start()
+    # 启动 WebUI
+    _start_webui()
 
-    # 短延迟后打开浏览器（等待 Web UI 就绪）
-    def _delayed_open() -> None:
-        import time
-        time.sleep(3)
-        _open_webui()
-
-    threading.Thread(target=_delayed_open, daemon=True).start()
+    # 延迟打开浏览器
+    threading.Thread(target=_delayed_open_browser, daemon=True).start()
 
     # 主线程：显示托盘图标
     logger.info("tray icon starting…")
-    _create_tray_icon(stop_event)
+    _create_tray_icon()
+
+
+def _delayed_open_browser() -> None:
+    """延迟 3 秒后打开浏览器."""
+    time.sleep(3)
+    for _ in range(10):
+        try:
+            with socket.create_connection(("127.0.0.1", _port), timeout=1):
+                _open_webui()
+                return
+        except (ConnectionRefusedError, OSError):
+            time.sleep(1)
 
 
 if __name__ == "__main__":

@@ -6,3 +6,4 @@ uvicorn[standard]>=0.29.0
 
 # Windows tray .exe 构建依赖
 # pip install pystray pillow pyinstaller
+# 构建: python scripts/build_exe.py
