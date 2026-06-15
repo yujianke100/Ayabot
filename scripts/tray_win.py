@@ -313,8 +313,8 @@ def _create_tray_icon() -> None:
     icon_img = Image.new("RGBA", (icon_size, icon_size), (0, 0, 0, 0))
 
     logo_paths = [
-        BASE_DIR / "logo.png",
-        BASE_DIR / "assets" / "logo.png",
+        BASE_DIR / "icon.png",
+        BASE_DIR / "assets" / "icon.png",
     ]
     for lp in logo_paths:
         if lp.exists():
