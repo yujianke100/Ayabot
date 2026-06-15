@@ -349,6 +349,36 @@ async def _startup():
     asyncio.create_task(_build_gift_cache())
     # 启动定期日志清理（后台线程，默认保留 3 天）
     start_periodic_log_cleanup()
+    # 自动启动所有已配置的房间（Docker 部署时自动拉起）
+    asyncio.create_task(_auto_start_rooms())
+
+
+async def _auto_start_rooms() -> None:
+    """延迟扫描 rooms/ 目录，自动启动所有已配置的房间 Bot。"""
+    try:
+        # 等 Web 服务完全就绪后再启动
+        await asyncio.sleep(3)
+        rooms = _list_rooms_from_disk()
+        if not rooms:
+            logger.info("auto-start: no rooms found on disk")
+            return
+        started = 0
+        for room in rooms:
+            room_id = room["room_id"]
+            status = room_status(room_id)
+            if status == "running":
+                logger.info("auto-start: room %s already running, skip", room_id)
+                continue
+            logger.info("auto-start: starting room %s ...", room_id)
+            ok = await start_room_async(room_id)
+            if ok:
+                started += 1
+                logger.info("auto-start: room %s started successfully", room_id)
+            else:
+                logger.warning("auto-start: room %s failed to start", room_id)
+        logger.info("auto-start: %d/%d rooms started", started, len(rooms))
+    except Exception as exc:
+        logger.error("auto-start: error: %s", exc, exc_info=True)
 
 
 # ══════════════════════════════════════════════════════════════════
