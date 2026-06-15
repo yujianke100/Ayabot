@@ -292,25 +292,37 @@ def _create_tray_icon() -> None:
         logger.error("pystray or Pillow not installed. Run: pip install pystray pillow")
         return
 
-    # 生成图标
+    # 生成图标 — 按优先级搜索多个位置和文件名
     icon_size = 64
     icon_img = Image.new("RGBA", (icon_size, icon_size), (0, 0, 0, 0))
 
-    logo_paths = []
+    icon_candidates = []
+    # 1) PyInstaller 打包目录 (_MEIPASS)
     if getattr(sys, "_MEIPASS", None):
-        logo_paths.append(Path(sys._MEIPASS) / "icon.png")
-    logo_paths += [
+        meipass = Path(sys._MEIPASS)
+        icon_candidates.extend([
+            meipass / "icon.png",
+            meipass / "logo.png",
+        ])
+    # 2) .exe 同级目录
+    icon_candidates += [
         BASE_DIR / "icon.png",
+        BASE_DIR / "logo.png",
         BASE_DIR / "assets" / "icon.png",
+        BASE_DIR / "assets" / "logo.png",
     ]
-    for lp in logo_paths:
+    loaded = False
+    for lp in icon_candidates:
         if lp.exists():
             try:
                 icon_img = Image.open(lp).resize((icon_size, icon_size))
+                logger.info("loaded icon from %s", lp)
+                loaded = True
                 break
-            except Exception:
+            except Exception as exc:
+                logger.debug("failed to load %s: %s", lp, exc)
                 continue
-    else:
+    if not loaded:
         draw = ImageDraw.Draw(icon_img)
         draw.ellipse([0, 0, icon_size - 1, icon_size - 1], fill="#00A1D6")
         draw.text((16, 12), "A", fill="white")
