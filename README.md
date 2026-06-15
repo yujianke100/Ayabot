@@ -182,10 +182,14 @@ anchor_uid: 1000000                # ← 改成主播的 UID
 
 ## 🐳 Docker 镜像
 
-自动构建推送到 GitHub Container Registry：
+自动构建推送到 GitHub Container Registry 和 Docker Hub：
 
 ```bash
+# GitHub Container Registry（主镜像）
 docker pull ghcr.io/yujianke100/ayabot:latest
+
+# Docker Hub（备用）
+docker pull yujianke100/ayabot:latest
 ```
 
 容器启动后即可在 WebUI 中管理机器人。

@@ -3141,24 +3141,28 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <table class="w-full text-xs border-collapse">
                 <thead><tr class="bg-gray-100"><th class="border p-1 text-left">命令</th><th class="border p-1 text-left">说明</th></tr></thead>
                 <tbody>
-                    <tr><td class="border p-1"><code>#签到</code></td><td class="border p-1">每日签到（按直播场次计算）</td></tr>
-                    <tr><td class="border p-1"><code>#抽签</code></td><td class="border p-1">今日运势抽签</td></tr>
-                    <tr><td class="border p-1"><code>#今日盲盒</code></td><td class="border p-1">今日盲盒统计</td></tr>
-                    <tr><td class="border p-1"><code>#本月盲盒</code></td><td class="border p-1">本月盲盒统计</td></tr>
-                    <tr><td class="border p-1"><code>#{{ llmWakeWord || 'ayabot' }} &lt;聊天内容&gt;</code></td><td class="border p-1">AI 智能回复</td></tr>
+                    <tr><td class="border p-1"><code>#签到</code></td><td class="border p-1">每日签到（直播场次连续签到）</td></tr>
+                    <tr><td class="border p-1"><code>#抽签</code></td><td class="border p-1">今日运势抽签（支持自定义签文）</td></tr>
+                    <tr><td class="border p-1"><code>#今日盲盒[:用户名]</code></td><td class="border p-1">今日盲盒统计，不加用户名查自己</td></tr>
+                    <tr><td class="border p-1"><code>#本月盲盒[:用户名]</code></td><td class="border p-1">本月盲盒统计，不加用户名查自己</td></tr>
+                    <tr><td class="border p-1"><code>#{{ llmWakeWord || 'ayabot' }} &lt;聊天&gt;</code></td><td class="border p-1">AI 智能回复</td></tr>
                     <tr><td class="border p-1"><code>#帮助</code></td><td class="border p-1">显示所有命令</td></tr>
                 </tbody>
             </table>
+            <p class="text-xs text-gray-400 mt-2">开启「免#指令」后可不带 # 前缀触发指令。
+            开启「AI免#前缀唤醒」后弹幕以唤醒词开头即触发 AI。</p>
         </div>
         <div>
-            <h3 class="font-bold text-blue-600 mb-1">🤖 功能</h3>
+            <h3 class="font-bold text-blue-600 mb-1">🤖 功能特性</h3>
             <ul class="list-disc pl-4 space-y-1 text-xs">
                 <li>欢迎 — 新观众进入时自动欢迎</li>
                 <li>感谢 — 送礼物/盲盒时自动感谢</li>
-                <li>大航海感谢 — 舰长/提督/总督自动感谢</li>
-                <li>关键词回复 — 设定关键词自动回复</li>
-                <li>AI 回复 — 唤醒词触发 LLM 智能对话</li>
+                <li>大航海感谢 — 舰长/提督/总督专属感谢</li>
+                <li>关键词回复 — 支持包含/精确匹配 + UID限制</li>
+                <li>AI 回复 — 三种触发方式 + 上下文记忆</li>
                 <li>多房间 — 一个 WebUI 管理多个主播</li>
+                <li>用户权限 — 管理员/普通用户，控制房间可见范围</li>
+                <li>跨平台 — Linux/macOS/Windows，无需 systemd/sudo</li>
             </ul>
         </div>
     </div>
