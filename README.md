@@ -11,10 +11,20 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue" alt="License"></a>
 </p>
 
-B 站直播间弹幕机器人，支持签到抽签、盲盒统计、AI 对话、自动欢迎/感谢、定时消息、Web 后台管理。
-开箱即用，小白友好。纯 Python 跨平台实现，无需 systemd / sudo。
+**完全免费**的超轻量 B 站直播间弹幕机器人。签到抽签、盲盒统计、AI 对话、自动欢迎/感谢、定时消息、Web 后台管理，一应俱全。
+开箱即用，小白友好。纯 Python 跨平台，无需 systemd / sudo。
 
 **v0.1.0 新增**：Windows 单文件 .exe 发布版（含托盘图标、日志查看器、自动恢复房间），AI 回复设置持久化。
+
+---
+
+## ✨ 核心优势
+
+| 优势 | 说明 |
+|------|------|
+| 🆓 **完全免费** | 本项目 **100% 免费开源**（GPLv3），功能无任何限制。市面同类 Bot 动辄月付数十元，Ayabot 分文不取 |
+| 🪶 **极致轻量** | **百兆内存即可运行**，树莓派、低配云服务器都能轻松跑。无数据库依赖，无需 Redis / MySQL |
+| 🖥️ **全平台覆盖** | **Windows** 提供单文件 .exe 桌面软件（托盘图标 + 日志查看器）；**macOS / Linux** 可直接源码运行或 **Docker 一键部署**；ARM 架构（树莓派、苹果 M 系列）完美支持 |
 
 ---
 
@@ -211,9 +221,10 @@ Windows .exe 版退出时会保存运行中的房间列表，下次启动自动�
 
 ---
 
-## 🐳 Docker 镜像
+## 🐳 Docker 镜像（支持 ARM64 / AMD64）
 
-自动构建推送到 GitHub Container Registry 和 Docker Hub：
+自动构建推送 multi-arch 镜像到 GitHub Container Registry 和 Docker Hub，
+**AMD64（普通 PC / 云服务器）和 ARM64（树莓派、苹果 M 系列、Oracle ARM 云）通用**：
 
 ```bash
 # GitHub Container Registry（主镜像）
