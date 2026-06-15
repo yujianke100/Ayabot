@@ -84,6 +84,8 @@ def main() -> None:
             cmd.extend(["--icon", str(logo_png)])
         cmd.extend(["--add-data", f"{logo_png}{os.pathsep}."])
 
+    cmd.append(str(entry))
+
     print(f"Building Ayabot.exe...")
     result = subprocess.run(cmd, cwd=base_dir)
     if result.returncode == 0:
