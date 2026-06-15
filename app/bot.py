@@ -69,6 +69,9 @@ class LiveRobot:
         wake = getattr(config.llm, 'wake_word', 'ayabot')
         _set_wake_word(wake)
 
+        # 记下机器人自己的 UID，用于忽略自己发送的弹幕（防止 AI 回复触发关键词）
+        self._bot_uid = _safe_int(config.credential.dedeuserid) if config.credential.dedeuserid else 0
+
     async def run(self) -> None:
         self.logger.info("robot started, room=%s", self.config.room_display_id)
         self._poll_counter = 0
@@ -464,6 +467,11 @@ class LiveRobot:
 
         uid, uname, text, moderator_hint = parsed
         self.logger.debug("danmaku received: uid=%s text=%s (anchor_uid=%s)", uid, text, self.config.anchor_uid)
+
+        # 忽略自己发的弹幕（AI 回复或系统消息被广播回来时，可能触发关键词规则）
+        if self._bot_uid and uid == self._bot_uid:
+            self.logger.debug("skip self-sent danmaku: uid=%s text=%s", uid, text)
+            return
 
         if self.config.features.danmaku_log_enabled:
             self.store.record_danmaku(
