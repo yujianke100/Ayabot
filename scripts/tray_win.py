@@ -76,6 +76,51 @@ logging.basicConfig(
 )
 logger = logging.getLogger("tray")
 
+# ── 单实例锁（防止双击导致无限进程）─
+_LOCK_FILE = DATA_DIR / "tray.lock"
+
+
+def _acquire_lock() -> bool:
+    """尝试获取互斥锁。返回 True 表示本实例是第一个。"""
+    try:
+        _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # 用独占创建 + 写入 PID 作为锁
+        fd = os.open(str(_LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        # 锁文件已存在，检查进程是否存活
+        try:
+            old_pid = int(_LOCK_FILE.read_text(encoding="utf-8").strip())
+            # Windows 下用 tasklist 检查进程，Linux 用 kill 0
+            if sys.platform == "win32":
+                r = subprocess.run(["tasklist", "/FI", f"PID eq {old_pid}"],
+                                   capture_output=True, text=True, timeout=5)
+                if str(old_pid) in r.stdout:
+                    logger.warning("another instance already running (PID=%d)", old_pid)
+                    return False
+            else:
+                try:
+                    os.kill(old_pid, 0)
+                    logger.warning("another instance already running (PID=%d)", old_pid)
+                    return False
+                except ProcessLookupError:
+                    pass
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            pass
+        # 进程已死或无法检查，清理旧锁
+        _LOCK_FILE.unlink(missing_ok=True)
+        return _acquire_lock()
+    except OSError as exc:
+        logger.warning("lock acquire failed: %s", exc)
+        return True  # 非致命，继续启动
+
+
+def _release_lock() -> None:
+    _LOCK_FILE.unlink(missing_ok=True)
+
+
 # ── 全局状态 ──
 _port = _read_port()
 _webui_proc: subprocess.Popen | None = None
@@ -282,6 +327,7 @@ def _create_tray_icon() -> None:
     def on_exit(icon: pystray.Icon, item: pystray.MenuItem) -> None:
         icon.stop()
         _stop_webui()
+        _release_lock()
         _stop_event.set()
         os._exit(0)
 
@@ -300,6 +346,11 @@ def _create_tray_icon() -> None:
 
 
 def main() -> None:
+    # 单实例检查
+    if not _acquire_lock():
+        _show_message("Ayabot", "程序已在运行中\n请检查系统托盘图标")
+        return
+
     logger.info("Ayabot starting… data dir: %s", DATA_DIR)
 
     # 确保 config.yaml 存在
