@@ -8,17 +8,25 @@ Ayabot 跨平台进程管理器
   - Windows：Popen + terminate()
   - Docker / Podman：容器外只需跟踪 PID
   - 无 root 依赖，零权限要求
+
+冻结模式（PyInstaller .exe）：
+  改用 in-process asyncio Task 运行 Bot，因为 .exe 无法作为 Python 解释器
+  启动子进程。
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import signal
 import subprocess
+import sys
+import threading
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger("bili-live-robot.process_manager")
 
@@ -26,21 +34,110 @@ logger = logging.getLogger("bili-live-robot.process_manager")
 # 进程 PID 持久化到 rooms/<id>/bot.pid，进程对象在 WebUI 生命周期内保持
 _procs: dict[str, subprocess.Popen] = {}
 
+# 房间根目录（可由 set_rooms_base_dir 覆盖，兼容 PyInstaller 打包）
+_rooms_base_dir: Path | None = None
 
-def _get_project_root() -> Path:
-    """返回项目根目录（包含 app/ 和 rooms/ 的目录）."""
+# 同进程 Bot 实例（PyInstaller 冻结模式）
+# room_id -> (robot, auth_manager, asyncio.Task)
+_inproc_bots: dict[str, tuple[Any, Any, asyncio.Task]] = {}
+
+
+def set_rooms_base_dir(dir_path: str | Path) -> None:
+    """设置 rooms/ 的基础目录路径（覆盖默认的自动检测）。"""
+    global _rooms_base_dir
+    _rooms_base_dir = Path(dir_path).resolve()
+
+
+def _get_rooms_dir() -> Path:
+    """返回 rooms/ 上级目录（项目根或自定义数据目录）。"""
+    if _rooms_base_dir is not None:
+        return _rooms_base_dir
     return Path(__file__).resolve().parent.parent
 
 
 def _pidfile(room_id: str) -> Path:
-    return _get_project_root() / "rooms" / room_id / "bot.pid"
+    return _get_rooms_dir() / "rooms" / room_id / "bot.pid"
 
 
 def _lockfile(room_id: str) -> Path:
-    return _get_project_root() / "rooms" / room_id / "bot.lock"
+    return _get_rooms_dir() / "rooms" / room_id / "bot.lock"
 
 
-# ── 核心 API ────────────────────────────────────────────────
+# ── 自动检测是否使用同进程模式 ──
+
+
+def _use_inprocess() -> bool:
+    """冻结模式（PyInstaller .exe）下使用同进程运行 Bot。"""
+    return getattr(sys, "frozen", False)
+
+
+# ── 同进程 Bot 运行（冻结模式） ──────────────────────────────
+
+
+async def start_bot_in_process(room_id: str) -> bool:
+    """在当前进程内启动 Bot（asyncio Task），返回 True 表示成功。"""
+    # 检查是否已在运行
+    if _inproc_is_running(room_id):
+        logger.info("room %s in-process bot already running", room_id)
+        return True
+
+    from app.auth import AuthManager  # noqa: PLC0415
+    from app.bot import LiveRobot  # noqa: PLC0415
+    from app.config import load_config  # noqa: PLC0415
+
+    root = _get_rooms_dir()
+    rooms_dir = root / "rooms" / room_id
+    config_path = rooms_dir / "config.yaml"
+    if not config_path.exists():
+        logger.error("room %s config not found: %s", room_id, config_path)
+        return False
+
+    try:
+        config = load_config(str(config_path))
+        auth = AuthManager(config)
+        credential = await auth.prepare_credential()
+        auth.start_refresh_loop(credential)
+
+        robot = LiveRobot(config=config, credential=credential)
+        task = asyncio.create_task(robot.run())
+        _inproc_bots[room_id] = (robot, auth, task)
+        logger.info("room %s in-process bot started", room_id)
+        return True
+    except Exception as exc:
+        logger.error("room %s in-process start failed: %s", room_id, exc, exc_info=True)
+        return False
+
+
+async def stop_bot_in_process(room_id: str) -> bool:
+    """停止当前进程内的 Bot Task。"""
+    entry = _inproc_bots.pop(room_id, None)
+    if entry is None:
+        return True
+    robot, auth, task = entry
+    try:
+        await robot.shutdown()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        await auth.stop()
+    except Exception as exc:
+        logger.warning("room %s in-process stop error: %s", room_id, exc)
+    logger.info("room %s in-process bot stopped", room_id)
+    return True
+
+
+def _inproc_is_running(room_id: str) -> bool:
+    """检查同进程 Bot 是否存活（同步安全）。"""
+    entry = _inproc_bots.get(room_id)
+    if entry is None:
+        return False
+    _, _, task = entry
+    return not task.done()
+
+
+# ── 子进程模式（常规 Python 运行） ──────────────────────────
 
 
 def start_room(room_id: str) -> bool:
@@ -50,7 +147,7 @@ def start_room(room_id: str) -> bool:
         logger.info("room %s already running, skip start", room_id)
         return True
 
-    root = _get_project_root()
+    root = _get_rooms_dir()
     rooms_dir = root / "rooms" / room_id
     config_path = rooms_dir / "config.yaml"
     if not config_path.exists():
@@ -58,6 +155,8 @@ def start_room(room_id: str) -> bool:
         return False
 
     log_path = rooms_dir / "bot.log"
+    # 追加前先截断，防止无限增长
+    truncate_log_file(log_path)
     try:
         log_fp = log_path.open("a", encoding="utf-8")
     except OSError as exc:
@@ -132,6 +231,9 @@ def room_status(room_id: str) -> str:
 
 def clean_room(room_id: str) -> None:
     """彻底清理房间的进程和文件。"""
+    # 先清理同进程 Bot
+    if _inproc_bots.pop(room_id, None) is not None:
+        logger.info("room %s in-process bot entry cleaned", room_id)
     stop_room(room_id)
     pidf = _pidfile(room_id)
     if pidf.exists():
@@ -142,11 +244,42 @@ def clean_room(room_id: str) -> None:
     _procs.pop(room_id, None)
 
 
+# ── Async API（自动选择子进程/同进程） ──────────────────────
+
+
+async def start_room_async(room_id: str) -> bool:
+    """启动房间 Bot：冻结模式用同进程 Task，否则用子进程。"""
+    if _use_inprocess():
+        return await start_bot_in_process(room_id)
+    return start_room(room_id)
+
+
+async def stop_room_async(room_id: str) -> bool:
+    """停止房间 Bot：同时尝试同进程和子进程两种方式。"""
+    await stop_bot_in_process(room_id)
+    stop_room(room_id)
+    return True
+
+
+async def restart_room_async(room_id: str) -> bool:
+    """重启房间 Bot（async 版本）。"""
+    await stop_room_async(room_id)
+    for _ in range(10):
+        if not _is_running(room_id):
+            break
+        await asyncio.sleep(0.3)
+    return await start_room_async(room_id)
+
+
 # ── 内部实现 ────────────────────────────────────────────────
 
 
 def _is_running(room_id: str) -> bool:
-    """判断进程是否存活（优先用进程对象，降级到 PID 文件）。"""
+    """判断进程是否存活（检查同进程 Bot + 子进程 + PID 文件）。"""
+    # 0) 检查同进程 Bot
+    if _inproc_is_running(room_id):
+        return True
+
     # 1) 检查内存中的进程对象
     proc = _procs.get(room_id)
     if proc is not None:
@@ -246,3 +379,79 @@ def sys_executable() -> str:
     """获取当前 Python 解释器路径（兼容虚拟环境）。"""
     import sys
     return sys.executable
+
+
+# ── 日志清理（行数轮转 + 时间过期删除） ────────────────────
+
+_MAX_LOG_LINES = 5000
+_MAX_LOG_DAYS = 3
+_LOG_CLEANUP_INTERVAL = 3600  # 每小时检查一次
+
+
+def truncate_log_file(path: Path, max_lines: int = _MAX_LOG_LINES) -> bool:
+    """将日志文件截断为最后 max_lines 行。"""
+    if not path.exists() or path.stat().st_size == 0:
+        return True
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) > max_lines:
+            tail = lines[-max_lines:]
+            path.write_text("\n".join(tail) + "\n", encoding="utf-8")
+            logger.info("truncated %s: %d -> %d lines", path.name, len(lines), max_lines)
+        return True
+    except Exception as exc:
+        logger.warning("truncate log failed %s: %s", path, exc)
+        return False
+
+
+def cleanup_old_logs(max_days: int = _MAX_LOG_DAYS) -> int:
+    """删除超过 max_days 的 bot.log，截断过大的 bot.log。返回清理的文件数。"""
+    cutoff = time.time() - max_days * 86400
+    cleaned = 0
+
+    # 扫描 rooms/*/bot.log
+    rooms_dir = _get_rooms_dir() / "rooms"
+    if not rooms_dir.exists():
+        return 0
+
+    for d in rooms_dir.iterdir():
+        if not d.is_dir():
+            continue
+        log_file = d / "bot.log"
+        if not log_file.exists():
+            continue
+        # 按时间清理
+        try:
+            mtime = log_file.stat().st_mtime
+            if mtime < cutoff:
+                log_file.unlink(missing_ok=True)
+                logger.info("deleted old log: %s (mtime=%s)", log_file,
+                            datetime.fromtimestamp(mtime).isoformat())
+                cleaned += 1
+                continue
+        except OSError:
+            pass
+        # 按行数截断
+        truncate_log_file(log_file)
+
+    return cleaned
+
+
+def start_periodic_log_cleanup() -> None:
+    """启动后台线程，定期清理过期/过大的日志文件。"""
+    thread = threading.Thread(target=_log_cleanup_loop, daemon=True, name="log-cleanup")
+    thread.start()
+    logger.info("periodic log cleanup started (interval=%ds, max_days=%d)",
+                _LOG_CLEANUP_INTERVAL, _MAX_LOG_DAYS)
+
+
+def _log_cleanup_loop() -> None:
+    """定时清理循环。"""
+    while True:
+        try:
+            count = cleanup_old_logs()
+            if count:
+                logger.info("log cleanup: removed %d old log files", count)
+        except Exception as exc:
+            logger.warning("log cleanup error: %s", exc)
+        time.sleep(_LOG_CLEANUP_INTERVAL)

@@ -19,6 +19,8 @@ PyInstaller:
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import logging
 import os
 import socket
@@ -37,7 +39,13 @@ args, _ = parser.parse_known_args()
 # ── 路径 ──
 if getattr(sys, "frozen", False):
     BASE_DIR = Path(sys.executable).parent
-    DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Ayabot"
+    if sys.platform == "win32":
+        data_root = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+    elif sys.platform == "darwin":
+        data_root = Path.home() / "Library" / "Application Support"
+    else:
+        data_root = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+    DATA_DIR = data_root / "Ayabot"
 else:
     BASE_DIR = Path(__file__).resolve().parent.parent
     DATA_DIR = BASE_DIR / "data"
@@ -62,13 +70,44 @@ def _save_port(port: int) -> None:
     _PORT_FILE.write_text(str(port), encoding="utf-8")
 
 
-# ── 日志 ──
+# ── 日志（自动轮转，最多保留 5000 行） ──
 log_path = DATA_DIR / "ayabot.log"
+_MAX_LOG_LINES = 5000
+
+
+class _RotatingFileHandler(logging.Handler):
+    """限制日志文件行数，超出时截断末尾。"""
+    def __init__(self, path: Path, max_lines: int = _MAX_LOG_LINES) -> None:
+        super().__init__()
+        self._path = path
+        self._max_lines = max_lines
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a", encoding="utf-8") as f:
+                f.write(self.format(record) + "\n")
+            # 超出限制时截断（惰性，避免每次写入都检查）
+            if self._path.stat().st_size > 512 * 1024:  # 约 5000 行
+                self._truncate()
+        except Exception:
+            self.handleError(record)
+
+    def _truncate(self) -> None:
+        try:
+            lines = self._path.read_text(encoding="utf-8").splitlines()
+            if len(lines) > self._max_lines:
+                tail = lines[-self._max_lines:]
+                self._path.write_text("\n".join(tail) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
-        logging.FileHandler(log_path, encoding="utf-8"),
+        _RotatingFileHandler(log_path),
         logging.StreamHandler(),
     ],
 )
@@ -148,6 +187,12 @@ def _start_webui(config_path: str | None = None) -> None:
     import uvicorn
     from app.web.server import app, init_app
 
+    # PyInstaller windowed 模式下 sys.stderr/stdout 为 None，uvicorn logging 会崩溃
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+
     # 关键: 初始化配置 (DB路径、认证信息、LLM配置等)
     try:
         from app.config import load_config
@@ -168,6 +213,7 @@ def _start_webui(config_path: str | None = None) -> None:
                 host="0.0.0.0",
                 port=_port,
                 log_level="info",
+                log_config=None,  # 避免 PyInstaller windowed 模式下 sys.stderr=None 导致崩溃
             )
             server = uvicorn.Server(config)
             _start_webui._server = server
@@ -210,7 +256,7 @@ def _open_webui() -> None:
 
 
 def _reset_admin_password() -> None:
-    """直接调用 reset_admin 模块重置密码（兼容 PyInstaller）。"""
+    """重置 ayabot 密码为 123456。"""
     try:
         import io
         from contextlib import redirect_stdout
@@ -219,8 +265,8 @@ def _reset_admin_password() -> None:
 
         stdout_buf = io.StringIO()
         with redirect_stdout(stdout_buf):
-            do_reset(username="ayabot")
-        msg = stdout_buf.getvalue().strip() or "密码已重置"
+            do_reset(username="ayabot", password="123456", must_reset=False)
+        msg = stdout_buf.getvalue().strip() or "密码已重置为 123456"
     except Exception as exc:
         msg = f"重置失败: {exc}"
 
@@ -229,44 +275,219 @@ def _reset_admin_password() -> None:
 
 
 def _show_message(title: str, message: str) -> None:
-    """显示消息框."""
+    """用 PowerShell 原生消息框（完全独立进程，避免 PyInstaller --windowed 下的焦点问题）。"""
+    import subprocess
     try:
-        import tkinter as tk
-        from tkinter import messagebox
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showinfo(title, message)
-        root.destroy()
-    except Exception:
-        logger.info("%s: %s", title, message)
+        # 用双引号包裹，内部双引号转义
+        safe_msg = message.replace('"', '""')
+        safe_title = title.replace('"', '""')
+        ps = f'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show("{safe_msg}", "{safe_title}")'
+        subprocess.run(
+            ['powershell', '-NoProfile', '-WindowStyle', 'Normal', '-Command', ps],
+            capture_output=True, timeout=60
+        )
+    except Exception as exc:
+        logger.info("%s: %s (PowerShell failed: %s)", title, message, exc)
 
 
 def _prompt_port() -> None:
-    """弹窗让用户输入端口号."""
+    """弹窗让用户输入端口号（PowerShell InputBox，完全独立于 tkinter）。"""
     global _port
+    import subprocess
+    import re
     try:
-        import tkinter as tk
-        from tkinter import simpledialog
-
-        root = tk.Tk()
-        root.withdraw()
-        new_port = simpledialog.askinteger(
-            "设置端口",
-            f"当前端口: {_port}\n输入新的 WebUI 端口号:",
-            initialvalue=_port,
-            minvalue=1024,
-            maxvalue=65535,
-            parent=root,
+        ps = f'''
+Add-Type -AssemblyName Microsoft.VisualBasic
+$port = [Microsoft.VisualBasic.Interaction]::InputBox("当前端口: {_port}`n输入新的 WebUI 端口号:", "设置端口", "{_port}")
+if ($port) {{ Write-Host $port }}
+'''
+        result = subprocess.run(
+            ['powershell', '-NoProfile', '-WindowStyle', 'Normal', '-Command', ps],
+            capture_output=True, text=True, timeout=60
         )
-        root.destroy()
-
-        if new_port and new_port != _port:
-            _port = new_port
-            _save_port(_port)
-            _restart_webui()
-            _show_message("端口已更改", f"WebUI 已切换到端口 {_port}")
+        output = result.stdout.strip()
+        if not output:
+            logger.info("port prompt cancelled")
+            return
+        # 提取第一个数字
+        match = re.search(r'\d+', output)
+        if not match:
+            return
+        new_port = int(match.group())
+        if new_port < 1024 or new_port > 65535:
+            _show_message("无效端口", "端口必须在 1024-65535 之间")
+            return
+        if new_port == _port:
+            return
+        _port = new_port
+        _save_port(_port)
+        _restart_webui()
+        _show_message("端口已更改", f"WebUI 已切换到端口 {_port}")
     except Exception as exc:
         logger.error("port prompt failed: %s", exc)
+        _show_message("错误", f"端口设置失败: {exc}")
+
+
+def _view_logs() -> None:
+    """打开日志查看窗口（级别筛选 + 滚动显示）。"""
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+    except ImportError:
+        _show_message("错误", "Tkinter 不可用，无法打开日志窗口")
+        return
+
+    LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"]
+
+    win = tk.Tk()
+    win.title("Ayabot 日志查看")
+    win.geometry("800x500")
+    win.minsize(400, 250)
+
+    # 尝试设置图标
+    try:
+        ico = Path(sys._MEIPASS) / "icon.png" if getattr(sys, "_MEIPASS", None) else BASE_DIR / "icon.png"
+        if ico.exists():
+            from PIL import Image, ImageTk
+            img = ImageTk.PhotoImage(Image.open(ico).resize((32, 32)))
+            win.iconphoto(True, img)
+    except Exception:
+        pass
+
+    # ── 顶部：级别选择 + 刷新按钮 ──
+    top = tk.Frame(win)
+    top.pack(fill=tk.X, padx=10, pady=(10, 5))
+
+    tk.Label(top, text="日志级别:").pack(side=tk.LEFT, padx=(0, 5))
+
+    level_var = tk.StringVar(value="INFO")
+    level_combo = ttk.Combobox(top, textvariable=level_var, values=LOG_LEVELS, state="readonly", width=12)
+    level_combo.pack(side=tk.LEFT, padx=(0, 10))
+
+    level_order = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3}
+
+    # ── 状态栏 ──
+    status_var = tk.StringVar(value="")
+    status_bar = tk.Label(win, textvariable=status_var, anchor=tk.W, fg="gray", font=("", 9))
+    status_bar.pack(fill=tk.X, padx=10, pady=(0, 5))
+
+    # ── 日志内容显示 ──
+    text_frame = tk.Frame(win)
+    text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+    text_widget = tk.Text(text_frame, wrap=tk.NONE, font=("Consolas", 10), bg="#1e1e1e", fg="#d4d4d4", insertbackground="white")
+    scroll_y = tk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text_widget.yview)
+    scroll_x = tk.Scrollbar(text_frame, orient=tk.HORIZONTAL, command=text_widget.xview)
+    text_widget.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+
+    scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+    scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+    text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    # 用 tag 给不同级别上色
+    text_widget.tag_configure("DEBUG", foreground="#569cd6")
+    text_widget.tag_configure("INFO", foreground="#d4d4d4")
+    text_widget.tag_configure("WARNING", foreground="#dcdcaa")
+    text_widget.tag_configure("ERROR", foreground="#f44747")
+
+    def _load_logs() -> None:
+        """读取日志文件并按级别筛选显示。"""
+        text_widget.delete("1.0", tk.END)
+        selected = level_var.get()
+        min_order = level_order.get(selected, 1)
+
+        log_file = log_path
+        if not log_file.exists():
+            text_widget.insert(tk.END, f"日志文件不存在: {log_file}\n", "ERROR")
+            status_var.set("日志文件不存在")
+            return
+
+        try:
+            content = log_file.read_text(encoding="utf-8")
+        except Exception as exc:
+            text_widget.insert(tk.END, f"读取日志失败: {exc}\n", "ERROR")
+            status_var.set("读取失败")
+            return
+
+        lines = content.splitlines()
+        shown = 0
+        for line in lines:
+            # 解析行首的日志级别: "2026-06-15 14:54:59,578 [LEVEL]"
+            level_tag = None
+            for lvl in LOG_LEVELS:
+                if f"[{lvl}]" in line:
+                    level_tag = lvl
+                    break
+            if level_tag is None:
+                # 没有级别的行（如 traceback），如果上一行级别够就显示
+                if shown > 0:
+                    text_widget.insert(tk.END, line + "\n", selected if selected in LOG_LEVELS else "INFO")
+                continue
+
+            tag = level_tag
+            if level_order.get(level_tag, 1) >= min_order:
+                text_widget.insert(tk.END, line + "\n", tag)
+                shown += 1
+
+        if shown == 0:
+            text_widget.insert(tk.END, f"没有 {selected} 及以上级别的日志。\n", "DEBUG")
+        status_var.set(f"共 {len(lines)} 行，显示 {shown} 行 [{selected}+]")
+        # 自动滚动到底部
+        text_widget.see(tk.END)
+
+    # ── 刷新按钮 ──
+    def _on_refresh() -> None:
+        _load_logs()
+
+    refresh_btn = tk.Button(top, text="🔄 刷新", command=_on_refresh)
+    refresh_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+    # ── 自动刷新开关 ──
+    auto_var = tk.BooleanVar(value=True)
+    auto_cb = tk.Checkbutton(top, text="自动刷新", variable=auto_var)
+    auto_cb.pack(side=tk.LEFT, padx=(0, 10))
+
+    # ── 清空按钮 ──
+    def _on_clear_log() -> None:
+        from tkinter import messagebox
+        if messagebox.askyesno("清空日志", "确定清空所有日志吗？\n（文件将被清空，不可恢复）"):
+            try:
+                log_file = log_path
+                log_file.write_text("", encoding="utf-8")
+                _load_logs()
+            except Exception as exc:
+                status_var.set(f"清空失败: {exc}")
+
+    clear_btn = tk.Button(top, text="🗑️ 清空", command=_on_clear_log, fg="red")
+    clear_btn.pack(side=tk.LEFT)
+
+    # ── 自动轮询刷新 ──
+    _last_mtime = 0
+
+    def _poll_log() -> None:
+        nonlocal _last_mtime
+        if auto_var.get():
+            try:
+                mtime = log_path.stat().st_mtime
+                if mtime > _last_mtime:
+                    _last_mtime = mtime
+                    _load_logs()
+            except OSError:
+                pass
+        win.after(3000, _poll_log)
+
+    # 初始化加载
+    try:
+        _last_mtime = log_path.stat().st_mtime
+    except OSError:
+        pass
+    _load_logs()
+
+    # 绑定级别切换自动刷新
+    level_combo.bind("<<ComboboxSelected>>", lambda e: _load_logs())
+
+    win.after(3000, _poll_log)
+    win.mainloop()
 
 
 def _setup_room() -> str | None:
@@ -281,13 +502,7 @@ def _setup_room() -> str | None:
         target_cfg = room_dir / "config.yaml"
 
         if not target_cfg.exists():
-            src = BASE_DIR / "config.yaml"
-            if src.exists():
-                import shutil
-                shutil.copy2(str(src), str(target_cfg))
-                logger.info("copied default config to %s", target_cfg)
-            else:
-                logger.warning("no config.yaml found at %s", src)
+            _copy_embedded_config(target_cfg)
 
         migrate_legacy_data(
             args.room,
@@ -298,16 +513,90 @@ def _setup_room() -> str | None:
     else:
         cfg_path = DATA_DIR / "config.yaml"
         if not cfg_path.exists():
-            src = BASE_DIR / "config.yaml"
-            if src.exists():
-                import shutil
-                shutil.copy2(str(src), str(cfg_path))
-                logger.info("copied default config to %s", cfg_path)
-            else:
-                logger.warning("no config.yaml found at %s", src)
+            _copy_embedded_config(cfg_path)
 
         os.chdir(DATA_DIR)
         return str(cfg_path)
+
+
+def _copy_embedded_config(dst: Path) -> None:
+    """从嵌入式或同级目录复制默认配置到目标路径。"""
+    candidates = []
+    if getattr(sys, "_MEIPASS", None):
+        meipass = Path(sys._MEIPASS)
+        candidates.extend([meipass / "config.yaml", meipass / "config.example.yaml"])
+    candidates.extend([BASE_DIR / "config.yaml", BASE_DIR / "config.example.yaml"])
+    for src in candidates:
+        if src.exists():
+            import shutil
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src), str(dst))
+            logger.info("copied config from %s -> %s", src, dst)
+            return
+    logger.warning("no config.yaml found (embedded or at %s), WebUI may not work", BASE_DIR)
+
+
+# ── 房间状态持久化（重启后自动恢复运行中的房间） ──
+
+
+_RUNNING_ROOMS_FILE = DATA_DIR / "running_rooms.json"
+
+
+def _save_running_rooms() -> None:
+    """保存当前运行中的房间 ID 列表到文件。"""
+    try:
+        from app.process_manager import _inproc_bots, _procs
+        # 冻结模式用 _inproc_bots，否则用 _procs
+        running = _inproc_bots if getattr(sys, "frozen", False) else _procs
+        room_ids = list(running.keys())
+        _RUNNING_ROOMS_FILE.write_text(json.dumps(room_ids, ensure_ascii=False), encoding="utf-8")
+        logger.info("saved %d running rooms: %s", len(room_ids), room_ids)
+    except Exception as exc:
+        logger.warning("save running rooms failed: %s", exc)
+
+
+def _load_running_rooms() -> list[str]:
+    """读取上次退出时运行中的房间 ID 列表。"""
+    try:
+        if not _RUNNING_ROOMS_FILE.exists():
+            return []
+        data = json.loads(_RUNNING_ROOMS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [str(r) for r in data]
+    except Exception as exc:
+        logger.warning("load running rooms failed: %s", exc)
+    return []
+
+
+def _restore_running_rooms() -> None:
+    """启动上次运行中的房间。"""
+    room_ids = _load_running_rooms()
+    if not room_ids:
+        logger.info("no rooms to restore")
+        return
+
+    def _start_rooms() -> None:
+        """在新的事件循环中异步启动房间。"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            from app.process_manager import start_room_async
+
+            async def _do_restore() -> None:
+                for room_id in room_ids:
+                    try:
+                        logger.info("auto-starting room %s...", room_id)
+                        ok = await start_room_async(room_id)
+                        logger.info("auto-start room %s: %s", room_id, "OK" if ok else "FAILED")
+                    except Exception as exc:
+                        logger.warning("auto-start room %s failed: %s", room_id, exc)
+                    await asyncio.sleep(0.5)
+
+            loop.run_until_complete(_do_restore())
+        finally:
+            loop.close()
+
+    threading.Thread(target=_start_rooms, daemon=True, name="restore-rooms").start()
 
 
 def _create_tray_icon() -> None:
@@ -363,7 +652,11 @@ def _create_tray_icon() -> None:
     def on_reset_pwd(icon: pystray.Icon, item: pystray.MenuItem) -> None:
         _reset_admin_password()
 
+    def on_view_logs(icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        threading.Thread(target=_view_logs, daemon=True).start()
+
     def on_exit(icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        _save_running_rooms()
         icon.stop()
         _stop_webui()
         _release_lock()
@@ -376,6 +669,7 @@ def _create_tray_icon() -> None:
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("🔌 设置端口", on_set_port),
         pystray.MenuItem("🔑 重置管理员密码", on_reset_pwd),
+        pystray.MenuItem("📋 查看日志", on_view_logs),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("❌ 退出", on_exit),
     )
@@ -392,17 +686,17 @@ def main() -> None:
 
     logger.info("Ayabot starting… data dir: %s", DATA_DIR)
 
-    # 确保 config.yaml 存在
-    cfg_src = BASE_DIR / "config.yaml"
+    # 确保 config.yaml 存在（优先嵌入式，降级到 exe 同级）
     cfg_dst = DATA_DIR / "config.yaml"
-    if not cfg_dst.exists() and cfg_src.exists():
-        import shutil
-        shutil.copy2(str(cfg_src), str(cfg_dst))
-        logger.info("copied config to %s", cfg_dst)
+    if not cfg_dst.exists():
+        _copy_embedded_config(cfg_dst)
 
     # 启动 WebUI — 传入配置路径确保 init_app 能正确解析
     cfg_path = str(DATA_DIR / "config.yaml")
     _start_webui(config_path=cfg_path)
+
+    # 自动恢复之前运行的房间
+    _restore_running_rooms()
 
     # 延迟打开浏览器
     threading.Thread(target=_delayed_open_browser, daemon=True).start()

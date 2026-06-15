@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import secrets
 import string
 import sys
@@ -25,7 +26,23 @@ def _hash_password(password: str) -> str:
 
 
 def _find_users_file() -> Path:
-    """从项目根目录查找 data/users.json。"""
+    """从项目根目录查找 data/users.json。兼容 PyInstaller 冻结模式。"""
+    # 冻结模式下，使用平台特定的数据目录
+    if getattr(sys, "frozen", False):
+        if sys.platform == "win32":
+            data_root = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+        elif sys.platform == "darwin":
+            data_root = Path.home() / "Library" / "Application Support"
+        else:
+            # Linux / BSD: $XDG_DATA_HOME/ayabot 或 ~/.local/share/ayabot
+            data_root = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+        data_dir = data_root / "Ayabot"
+        p = data_dir / "data" / "users.json"
+        if p.exists():
+            return p
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+
     candidates = [
         Path("data/users.json"),
         Path(__file__).resolve().parent.parent / "data" / "users.json",

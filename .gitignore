@@ -10,3 +10,8 @@ data/credential.json
 data/
 rooms/*
 accounts/*
+build
+dist
+*.spec
+*.ico
+test_*.py

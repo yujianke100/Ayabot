@@ -33,7 +33,7 @@ import uvicorn
 from bilibili_api import live
 
 from app.config import DEFAULT_ROOMS_DIR
-from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room
+from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room, set_rooms_base_dir, start_room_async, stop_room_async, restart_room_async, start_periodic_log_cleanup
 
 logger = logging.getLogger("webui")
 
@@ -100,28 +100,15 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
         _ROOMS_BASE_DIR = str(cfg_parent.parent.parent.resolve())
     else:
         _ROOMS_BASE_DIR = str(cfg_parent.resolve())
+    set_rooms_base_dir(_ROOMS_BASE_DIR)
     logger.info("webui configured: host=%s port=%s db=%s", _HTTP_HOST, _HTTP_PORT, os.path.abspath(_DB_PATH))
 
-    # 同步 admin 凭据到 data/users.json（确保 config.yaml 修改的密码也能登录）
-    users = _load_users()
-    admin_hash = _hash_password(AUTH_PASS)
-    if AUTH_USER not in users:
-        users[AUTH_USER] = {"password_hash": admin_hash, "role": "admin", "allowed_rooms": []}
-    elif users[AUTH_USER].get("password_hash") != admin_hash:
-        users[AUTH_USER]["password_hash"] = admin_hash
-    # 默认 ayabot 账号（admin 角色，首次登录强制改密码）
-    if "ayabot" not in users:
-        users["ayabot"] = {"password_hash": _hash_password("123456"), "role": "admin", "allowed_rooms": [], "must_reset_password": True}
-    else:
-        # 确保 ayabot 账号有 must_reset_password 标记（除非密码已被修改过）
-        ayabot = users["ayabot"]
-        if ayabot.get("password_hash") == _hash_password("123456") and "must_reset_password" not in ayabot:
-            ayabot["must_reset_password"] = True
-    _save_users(users)
+    # 初始化/同步 users.json（不覆盖已通过 WebUI 修改过密码的账号）
+    _init_users()
 
 
 def _fallback_read_config() -> None:
-    global _DB_PATH, AUTH_USER, AUTH_PASS, _CONFIG_YAML_PATH, _LLM_CONFIG_DICT
+    global _DB_PATH, AUTH_USER, AUTH_PASS, _CONFIG_YAML_PATH, _LLM_CONFIG_DICT, _ROOMS_BASE_DIR
     _cfg_path = Path("config.yaml")
     if _cfg_path.exists():
         _raw = yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
@@ -134,6 +121,8 @@ def _fallback_read_config() -> None:
         if web_ui.get("password"):
             AUTH_PASS = web_ui["password"]
     _CONFIG_YAML_PATH = str(_cfg_path.resolve())
+    _ROOMS_BASE_DIR = str(Path(_CONFIG_YAML_PATH).parent.resolve())
+    set_rooms_base_dir(_ROOMS_BASE_DIR)
     # 加载 LLM 配置到内存
     llm_raw = _raw.get("llm", {}) if _cfg_path.exists() else {}
     _LLM_CONFIG_DICT.update({
@@ -156,22 +145,8 @@ def _fallback_read_config() -> None:
     })
     logger.info("webui using db (fallback): %s", os.path.abspath(_DB_PATH))
 
-    # 同步 admin 凭据到 data/users.json
-    users = _load_users()
-    admin_hash = _hash_password(AUTH_PASS)
-    if AUTH_USER not in users:
-        users[AUTH_USER] = {"password_hash": admin_hash, "role": "admin", "allowed_rooms": []}
-    elif users[AUTH_USER].get("password_hash") != admin_hash:
-        users[AUTH_USER]["password_hash"] = admin_hash
-    # 默认 ayabot 账号（admin 角色，首次登录强制改密码）
-    if "ayabot" not in users:
-        users["ayabot"] = {"password_hash": _hash_password("123456"), "role": "admin", "allowed_rooms": [], "must_reset_password": True}
-    else:
-        # 确保 ayabot 账号有 must_reset_password 标记（除非密码已被修改过）
-        ayabot = users["ayabot"]
-        if ayabot.get("password_hash") == _hash_password("123456") and "must_reset_password" not in ayabot:
-            ayabot["must_reset_password"] = True
-    _save_users(users)
+    # 初始化/同步 users.json（不覆盖已修改过的密码）
+    _init_users()
 
 
 app = FastAPI(title="BiliRobot Manager")
@@ -242,6 +217,24 @@ def _save_users(users: dict) -> None:
             entry["must_reset_password"] = True
         clean[uname] = entry
     p.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _init_users() -> None:
+    """初始化 users.json：创建默认账号但不覆盖已通过 WebUI 修改过的密码。"""
+    users = _load_users()
+    default_pw_hash = _hash_password("123456")
+    # AUTH_USER（config.yaml 管理员账号）不存在则创建
+    if AUTH_USER not in users:
+        users[AUTH_USER] = {"password_hash": _hash_password(AUTH_PASS), "role": "admin", "allowed_rooms": []}
+    # ayabot 默认账号不存在则创建
+    if "ayabot" not in users:
+        users["ayabot"] = {"password_hash": default_pw_hash, "role": "admin", "allowed_rooms": [], "must_reset_password": True}
+    else:
+        # ayabot 存在且密码仍是默认 123456 → 补 must_reset_password 标记
+        ayabot = users["ayabot"]
+        if ayabot.get("password_hash") == default_pw_hash and "must_reset_password" not in ayabot:
+            ayabot["must_reset_password"] = True
+    _save_users(users)
 
 
 def _user_role(token: str) -> tuple[str, str, list]:
@@ -354,6 +347,8 @@ def _safe_int(val: Any) -> int:
 async def _startup():
     # 后台加载礼物缓存，不阻塞启动
     asyncio.create_task(_build_gift_cache())
+    # 启动定期日志清理（后台线程，默认保留 3 天）
+    start_periodic_log_cleanup()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -966,12 +961,11 @@ async def api_delete_template(request: Request):
 @app.post("/api/restart_all_bots")
 async def api_restart_all_bots():
     """重启所有正在运行的 Bot 进程."""
-    from app.process_manager import restart_room
     rooms = _list_rooms_from_disk()
     count = 0
     for r in rooms:
         if r["status"] == "running":
-            restart_room(r["room_id"])
+            await restart_room_async(r["room_id"])
             count += 1
     logger.info("restarted %d bots", count)
     return {"ok": True, "count": count}
@@ -1369,8 +1363,8 @@ async def api_create_room(request: Request):
 
 @app.post("/api/rooms/{room_id}/start")
 async def api_start_room(room_id: str):
-    """启动房间 Bot 子进程."""
-    ok = start_room(room_id)
+    """启动房间 Bot（自动选择同进程/子进程模式）。"""
+    ok = await start_room_async(room_id)
     if not ok:
         return JSONResponse({"error": "启动失败，请检查配置"}, status_code=500)
     return {"ok": True, "status": "running"}
@@ -1378,15 +1372,15 @@ async def api_start_room(room_id: str):
 
 @app.post("/api/rooms/{room_id}/stop")
 async def api_stop_room(room_id: str):
-    """停止房间 Bot 子进程."""
-    stop_room(room_id)
+    """停止房间 Bot（同时清理同进程和子进程）。"""
+    await stop_room_async(room_id)
     return {"ok": True, "status": "stopped"}
 
 
 @app.post("/api/rooms/{room_id}/restart")
 async def api_restart_room(room_id: str):
-    """重启房间 Bot 子进程."""
-    ok = restart_room(room_id)
+    """重启房间 Bot（自动选择同进程/子进程模式）。"""
+    ok = await restart_room_async(room_id)
     return {"ok": ok, "status": "running" if ok else "stopped"}
 
 
@@ -2149,21 +2143,21 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </style>
 
 <!-- ══════ 修改密码弹窗 ══════ -->
-<div v-if="showChangePwd" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" :style="mustResetPwd ? 'backdrop-filter:blur(4px);' : ''" @click="mustResetPwd || (showChangePwd = false)">
+<div v-if="showChangePwd" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" :style="mustResetPwd ? 'backdrop-filter:blur(4px);' : ''" @mousedown.self="mustResetPwd || (showChangePwd = false)">
     <div class="bg-white p-6 rounded-xl shadow-lg w-80" @click.stop>
         <h3 class="font-bold text-lg mb-4">🔑 {{ mustResetPwd ? '⚠️ 首次登录请重置密码' : '修改密码' }}</h3>
         <div class="space-y-3">
             <label class="text-xs text-gray-500 block">用户名
-                <input type="text" v-model="changePwdNewUser" placeholder="用户名" class="border p-2 rounded w-full text-sm">
+                <input type="text" v-model="changePwdNewUser" placeholder="用户名" class="border p-2 rounded w-full text-sm" :disabled="changingPwd">
                 <span class="text-gray-400" v-if="mustResetPwd">可修改为你想要的用户名</span>
             </label>
-            <input type="password" id="inpOldPwd" v-model="changePwdOld" placeholder="当前密码" class="border p-2 rounded w-full text-sm" :disabled="mustResetPwd">
-            <input type="password" id="inpNewPwd" v-model="changePwdNew" placeholder="新密码（至少4位）" class="border p-2 rounded w-full text-sm">
-            <input type="password" id="inpCfmPwd" v-model="changePwdConfirm" placeholder="再次输入新密码" class="border p-2 rounded w-full text-sm" @keyup.enter="doChangePwd">
+            <input type="password" id="inpOldPwd" v-model="changePwdOld" placeholder="当前密码" class="border p-2 rounded w-full text-sm" :disabled="mustResetPwd || changingPwd">
+            <input type="password" id="inpNewPwd" v-model="changePwdNew" placeholder="新密码（至少4位）" class="border p-2 rounded w-full text-sm" :disabled="changingPwd">
+            <input type="password" id="inpCfmPwd" v-model="changePwdConfirm" placeholder="再次输入新密码" class="border p-2 rounded w-full text-sm" :disabled="changingPwd" @keyup.enter="doChangePwd">
             <div v-if="changePwdMsg" class="text-sm" :class="changePwdOk ? 'text-green-600' : 'text-red-500'">{{ changePwdMsg }}</div>
             <div class="flex gap-2">
-                <button @click="doChangePwd" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm flex-1">确认</button>
-                <button v-if="!mustResetPwd" @click="showChangePwd = false" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
+                <button @click="doChangePwd" :disabled="changingPwd" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm flex-1" :class="{'opacity-50 cursor-not-allowed': changingPwd}">确认</button>
+                <button v-if="!mustResetPwd" @click="showChangePwd = false" :disabled="changingPwd" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm" :class="{'opacity-50 cursor-not-allowed': changingPwd}">取消</button>
             </div>
         </div>
     </div>
@@ -2177,7 +2171,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm space-y-4">
             <div class="flex items-center justify-between flex-wrap gap-2">
                 <h2 class="text-lg font-bold">🏠 房间管理</h2>
-                <button @click="toggleCreateRoom"
+                <button v-show="userRole === 'admin'" @click="toggleCreateRoom"
                         class="bg-green-500 hover:bg-green-600 text-white px-3 sm:px-4 py-2 rounded text-xs sm:text-sm">
                     {{ showCreateRoom ? '取消' : '➕ 新建房间' }}
                 </button>
@@ -2227,7 +2221,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
             <!-- 房间卡片列表 -->
             <div v-if="!rooms || rooms.length === 0" class="text-sm text-gray-400 text-center py-8">
-                暂无房间。点击「新建房间」添加。
+                <template v-if="userRole === 'admin'">暂无房间。点击「新建房间」添加。</template>
+                <template v-else>暂无可用房间。</template>
             </div>
             <div v-for="r in rooms" :key="r.room_id"
                  class="border rounded-lg p-4 flex items-center justify-between cursor-pointer hover:shadow-md transition"
@@ -3190,6 +3185,7 @@ createApp({
         const changePwdNewUser = ref('');
         const changePwdMsg = ref('');
         const changePwdOk = ref(false);
+        const changingPwd = ref(false);
 
         // 用户菜单
         const showUserMenu = ref(false);
@@ -3505,8 +3501,12 @@ createApp({
         }
         function selectRoomSubTab(key) {
             roomSubTab.value = key;
-            if (key === 'config' && selectedRoom.value) {
+            if ((key === 'config' || key === 'llm') && selectedRoom.value) {
                 editRoomConfig(selectedRoom.value.room_id);
+            }
+            if (key === 'llm') {
+                // AI 页面启动后等待 roomConfig 加载完毕再刷新 LLM 表单
+                setTimeout(() => loadLlmConfig(), 100);
             }
             if (key === 'danmaku') {
                 danmakuOffset.value = 0;
@@ -3905,26 +3905,42 @@ createApp({
         // ── LLM Config ──
         async function loadLlmConfig() {
             // 如果当前在房间详情中，从房间配置加载 LLM 设置
-            if (selectedRoom.value && roomConfig.value?.llm) {
-                const llm = roomConfig.value.llm;
-                llmEnabled.value = llm.enabled ?? false;
-                llmProvider.value = llm.provider || 'openai';
-                llmBaseUrl.value = llm.base_url || '';
-                llmModel.value = llm.model || '';
-                llmWakeWord.value = llm.wake_word || 'ayabot';
-                llmTemp.value = llm.temperature ?? 0.7;
-                llmTopP.value = llm.top_p ?? 0.9;
-                llmMaxTokens.value = llm.max_tokens ?? 150;
-                llmPrompt.value = llm.system_prompt || '';
-                llmApiKeyReal.value = llm.api_key || '';
-                llmApiKey.value = llm.api_key ? '********' : '';
-                if (llm.context) {
-                    ctxEnabled.value = llm.context.enabled ?? true;
-                    ctxMode.value = llm.context.mode || 'isolated';
-                    ctxContent.value = llm.context.content || 'llm_only';
-                    ctxMaxMsg.value = llm.context.max_messages ?? 10;
+            if (selectedRoom.value) {
+                // roomConfig 可能尚未加载，直接取房间配置
+                let llm = roomConfig.value?.llm;
+                if (!llm) {
+                    try {
+                        const res = await fetch(`/api/rooms/${selectedRoom.value.room_id}/config`, {credentials: 'include'});
+                        if (res.ok) {
+                            const data = await res.json();
+                            if (data && !data.error) llm = data.llm;
+                        }
+                    } catch(e) { /* fallback to global */ }
                 }
-                return;
+                // 编辑房间配置时确保 roomConfig 有 llm 字段
+                if (llm && !roomConfig.value?.llm && roomConfig.value) {
+                    roomConfig.value.llm = JSON.parse(JSON.stringify(llm));
+                }
+                if (llm) {
+                    llmEnabled.value = llm.enabled ?? false;
+                    llmProvider.value = llm.provider || 'openai';
+                    llmBaseUrl.value = llm.base_url || '';
+                    llmModel.value = llm.model || '';
+                    llmWakeWord.value = llm.wake_word || 'ayabot';
+                    llmTemp.value = llm.temperature ?? 0.7;
+                    llmTopP.value = llm.top_p ?? 0.9;
+                    llmMaxTokens.value = llm.max_tokens ?? 150;
+                    llmPrompt.value = llm.system_prompt || '';
+                    llmApiKeyReal.value = llm.api_key || '';
+                    llmApiKey.value = llm.api_key ? '********' : '';
+                    if (llm.context) {
+                        ctxEnabled.value = llm.context.enabled ?? true;
+                        ctxMode.value = llm.context.mode || 'isolated';
+                        ctxContent.value = llm.context.content || 'llm_only';
+                        ctxMaxMsg.value = llm.context.max_messages ?? 10;
+                    }
+                    return;
+                }
             }
             try {
                 const res = await fetch('/api/llm_config', {credentials: 'include'});
@@ -4443,6 +4459,7 @@ createApp({
             changePwdNewUser.value = loginUser.value;
             changePwdMsg.value = '';
             changePwdOk.value = false;
+            changingPwd.value = false;
         }
         async function doChangePwd() {
             // 从 DOM 读取（id 选择器最可靠）
@@ -4458,6 +4475,7 @@ createApp({
             }
             if (!changePwdNewUser.value) { changePwdMsg.value = '请输入用户名'; changePwdOk.value = false; return; }
             changePwdMsg.value = '';
+            changingPwd.value = true;
             try {
                 const body = {old_password: oldPwd, new_password: newPwd};
                 if (changePwdNewUser.value !== loginUser.value) {
@@ -4494,10 +4512,12 @@ createApp({
                 } else {
                     changePwdMsg.value = '❌ ' + (data.error || '修改失败');
                     changePwdOk.value = false;
+                    changingPwd.value = false;
                 }
             } catch(e) {
                 changePwdMsg.value = '❌ ' + e.message;
                 changePwdOk.value = false;
+                changingPwd.value = false;
             }
         }
 
@@ -4901,7 +4921,7 @@ createApp({
 
         return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
                 tab, userRole,
-                showUserMenu, showChangePwd, changePwdOld, changePwdNew, changePwdNewUser, changePwdMsg, changePwdOk,
+                showUserMenu, showChangePwd, changePwdOld, changePwdNew, changePwdNewUser, changePwdMsg, changePwdOk, changingPwd,
                 mustResetPwd,
                 openChangePwd, doChangePwd,
                 adminUsers, showUserForm, editingUser, userFormUsername, userFormPassword,

@@ -11,7 +11,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow" alt="License"></a>
 </p>
 
-B 站直播间弹幕机器人，支持签到抽签、盲盒统计、AI 对话、自动欢迎/感谢、定时消息、Web 后台管理。开箱即用，小白友好。纯 Python 跨平台实现，无需 systemd / sudo。
+B 站直播间弹幕机器人，支持签到抽签、盲盒统计、AI 对话、自动欢迎/感谢、定时消息、Web 后台管理。
+开箱即用，小白友好。纯 Python 跨平台实现，无需 systemd / sudo。
+
+**v0.1.0 新增**：Windows 单文件 .exe 发布版（含托盘图标、日志查看器、自动恢复房间），AI 回复设置持久化。
 
 ---
 
@@ -22,12 +25,32 @@ B 站直播间弹幕机器人，支持签到抽签、盲盒统计、AI 对话、
 | `ayabot` | `123456` | 管理员账号，首次登录强制修改密码 |
 
 > 密码忘记或想重置？运行 `python -m app.reset_admin` 即可重置为随机密码。
+> Windows .exe 版：右键托盘图标 → **重置管理员密码**（重置为 123456）。
 
 ---
 
 ## 🚀 快速上手
 
-### 用 Python 直接跑（推荐开发）
+### 🪟 Windows 用户（推荐）
+
+下载 `Ayabot.exe` 后直接双击运行，无需 Python 环境：
+
+```
+Ayabot.exe 单独一个文件，双击即运行
+├── 托盘图标（右下角）
+│   ├── 🌐 打开管理后台
+│   ├── 🔌 设置端口
+│   ├── 🔑 重置管理员密码
+│   ├── 📋 查看日志（级别筛选）
+│   └── ❌ 退出
+├── 端口管理（持久化，默认 19810）
+├── 房间状态持久化（退出时保存运行中的房间，启动自动恢复）
+└── 配置和数据 → %LOCALAPPDATA%\Ayabot\
+```
+
+> 首次启动自动从 exe 中释放默认配置。浏览器打开 `http://localhost:19810`。
+
+### 🐍 用 Python 直接跑（推荐开发）
 
 ```bash
 git clone https://github.com/yujianke100/ayabot.git
@@ -36,18 +59,15 @@ pip install -r requirements.txt
 cp config.example.yaml config.yaml
 # 编辑 config.yaml：填直播间号和主播 UID
 
-# 终端 1：启动 Web 管理后台
-python -m uvicorn app.web.server:app --host 0.0.0.0 --port 19810
-
-# 终端 2（或 Docker）：启动 Bot 机器人
-python -m app.main
+# 启动 Web 管理后台（内置 Bot 进程管理器）
+python web_serve.py
 ```
 
 浏览器打开 `http://localhost:19810` 进入 Web 后台，在「B站账号」扫码登录，然后在「房间管理」中创建房间、启动机器人。
 
-> **端口被占用了？** 启动前运行 `export AYABOT_PORT=你想要的端口号` 即可修改。
+> **端口被占用了？** `python web_serve.py --port 你想要的端口号` 或 `AYABOT_PORT=你想要的端口号 python web_serve.py`
 
-### 或用 Docker 跑
+### 🐳 或用 Docker 跑
 
 ```bash
 mkdir ayabot && cd ayabot
@@ -102,7 +122,7 @@ python -m app.reset_admin --no-reset-flag
 | `#抽签` | 今日运势 |
 | `#今日盲盒[:用户名]` | 统计自己或指定用户今日盲盒 |
 | `#本月盲盒[:用户名]` | 本月盲盒汇总 |
-| `#文文 <说点啥>` | AI 聊天（唤醒词可在后台修改） |
+| `#ayabot <说点啥>` | AI 聊天（唤醒词可在后台修改） |
 | `#帮助` | 列出所有命令 |
 
 > 中文 `#` 和英文 `#` 都行，`＃签到` 也能识别。
@@ -114,6 +134,8 @@ python -m app.reset_admin --no-reset-flag
 ## ⚙️ Web 管理后台
 
 浏览器打开 `http://你的IP:19810` 进入后台（初始账号 `ayabot` / `123456`，首次登录强制修改）。
+
+> 首次登录后可在右上角修改用户名和密码，状态持久化，重启不丢失。
 
 | 页面 | 能干嘛 |
 |------|--------|
@@ -163,21 +185,29 @@ anchor_uid: 1000000                # ← 改成主播的 UID
 
 ## 💾 数据与进程管理
 
-| 文件 | 说明 |
-|------|------|
+| 文件/目录 | 说明 |
+|-----------|------|
 | `rooms/<id>/data/bot.db` | 房间独立 SQLite 数据库 |
 | `rooms/<id>/bot.pid` | Bot 进程 PID 文件 |
 | `rooms/<id>/bot.log` | Bot 运行日志 |
+| `rooms/<id>/config.yaml` | 房间专属配置 |
 | `accounts/<uid>/credential.json` | B 站扫码登录凭据 |
 | `data/users.json` | WebUI 用户账号 |
 | `data/templates.json` | 预设模板 |
 
 ### 跨平台进程管理
 
-纯 Python 实现（`app/process_manager.py`），用 `subprocess.Popen` 管理 Bot 子进程：
-- **无需 systemd**，Linux / macOS / Windows 通用
-- **无需 sudo / root**
-- Docker 环境同样适用
+纯 Python 实现（`app/process_manager.py`），自动适配运行模式：
+
+- **普通 Python 环境**：`subprocess.Popen` 子进程管理 Bot
+- **PyInstaller 冻结模式**（.exe）：同进程 asyncio Task 运行 Bot（无需子进程）
+- **无需 systemd / sudo / root**，Linux / macOS / Windows 通用
+- **Docker 环境**同样适用，Bot 由 WebUI 内建管理器自动控制
+
+### 房间自动恢复
+
+Windows .exe 版退出时会保存运行中的房间列表，下次启动自动恢复。
+无需手动重新启动每个房间。
 
 ---
 
@@ -215,14 +245,48 @@ docker pull hub-mirror.c.163.com/ghcr.io/yujianke100/ayabot:latest
 
 ---
 
-## windows上构建exe版本
+## 🪟 Windows .exe 构建与发布
 
-```
+### 从源码构建
+
+```bash
 pip install pyinstaller pystray pillow
 python scripts/build_exe.py
 ```
 
-exe文件会输出在 `dist/` 目录下。
+构建产物输出在 `dist/Ayabot.exe`，约 60 MB。
+
+### 嵌入的资源
+
+exe 包含以下内容，启动时自动释放到 `%LOCALAPPDATA%\Ayabot\`：
+- `config.example.yaml`（作为默认配置模板，首次启动自动复制）
+- `icon.png`（托盘图标）
+
+运行所需的数据目录结构：
+
+```
+%LOCALAPPDATA%\Ayabot\
+├── config.yaml        ← 自动从 exe 释放（可自行修改）
+├── ayabot.log         ← 自动轮转，最多保留 5000 行
+├── port.txt           ← 端口持久化
+├── running_rooms.json ← 运行中的房间列表
+└── data\
+    ├── users.json     ← 用户账号
+    ├── templates.json ← 预设模板
+    └── bot.db         ← 全局数据库
+```
+
+### 托盘功能
+
+| 菜单 | 说明 |
+|------|------|
+| 🌐 **打开管理后台** | 浏览器打开 WebUI |
+| 🔌 **设置端口** | 修改监听端口（默认 19810） |
+| 🔑 **重置管理员密码** | 重置为 123456 |
+| 📋 **查看日志** | 级别筛选、自动刷新、自动滚动、深色主题 |
+| ❌ **退出** | 保存运行中的房间后退出 |
+
+---
 
 ## 📄 License
 
