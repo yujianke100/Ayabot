@@ -913,14 +913,24 @@ class LiveRobot:
     def _get_guard_level(self, event: dict[str, Any]) -> int:
         """Extract guard level from welcome event. 0=none, 3=captain, 2=commander, 1=governor."""
         event_type = event.get("type", "")
+        data = event.get("data", {})
+        if not isinstance(data, dict):
+            return 0
+
         if event_type == "WELCOME_GUARD":
-            data = event.get("data", {})
-            if isinstance(data, dict):
-                nested = data.get("data") if isinstance(data.get("data"), dict) else {}
-                gl = _safe_int(data.get("guard_level") or nested.get("guard_level") or 0)
-                if gl in (1, 2, 3):
-                    return gl
-                return 3
+            nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+            gl = _safe_int(data.get("guard_level") or nested.get("guard_level") or 0)
+            if gl in (1, 2, 3):
+                return gl
+            return 3  # WELCOME_GUARD 事件本身就代表大航海用户
+
+        if event_type == "INTERACT_WORD_V2":
+            # INTERACT_WORD_V2 的 privilege_type: 0=普通, 1=总督, 2=提督, 3=舰长
+            nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+            pt = _safe_int(data.get("privilege_type") or nested.get("privilege_type") or 0)
+            if pt in (1, 2, 3):
+                return pt
+
         return 0
 
     def _record_chat_context(self, text: str, uname: str, uid: int) -> None:
