@@ -2,7 +2,7 @@
 import subprocess
 import sys
 from pathlib import Path
-
+import os
 
 def main() -> None:
     base_dir = Path(__file__).resolve().parent.parent
