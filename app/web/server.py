@@ -33,7 +33,7 @@ import uvicorn
 from bilibili_api import live
 
 from app.config import DEFAULT_ROOMS_DIR
-from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room, set_rooms_base_dir, start_room_async, stop_room_async, restart_room_async, start_periodic_log_cleanup
+from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room, set_rooms_base_dir, start_room_async, stop_room_async, restart_room_async, start_periodic_log_cleanup, cleanup_all_stale_pidfiles
 
 logger = logging.getLogger("webui")
 
@@ -358,6 +358,8 @@ async def _auto_start_rooms() -> None:
     try:
         # 等 Web 服务完全就绪后再启动
         await asyncio.sleep(3)
+        # 清理旧会话残留的 PID/Lock 文件（容器重启后关键）
+        cleanup_all_stale_pidfiles()
         rooms = _list_rooms_from_disk()
         if not rooms:
             logger.info("auto-start: no rooms found on disk")

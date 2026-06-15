@@ -63,6 +63,43 @@ def _lockfile(room_id: str) -> Path:
     return _get_rooms_dir() / "rooms" / room_id / "bot.lock"
 
 
+def _rooms_dir_path() -> Path:
+    """返回 rooms/ 目录的绝对路径。"""
+    return _get_rooms_dir() / "rooms"
+
+
+def cleanup_all_stale_pidfiles() -> int:
+    """扫描 rooms/ 目录，清理所有残留的 bot.pid 和 bot.lock 文件。
+    
+    在容器/服务重启时调用，确保旧会话的 PID 文件不会导致状态误判。
+    返回清理的文件总数。
+    """
+    rooms_dir = _rooms_dir_path()
+    if not rooms_dir.exists():
+        return 0
+    cleaned = 0
+    for d in rooms_dir.iterdir():
+        if not d.is_dir():
+            continue
+        pidf = d / "bot.pid"
+        if pidf.exists():
+            try:
+                pidf.unlink()
+                cleaned += 1
+            except OSError as exc:
+                logger.warning("cleanup pidfile %s failed: %s", pidf, exc)
+        lockf = d / "bot.lock"
+        if lockf.exists():
+            try:
+                lockf.unlink()
+                cleaned += 1
+            except OSError as exc:
+                logger.warning("cleanup lockfile %s failed: %s", lockf, exc)
+    if cleaned:
+        logger.info("cleaned %d stale pid/lock files from %s", cleaned, rooms_dir)
+    return cleaned
+
+
 # ── 自动检测是否使用同进程模式 ──
 
 

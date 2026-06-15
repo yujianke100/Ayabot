@@ -330,6 +330,7 @@ class LiveRobot:
         if template is None:
             guard_level = self._get_guard_level(event)
             if guard_level > 0:
+                self.logger.info("guard welcome: uid=%s uname=%s guard_level=%s", uid, uname, guard_level)
                 gwt = self.config.features.guard_welcome_templates
                 if gwt:
                     if guard_level == 3:
@@ -338,6 +339,10 @@ class LiveRobot:
                         template = gwt.get("commander")
                     elif guard_level == 1:
                         template = gwt.get("governor")
+                    if template:
+                        self.logger.info("guard welcome template found: level=%s template=%s", guard_level, template)
+                    else:
+                        self.logger.info("guard welcome template not configured for level=%s, fallback to default", guard_level)
 
         if not template:
             template = self._welcome_template
@@ -926,8 +931,13 @@ class LiveRobot:
 
         if event_type == "INTERACT_WORD_V2":
             # INTERACT_WORD_V2 的 privilege_type: 0=普通, 1=总督, 2=提督, 3=舰长
+            # bilibili_api 将原始 protobuf 解码到 pb_decoded 字段中
             nested = data.get("data") if isinstance(data.get("data"), dict) else {}
             pt = _safe_int(data.get("privilege_type") or nested.get("privilege_type") or 0)
+            # 若未在顶层找到，尝试从 pb_decoded 中读取
+            if pt == 0:
+                pb = nested.get("pb_decoded") if isinstance(nested.get("pb_decoded"), dict) else {}
+                pt = _safe_int(pb.get("privilege_type") or 0)
             if pt in (1, 2, 3):
                 return pt
 
