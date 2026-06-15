@@ -755,6 +755,11 @@ class LiveRobot:
             await self._handle_pk_start(event)
             return
 
+        if event_type in ("PK_BATTLE_SETTLE", "PK_BATTLE_SETTLE_V2", "PK_BATTLE_END"):
+            self.logger.info("PK battle ended")
+            await self._handle_pk_end(event)
+            return
+
         # Suppress high-frequency / known events to reduce log noise
         noisy_prefixes = ("SUPER_CHAT", "HOT_RANK_", "ONLINE_RANK_",
                           "POPULARITY_")
@@ -773,21 +778,81 @@ class LiveRobot:
         self.logger.debug("unhandled event: type=%s", event_type)
 
     async def _handle_pk_start(self, event: dict[str, Any]) -> None:
+        if not self.config.features.pk_report_enabled:
+            return
         try:
             data = event.get("data", {})
-            # room_id is self, init_info.room_id is opponent
             init_info = data.get("init_info", {})
-            
-            opp_name = init_info.get("anchor_name", "对面主播")
-            opp_guard = init_info.get("guard_count", 0)
-            opp_online = init_info.get("online_count", 0)
-            
-            msg = f"⚔️ PK开始！对面：{opp_name}\n"
-            msg += f"📊 对方舰长：{opp_guard} | 在线：{opp_online}"
-            
+
+            opp_name = init_info.get("anchor_name", "对面主播") or "对面主播"
+            fans = init_info.get("fans_count", 0) or 0
+            online = init_info.get("online_count", 0) or 0
+            guard_count = init_info.get("guard_count", 0) or 0
+
+            # 大航海细分
+            guard_info = init_info.get("guard_info", {}) or {}
+            captains = guard_info.get("captain_count", 0) or 0
+            commanders = guard_info.get("commander_count", 0) or 0
+            governors = guard_info.get("governor_count", 0) or 0
+
+            # 贡献值
+            contribution = init_info.get("contribution", {}) or {}
+            if isinstance(contribution, dict):
+                contrib_score = contribution.get("score", 0) or 0
+            else:
+                contrib_score = int(contribution)
+
+            # 粉丝数格式化
+            def _fmt(n: int) -> str:
+                if n >= 10000:
+                    return f"{n / 10000:.1f}万"
+                return str(n)
+
+            # 替换模板占位符
+            guards_parts = []
+            if captains:
+                guards_parts.append(f"{captains}舰")
+            if commanders:
+                guards_parts.append(f"{commanders}提")
+            if governors:
+                guards_parts.append(f"{governors}总")
+            guard_str = "".join(guards_parts) if guards_parts else f"{guard_count}舰"
+
+            msg = self.config.features.pk_report_template
+            msg = msg.replace("{opponent}", opp_name)
+            msg = msg.replace("{fans}", _fmt(fans))
+            msg = msg.replace("{guards}", guard_str)
+            msg = msg.replace("{audience}", str(online))
+            msg = msg.replace("{score}", str(contrib_score))
+
             await self._enqueue_message(text=msg, reply_uid=None)
         except Exception as exc:
-            self.logger.error("Error processing PK_BATTLE_START: %s", exc)
+            self.logger.error("Error processing PK_BATTLE_START: %s", exc, exc_info=True)
+
+    async def _handle_pk_end(self, event: dict[str, Any]) -> None:
+        if not self.config.features.pk_report_enabled:
+            return
+        try:
+            data = event.get("data", {})
+            winner = data.get("winner_type", 0)
+            win_str = "胜利！" if winner == 1 else "对方获胜" if winner == 2 else "PK结束"
+
+            my_score = data.get("my_score", 0) or 0
+            their_score = data.get("their_score", 0) or 0
+            my_info = data.get("my_info", {}) or {}
+            their_info = data.get("their_info", {}) or {}
+            if isinstance(my_info, dict):
+                my_score = my_info.get("score", my_score) or my_score
+            if isinstance(their_info, dict):
+                their_score = their_info.get("score", their_score) or their_score
+
+            msg = f"PK {win_str}"
+            if my_score or their_score:
+                msg += f" {my_score}:{their_score}"
+
+            await self._enqueue_message(text=msg, reply_uid=None)
+        except Exception as exc:
+            self.logger.error("Error processing PK_BATTLE_SETTLE: %s", exc)
 
     async def _on_connected(self, event: dict[str, Any]) -> None:
         await self._enqueue_message(text=self.config.features.connected_message, reply_uid=None)
@@ -816,11 +881,26 @@ class LiveRobot:
     async def _enqueue_reply(self, text: str, reply_uid: Optional[int]) -> None:
         """Enqueue a command reply with a configurable delay before queueing.
         This gives B站 time to process the previous message before the next one
-        enters the outbound queue, reducing the chance of server-side rate limiting."""
+        enters the outbound queue, reducing the chance of server-side rate limiting.
+        
+        Dedup is done here (before the delay) so duplicate events from bilibili
+        WebSocket reconnection don't cause multiple identical replies.
+        """
+        # Dedup immediately — before the delay window
+        if text in self._pending_texts:
+            self.logger.debug("dedup _enqueue_reply: text=%s", text)
+            return
+        self._pending_texts.add(text)
+
         delay = getattr(self.config.rate_limit, 'reply_delay_seconds', 3.0)
         if delay > 0:
             await asyncio.sleep(delay)
-        await self._enqueue_message(text=text, reply_uid=reply_uid)
+        # Directly enqueue (dedup already done). _pending_texts cleared by _message_worker.
+        try:
+            self._msg_queue.put_nowait(OutboundMessage(text=text, reply_uid=reply_uid))
+        except asyncio.QueueFull:
+            self._pending_texts.discard(text)
+            self.logger.warning("queue full, cannot enqueue: reply_uid=%s text=%s", reply_uid, text)
 
     def _get_guard_level(self, event: dict[str, Any]) -> int:
         """Extract guard level from welcome event. 0=none, 3=captain, 2=commander, 1=governor."""

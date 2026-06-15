@@ -29,6 +29,8 @@ features:
   periodic_message_enabled: true
   periodic_message_interval_seconds: 600
   periodic_message_template: "点个关注不迷路喵~"
+  pk_report_enabled: true           # PK开始/结束时汇报对手信息
+  pk_report_template: "PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}"  # PK汇报模板
 
 cooldown:
   welcome_user_seconds: 600

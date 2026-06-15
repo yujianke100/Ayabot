@@ -56,6 +56,8 @@ class FeatureConfig:
     allow_bare_commands: bool = False  # 允许不带 # 前缀触发指令
     llm_bare_trigger: bool = False  # AI回复单独免#：弹幕开头匹配唤醒词即触发
     llm_keyword_trigger: bool = False  # 允许包含关键词就触发AI回复（需 AI免#前缀唤醒）
+    pk_report_enabled: bool = True  # PK开始时汇报对手信息
+    pk_report_template: str = "PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}"  # PK汇报模板
 
 
 @dataclass(slots=True)
@@ -269,6 +271,8 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             blindbox_result_monthly=str(features.get("blindbox_result_monthly", "本月盲盒共{count}个，花费{cost}，收益{profit}")),
             blindbox_result_today=str(features.get("blindbox_result_today", "今日盲盒共{count}个，花费{cost}，收益{profit}")),
             use_chinese_numbers=bool(features.get("use_chinese_numbers", False)),
+            pk_report_enabled=bool(features.get("pk_report_enabled", True)),
+            pk_report_template=str(features.get("pk_report_template", "PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}")),
         ),
         cooldown=CooldownConfig(
             welcome_user_seconds=int(cooldown.get("welcome_user_seconds", 600)),
@@ -398,6 +402,8 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "blindbox_result_monthly": config.features.blindbox_result_monthly,
             "blindbox_result_today": config.features.blindbox_result_today,
             "use_chinese_numbers": config.features.use_chinese_numbers,
+            "pk_report_enabled": config.features.pk_report_enabled,
+            "pk_report_template": config.features.pk_report_template,
         },
         "keyword_reply": {
             "enabled": config.features.keyword_reply.enabled,
