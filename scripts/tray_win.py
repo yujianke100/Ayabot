@@ -142,26 +142,43 @@ _stop_event = threading.Event()
 
 def _start_webui() -> None:
     """在后台线程启动 WebUI（in-process，兼容 PyInstaller）。
-    不能用 subprocess，因为 PyInstaller 的 sys.executable 是 .exe 而非 Python。
+    使用 queue 确认线程内启动成功，否则日志记录具体异常。
     """
+    import queue as _queue
     import uvicorn
     from app.web.server import app
 
     logger.info("starting WebUI in-process: port=%s", _port)
+    q: _queue.Queue = _queue.Queue()
+
+    def _run() -> None:
+        try:
+            config = uvicorn.Config(
+                app,
+                host="0.0.0.0",
+                port=_port,
+                log_level="info",
+            )
+            server = uvicorn.Server(config)
+            _start_webui._server = server
+            q.put("ready")
+            server.run()
+        except Exception as exc:
+            logger.error("uvicorn thread crashed", exc_info=True)
+            q.put(exc)
+
+    t = threading.Thread(target=_run, daemon=True, name="uvicorn")
+    t.start()
+
     try:
-        config = uvicorn.Config(
-            app,
-            host="0.0.0.0",
-            port=_port,
-            log_level="info",
-        )
-        server = uvicorn.Server(config)
-        _start_webui._server = server
-        thread = threading.Thread(target=server.run, daemon=True, name="uvicorn")
-        thread.start()
+        status = q.get(timeout=15)
+        if isinstance(status, Exception):
+            logger.error("WebUI failed to start: %s", status)
+            return
         logger.info("WebUI started (in-process)")
-    except Exception as exc:
-        logger.error("failed to start WebUI: %s", exc)
+    except _queue.Empty:
+        logger.error("WebUI start timed out after 15s — check log for details")
+        return
 
 
 def _stop_webui() -> None:
@@ -385,12 +402,13 @@ def main() -> None:
 
 
 def _delayed_open_browser() -> None:
-    """延迟 3 秒后打开浏览器."""
-    time.sleep(3)
-    for _ in range(10):
+    """延迟几秒后打开浏览器，最多等 30 秒."""
+    time.sleep(2)
+    for _ in range(30):
         try:
-            with socket.create_connection(("127.0.0.1", _port), timeout=1):
+            with socket.create_connection(("127.0.0.1", _port), timeout=2):
                 _open_webui()
+                logger.info("browser opened")
                 return
         except (ConnectionRefusedError, OSError):
             time.sleep(1)

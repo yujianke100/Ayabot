@@ -6,15 +6,15 @@ import os
 
 
 def _make_ico(png_path: Path) -> Path | None:
-    """用 PIL 将 PNG 转成 ICO（PyInstaller --icon 在 Windows 上对 ICO 最可靠）。"""
+    """用 PIL 将 PNG 转成 ICO（多个标准尺寸，Windows 图标更清晰）。"""
     ico_path = png_path.with_suffix(".ico")
     try:
         from PIL import Image
         img = Image.open(png_path)
-        # ICO 需要 256x256 或更小
-        if max(img.size) > 256:
-            img = img.resize((256, 256))
-        img.save(ico_path, format="ICO", sizes=[(256, 256)])
+        # 保留宽高比缩放到 256x256
+        img = img.resize((256, 256), Image.LANCZOS)
+        # 保存多个标准尺寸供 Windows 在不同视图下选择
+        img.save(ico_path, format="ICO", sizes=[(256, 256), (48, 48), (32, 32), (16, 16)])
         print(f"✅ Converted {png_path.name} -> {ico_path.name}")
         return ico_path
     except Exception as exc:
@@ -89,8 +89,20 @@ def main() -> None:
 
     print(f"Building Ayabot.exe...")
     result = subprocess.run(cmd, cwd=base_dir)
+
+    # 构建完成后清理临时 .ico
+    for ico in base_dir.glob("*.ico"):
+        try:
+            ico.unlink()
+        except Exception:
+            pass
+
     if result.returncode == 0:
         print(f"\n✅ Build successful! Output: {base_dir / 'dist' / 'Ayabot.exe'}")
+        print(f"💡 如果 .exe 图标没刷新，请尝试：")
+        print(f"   1. 把 .exe 复制到新目录再查看")
+        print(f"   2. 重启 Windows 资源管理器 (任务管理器 → Windows 资源管理器 → 重新启动)")
+        print(f"   3. 或运行: ie4uinit.exe -Show")
     else:
         print(f"❌ Build failed (exit code {result.returncode})")
 
