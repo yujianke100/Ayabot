@@ -2143,6 +2143,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <div v-if="loginErr" class="text-red-500 text-sm">{{ loginErr }}</div>
             <button @click="doLogin" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded w-full">登录</button>
         </div>
+        <div class="mt-5 pt-4 border-t border-gray-100 text-center">
+            <p class="text-xs text-gray-400">
+                Ayabot v0.1.0 —
+                <a href="https://github.com/yujianke100/ayabot" target="_blank" class="text-blue-500 hover:underline">⭐ GitHub</a>
+                <span class="mx-1">·</span>
+                完全免费 · 开源
+            </p>
+        </div>
     </div>
 </div>
 
@@ -3201,6 +3209,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <li>用户权限 — 管理员/普通用户，控制房间可见范围</li>
                 <li>跨平台 — Linux/macOS/Windows，无需 systemd/sudo</li>
             </ul>
+        </div>
+        <div class="pt-4 border-t border-gray-200">
+            <p class="text-xs text-gray-400 text-center">
+                Ayabot v0.1.0 —
+                <a href="https://github.com/yujianke100/ayabot" target="_blank" class="text-blue-500 hover:underline">⭐ 去 GitHub 给个 Star</a>
+                <span class="mx-1">·</span>
+                本软件完全免费，开源在 MIT 许可证下
+            </p>
         </div>
     </div>
 </div>
