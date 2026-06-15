@@ -7,7 +7,7 @@ import os
 def main() -> None:
     base_dir = Path(__file__).resolve().parent.parent
     entry = base_dir / "scripts" / "tray_win.py"
-    icon_path = base_dir / "logo.png"
+    icon_path = base_dir / "icon.png"
 
     if not entry.exists():
         sys.exit(f"ERROR: entry point not found: {entry}")
