@@ -70,7 +70,15 @@ class LiveRobot:
         _set_wake_word(wake)
 
         # 记下机器人自己的 UID，用于忽略自己发送的弹幕（防止 AI 回复触发关键词）
+        # 优先从 config 获取，否则从 credential cookies 中提取（QR 扫码登录场景）
         self._bot_uid = _safe_int(config.credential.dedeuserid) if config.credential.dedeuserid else 0
+        if self._bot_uid == 0 and self.credential is not None:
+            try:
+                cookies = self.credential.get_cookies()
+                self._bot_uid = _safe_int(cookies.get("DedeUserID", 0))
+            except Exception:
+                pass
+        self.logger.info("bot uid set to %s (config=%s)", self._bot_uid, config.credential.dedeuserid)
 
     async def run(self) -> None:
         self.logger.info("robot started, room=%s", self.config.room_display_id)
