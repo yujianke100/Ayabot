@@ -64,7 +64,7 @@ class FeatureConfig:
     llm_keyword_trigger: bool = False  # 允许包含关键词就触发AI回复（需 AI免#前缀唤醒）
     pk_report_enabled: bool = True  # PK开始时汇报对手信息
     pk_report_template: str = "PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}"  # PK汇报模板
-    pk_end_template: str = \"{result} 我方分数{score}\"  # PK结束模板，{result}结果(胜利！/对方获胜/PK结束) {score}我方分数
+    pk_end_template: str = "{result} 我方分数{score}"  # PK结束模板，{result}结果(胜利！/对方获胜/PK结束) {score}我方分数
     # 点赞感谢
     like_thanks_enabled: bool = False
     like_thanks_template: str = "感谢 {uname} 的点赞~"
