@@ -1062,6 +1062,8 @@ class LiveRobot:
             # event.data.data 才是 B 站 PK 原始数据
             data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
 
+            self.logger.info("PK end data: %s", json.dumps(data, ensure_ascii=False, default=str)[:1000])
+
             # _NEW 格式：结果在 init_info.result_type（1=对方胜 2=我方胜）
             pk_init = data.get("init_info", {}) or {}
             result_type = int(pk_init.get("result_type", 0) or 0)
