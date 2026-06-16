@@ -992,6 +992,8 @@ class LiveRobot:
             raw = event.get("data", {})
             # event.data.data 才是 B 站 PK 原始数据
             inner = raw.get("data") if isinstance(raw.get("data"), dict) else raw
+            self.logger.info("PK inner keys: %s", list(inner.keys()) if isinstance(inner, dict) else "?")
+            self.logger.info("PK inner data: %s", json.dumps(inner, ensure_ascii=False, default=str)[:800])
 
             # 对手信息在 match_info.init_info 中（_NEW 格式）
             match_info = inner.get("match_info", {}) or {}
