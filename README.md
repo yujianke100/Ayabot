@@ -301,6 +301,6 @@ GNU General Public License v3.0 — 详见 [LICENSE](LICENSE)。
 如果觉得 Ayabot 有帮助，欢迎请作者喝杯咖啡 ❤️
 
 <p align="center">
-  <img src="alipay.jpg" width="200" alt="支付宝打赏">
-  <img src="wechat.png" width="200" alt="微信打赏">
+  <img src="https://raw.githubusercontent.com/yujianke100/Ayabot/main/alipay.jpg" width="200" alt="支付宝打赏">
+  <img src="https://raw.githubusercontent.com/yujianke100/Ayabot/main/wechat.png" width="200" alt="微信打赏">
 </p>

@@ -27,6 +27,20 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller pystray pillow
 
+      - name: 清理同版本的旧 Release 和 artifact
+        continue-on-error: true
+        run: |
+          TAG="${{ github.ref_name }}"
+          echo "清理旧 Release: $TAG"
+          # 删除同名 Release
+          gh release delete "$TAG" --cleanup-tag --yes 2>/dev/null && echo "已删除旧 Release" || echo "无旧 Release"
+          # 清理同名 artifact（如果有）
+          gh api "/repos/${{ github.repository }}/actions/artifacts" --paginate 2>/dev/null \
+            | jq -r ".artifacts[] | select(.name == \"Ayabot-$TAG\") | .id" 2>/dev/null \
+            | while read id; do
+              gh api -X DELETE "/repos/${{ github.repository }}/actions/artifacts/$id" --silent 2>/dev/null || true
+            done
+
       - name: Build .exe
         run: python scripts/build_exe.py --version "${{ github.ref_name }}"
 

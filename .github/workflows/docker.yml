@@ -57,6 +57,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: 清理 ghcr.io/Docker Hub 上同版本的旧镜像
+        continue-on-error: true
+        run: |
+          ORG="${{ github.repository_owner }}"
+          PACKAGE="ayabot"
+          # 从 tag 提取版本号 (v0.1.1 -> 0.1.1)
+          VER="${{ github.ref_name }}"
+          VER="${VER#v}"
+          echo "清理版本: $VER"
+
+          # ── ghcr.io ──
+          echo "--- ghcr.io ---"
+          # 查找包含此版本 tag 的版本 ID
+          gh api "/orgs/$ORG/packages/container/$PACKAGE/versions" --paginate 2>/dev/null \
+            | jq -c ".[] | select(.metadata.container.tags | index(\"$VER\")) | .id" 2>/dev/null \
+            | while read vid; do
+              echo "删除 ghcr.io 版本 $vid (tag=$VER)"
+              gh api -X DELETE "/orgs/$ORG/packages/container/$PACKAGE/versions/$vid" --silent 2>/dev/null || true
+            done
+
+          # ── Docker Hub ──
+          if [ -n "${{ secrets.DOCKER_USERNAME }}" ]; then
+            echo "--- Docker Hub ---"
+            TOKEN=$(curl -s -H "Content-Type: application/json" \
+              -X POST -d "{\"username\":\"${{ secrets.DOCKER_USERNAME }}\",\"password\":\"${{ secrets.DOCKER_PASSWORD }}\"}" \
+              "https://hub.docker.com/v2/users/login/" | jq -r .token 2>/dev/null)
+            if [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ]; then
+              curl -s -X DELETE \
+                -H "Authorization: JWT $TOKEN" \
+                "https://hub.docker.com/v2/repositories/${{ secrets.DOCKER_USERNAME }}/$PACKAGE/tags/$VER/" 2>/dev/null \
+                && echo "删除 Docker Hub tag $VER 成功" || echo "Docker Hub tag $VER 不存在或无权限删除"
+              # 也删 latest（后续会重建）
+              curl -s -X DELETE \
+                -H "Authorization: JWT $TOKEN" \
+                "https://hub.docker.com/v2/repositories/${{ secrets.DOCKER_USERNAME }}/$PACKAGE/tags/latest/" 2>/dev/null || true
+            fi
+          fi
+          echo "清理完成"
+
       - name: 确保 ghcr.io 包存在并可写（用 gh CLI 比 GITHUB_TOKEN 权限更高）
         continue-on-error: true
         run: |
