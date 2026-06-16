@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" alt="ayabot" width="200" />
+  <img src="https://raw.githubusercontent.com/yujianke100/Ayabot/main/logo.png" alt="ayabot" width="200" />
 </p>
 
 # ayabot
