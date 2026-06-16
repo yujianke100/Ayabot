@@ -69,11 +69,15 @@ jobs:
 
           # ── ghcr.io ──
           echo "--- ghcr.io ---"
-          # 查找包含此版本 tag 的版本 ID
+          # 获取所有版本，删除无 tag / __init__ / 本版本 tag 的旧镜像
           gh api "/orgs/$ORG/packages/container/$PACKAGE/versions" --paginate 2>/dev/null \
-            | jq -c ".[] | select(.metadata.container.tags | index(\"$VER\")) | .id" 2>/dev/null \
+            | jq -c '.[] | .id as $id | .metadata.container.tags as $tags |
+              select($tags == [] or $tags == null or
+                     any($tags[]; . == "__init__") or
+                     any($tags[]; . == "'"$VER"'") or
+                     any($tags[]; . == "latest")) | $id' 2>/dev/null \
             | while read vid; do
-              echo "删除 ghcr.io 版本 $vid (tag=$VER)"
+              echo "删除 ghcr.io 旧版本 $vid"
               gh api -X DELETE "/orgs/$ORG/packages/container/$PACKAGE/versions/$vid" --silent 2>/dev/null || true
             done
 
@@ -163,17 +167,20 @@ jobs:
           tags: ${{ steps.meta_ghcr.outputs.tags }}
           labels: ${{ steps.meta_ghcr.outputs.labels }}
 
-      - name: 清理 ghcr.io 上无 tag 的旧镜像
+      - name: 清理 ghcr.io 上无 tag 的孤立镜像
         continue-on-error: true
         run: |
-          echo "查找无 tag 的镜像版本..."
+          echo "查找无 tag / __init__ 的孤立镜像..."
           ORG="${{ github.repository_owner }}"
           PACKAGE="ayabot"
-          # 用 gh CLI 获取所有版本
           gh api "/orgs/$ORG/packages/container/$PACKAGE/versions" --paginate 2>/dev/null \
-            | jq -c '.[] | select(.metadata.container.tags == [] or .metadata.container.tags == null) | .id' 2>/dev/null \
+            | jq -c '.[] | select(
+                .metadata.container.tags == [] or
+                .metadata.container.tags == null or
+                any(.metadata.container.tags[]; . == "__init__")
+              ) | .id' 2>/dev/null \
             | while read id; do
-              echo "删除无 tag 版本: $id"
+              echo "删除孤立版本: $id"
               gh api -X DELETE "/orgs/$ORG/packages/container/$PACKAGE/versions/$id" --silent 2>/dev/null || true
             done
           echo "清理完成"
