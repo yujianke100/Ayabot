@@ -55,6 +55,8 @@ class FeatureConfig:
     blindbox_no_blindbox: str = "无盲盒记录"  # 有送礼但无盲盒时的回复
     blindbox_result_monthly: str = "本月盲盒共{count}个，花费{cost}，收益{profit}"  # 本月盲盒统计
     blindbox_result_today: str = "今日盲盒共{count}个，花费{cost}，收益{profit}"  # 今日盲盒统计
+    blindbox_glassheart_enabled: bool = False  # 玻璃心模式：亏损时隐藏真实收益
+    blindbox_glassheart_reply: str = "服务器繁忙，请稍后重试"  # 亏损时的回复
     use_chinese_numbers: bool = False  # 数字转中文（避开数字拦截）
     uid_configs: list[dict] | None = None  # list of {uid, welcome_template, keyword_rules}
     allow_bare_commands: bool = False  # 允许不带 # 前缀触发指令
@@ -67,7 +69,7 @@ class FeatureConfig:
     like_thanks_template: str = "感谢 {uname} 的点赞~"
     # 转发感谢
     share_thanks_enabled: bool = False
-    share_thanks_template: str = "感谢 {uname} 的分享~"
+    share_thanks_template: str = "感谢分享直播间~"
     # 关注感谢
     follow_thanks_enabled: bool = False
     follow_thanks_template: str = "感谢 {uname} 的关注~"
@@ -289,13 +291,15 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             blindbox_no_blindbox=str(features.get("blindbox_no_blindbox", "无盲盒记录")),
             blindbox_result_monthly=str(features.get("blindbox_result_monthly", "本月盲盒共{count}个，花费{cost}，收益{profit}")),
             blindbox_result_today=str(features.get("blindbox_result_today", "今日盲盒共{count}个，花费{cost}，收益{profit}")),
+            blindbox_glassheart_enabled=bool(features.get("blindbox_glassheart_enabled", False)),
+            blindbox_glassheart_reply=str(features.get("blindbox_glassheart_reply", "服务器繁忙，请稍后重试")),
             use_chinese_numbers=bool(features.get("use_chinese_numbers", False)),
             pk_report_enabled=bool(features.get("pk_report_enabled", True)),
             pk_report_template=str(features.get("pk_report_template", "PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}")),
             like_thanks_enabled=bool(features.get("like_thanks_enabled", False)),
             like_thanks_template=str(features.get("like_thanks_template", "感谢 {uname} 的点赞~")),
             share_thanks_enabled=bool(features.get("share_thanks_enabled", False)),
-            share_thanks_template=str(features.get("share_thanks_template", "感谢 {uname} 的分享~")),
+            share_thanks_template=str(features.get("share_thanks_template", "感谢分享直播间~")),
             follow_thanks_enabled=bool(features.get("follow_thanks_enabled", False)),
             follow_thanks_template=str(features.get("follow_thanks_template", "感谢 {uname} 的关注~")),
         ),
@@ -489,6 +493,8 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "blindbox_no_blindbox": config.features.blindbox_no_blindbox,
             "blindbox_result_monthly": config.features.blindbox_result_monthly,
             "blindbox_result_today": config.features.blindbox_result_today,
+            "blindbox_glassheart_enabled": config.features.blindbox_glassheart_enabled,
+            "blindbox_glassheart_reply": config.features.blindbox_glassheart_reply,
             "use_chinese_numbers": config.features.use_chinese_numbers,
             "pk_report_enabled": config.features.pk_report_enabled,
             "pk_report_template": config.features.pk_report_template,

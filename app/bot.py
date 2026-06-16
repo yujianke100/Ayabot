@@ -77,6 +77,8 @@ class LiveRobot:
 
         # 点赞计数: uid -> 累计点赞数（用于 ≥阈值 时一次性感谢）
         self._like_counts: dict[int, int] = {}
+        # 分享去重: uid -> 上次感谢时间戳
+        self._last_share_ts: dict[int, float] = {}
 
         # 从配置读取唤醒词
         wake = getattr(config.llm, 'wake_word', 'ayabot')
@@ -357,8 +359,6 @@ class LiveRobot:
         if isinstance(data, dict):
             nested = data.get("data") if isinstance(data.get("data"), dict) else data
             msg_type = int(nested.get("msg_type", 0))
-
-        self.logger.info("INTERACT_WORD: uid=%s uname=%s msg_type=%s", uid, uname, msg_type)
 
         if msg_type == 2 and self.config.features.follow_thanks_enabled:
             template = self.config.features.follow_thanks_template
@@ -723,6 +723,9 @@ class LiveRobot:
                     blind_count, cost_total, actual_total, profit_total = row
                     tmpl = self.config.features.blindbox_result_monthly
                     text_out = tmpl.replace("{count}", _num(str(blind_count))).replace("{cost}", _num(str(cost_total))).replace("{profit}", _num(str(profit_total)))
+            # 玻璃心模式：亏损时隐藏真实收益
+            if self.config.features.blindbox_glassheart_enabled and profit_total < 0:
+                text_out = self.config.features.blindbox_glassheart_reply
             self.logger.info("blindbox reply: %s", text_out)
             await self._enqueue_reply(text=text_out, reply_uid=uid)
             return
@@ -759,6 +762,9 @@ class LiveRobot:
                     blind_count, cost_total, actual_total, profit_total = row
                     tmpl = self.config.features.blindbox_result_today
                     text_out = tmpl.replace("{count}", _num(str(blind_count))).replace("{cost}", _num(str(cost_total))).replace("{profit}", _num(str(profit_total)))
+            # 玻璃心模式：亏损时隐藏真实收益
+            if self.config.features.blindbox_glassheart_enabled and profit_total < 0:
+                text_out = self.config.features.blindbox_glassheart_reply
             self.logger.info("today blindbox reply: %s", text_out)
             await self._enqueue_reply(text=text_out, reply_uid=uid)
             return
@@ -919,15 +925,14 @@ class LiveRobot:
             self.logger.info("PK event received: type=%s data_keys=%s", event_type,
                              list(event.get("data", {}).keys()) if isinstance(event.get("data"), dict) else "?")
 
-            # 只处理真正的 PK 开始/结束事件，跳过 PRE/PROCESS/INFO 等中间事件
+            # 只处理真正的 PK 开始/结束事件，跳过 PRE/PROCESS/PUNISH/INFO 等中间事件
             if "BATTLE_START" in event_type and not self._in_pk:
                 self._in_pk = True
                 await self._handle_pk_start(event)
-            elif "SETTLE" in event_type or "BATTLE_END" in event_type or "END" in event_type:
+            elif "SETTLE" in event_type:
                 self._in_pk = False
                 await self._handle_pk_end(event)
-            elif "PRE" in event_type or "PROCESS" in event_type or event_type == "PK_INFO":
-                # 记录日志但不弹幕回复
+            elif "PRE" in event_type or "PROCESS" in event_type or "PUNISH" in event_type or event_type == "PK_INFO":
                 self.logger.debug("PK intermediate event ignored: %s", event_type)
             return
 
@@ -943,26 +948,39 @@ class LiveRobot:
                        "SPECIAL_GIFT", "VERIFICATION_SUCCESSFUL",
                        "UNIVERSAL_EVENT_GIFT", "UNIVERSAL_EVENT_GIFT_V2",
                        "GUARD_BUY", "USER_TOAST_MSG", "USER_TOAST_MSG_V2",
-                       "LIKE_INFO_V3_UPDATE",
-                       "WELCOME", "WELCOME_GUARD")
+                       "LIKE_INFO_V3_CLICK", "LIKE_INFO_V3_UPDATE",
+                       "WELCOME", "WELCOME_GUARD", "DANMU_MSG",
+                       "STOP_LIVE_ROOM_LIST", "WIDGET_BANNER")
         if event_type in noisy_exact:
             return
 
-        # ── 独立 SHARE 事件（非 INTERACT_WORD_V2 转发） ──
-        if event_type == "SHARE":
+        # ── DM_INTERACTION（分享触发，会重复收到，需去重） ──
+        if event_type == "DM_INTERACTION":
             if self.config.features.share_thanks_enabled:
                 try:
-                    data = event.get("data", {})
-                    if isinstance(data, dict):
-                        nested = data.get("data") if isinstance(data.get("data"), dict) else {}
-                        uid = _safe_int(data.get("uid") or nested.get("uid") or 0)
-                        uname = str(data.get("uname") or nested.get("uname") or "")
-                        if uid > 0 and uname:
-                            template = self.config.features.share_thanks_template
-                            text = template.replace("{uname}", uname)
-                            await self._enqueue_message(text=text, reply_uid=uid)
+                    top = event.get("data", {})
+                    raw_data = top.get("data") if isinstance(top.get("data"), dict) else top
+                    # DM_INTERACTION 没有 uid/uname，只有一段 JSON 字符串
+                    inner = raw_data.get("data", "{}")
+                    if isinstance(inner, str):
+                        inner = json.loads(inner)
+                    cnt = int(inner.get("cnt", 0) or 0)
+                    if cnt <= 0:
+                        return
+                    # 30 秒内只感谢一次（防重复）
+                    now = time.time()
+                    last = self._last_share_ts.get(0, 0.0)  # 共用 key 0
+                    if now - last < 30:
+                        return
+                    self._last_share_ts[0] = now
+                    template = self.config.features.share_thanks_template
+                    # 没有用户名，去掉 {uname} 占位符
+                    text = template.replace("{uname}", "").strip()
+                    if not text:
+                        text = "感谢分享直播间~"
+                    await self._enqueue_message(text=text, reply_uid=None)
                 except Exception as exc:
-                    self.logger.warning("Error processing SHARE: %s", exc)
+                    self.logger.warning("Error processing DM_INTERACTION: %s", exc)
             return
 
         self.logger.debug("unhandled event: type=%s", event_type)
@@ -972,62 +990,37 @@ class LiveRobot:
             return
         try:
             raw = event.get("data", {})
+            # event.data.data 才是 B 站 PK 原始数据
+            inner = raw.get("data") if isinstance(raw.get("data"), dict) else raw
 
-            # ── 深度搜索 init_info（适应不同版本的事件结构） ──
-            init_info = raw.get("init_info", {})
+            # 对手信息在 match_info.init_info 中（_NEW 格式）
+            match_info = inner.get("match_info", {}) or {}
+            init_info = match_info.get("init_info", {}) or {}
             if not init_info:
-                # 尝试 event.data.data.init_info（_NEW 系列格式）
-                nested = raw.get("data")
-                if isinstance(nested, dict):
-                    init_info = nested.get("init_info", {})
-            if not init_info:
-                # 尝试 event.data.data.data.init_info（更深嵌套）
-                deeper = nested.get("data") if isinstance(nested, dict) else None
-                if isinstance(deeper, dict):
-                    init_info = deeper.get("init_info", {})
-            if not init_info:
-                # 尝试直接读取 PK_BATTLE_PRE_NEW 的顶层 data 字段
-                init_info = raw  # 降级到 data 本身
+                # 降级：部分旧版 PK 事件在 inner.init_info
+                init_info = inner.get("init_info", {}) or {}
 
-            # 调试日志：输出完整数据结构
-            self.logger.info("PK raw_data keys: %s", list(raw.keys()) if isinstance(raw, dict) else "?")
-            inner = raw.get("data") if isinstance(raw.get("data"), dict) else {}
-            self.logger.info("PK inner_data: %s", json.dumps(inner, ensure_ascii=False, default=str)[:800])
-            self.logger.info("PK init_info: %s", json.dumps(init_info, ensure_ascii=False, default=str)[:500])
+            opp_name = init_info.get("anchor_name", "") or init_info.get("uname", "") or "对面主播"
+            fans = int(init_info.get("fans_count", 0) or 0)
+            online = int(init_info.get("online_count", 0) or 0)
+            guard_count = int(init_info.get("guard_count", 0) or 0)
 
-            # ── 从 init_info 提取字段（兼容多个字段名） ──
-            def _get(d, *keys, default=0):
-                for k in keys:
-                    v = d.get(k)
-                    if v not in (None, "", 0, "0"):
-                        return v
-                return default
-
-            opp_name = _get(init_info, "anchor_name", "opponent_name", "uname", "nickname", default="对面主播")
-            fans = int(_get(init_info, "fans_count", "fans", "follower_num", default=0))
-            online = int(_get(init_info, "online_count", "online", "viewer_count", default=0))
-            guard_count = int(_get(init_info, "guard_count", "guard_num", default=0))
-
-            # 大航海细分
             guard_info = init_info.get("guard_info", {}) or {}
-            captains = int(_get(guard_info, "captain_count", default=0))
-            commanders = int(_get(guard_info, "commander_count", default=0))
-            governors = int(_get(guard_info, "governor_count", default=0))
+            captains = int(guard_info.get("captain_count", 0) or 0)
+            commanders = int(guard_info.get("commander_count", 0) or 0)
+            governors = int(guard_info.get("governor_count", 0) or 0)
 
-            # 贡献值
             contribution = init_info.get("contribution", {}) or {}
             if isinstance(contribution, dict):
-                contrib_score = int(_get(contribution, "score", default=0))
+                contrib_score = int(contribution.get("score", 0) or 0)
             else:
                 contrib_score = int(contribution) if contribution else 0
 
-            # 粉丝数格式化
             def _fmt(n: int) -> str:
                 if n >= 10000:
                     return f"{n / 10000:.1f}万"
                 return str(n)
 
-            # 大航海字符串
             guards_parts = []
             if captains:
                 guards_parts.append(f"{captains}舰")
@@ -1053,27 +1046,25 @@ class LiveRobot:
             return
         try:
             raw = event.get("data", {})
-
-            # 同样支持嵌套 data（_NEW 格式）
+            # event.data.data 才是 B 站 PK 原始数据
             data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
-            self.logger.info("PK end raw keys: %s", list(raw.keys()) if isinstance(raw, dict) else "?")
-            self.logger.info("PK end data: %s", json.dumps(data, ensure_ascii=False, default=str)[:800])
 
-            winner = data.get("winner_type", 0)
-            win_str = "胜利！" if winner == 1 else "对方获胜" if winner == 2 else "PK结束"
+            # _NEW 格式：结果在 init_info.result_type（1=胜 2=负 3=平？）
+            pk_init = data.get("init_info", {}) or {}
+            result_type = int(pk_init.get("result_type", 0) or 0)
+            if result_type == 1:
+                win_str = "胜利！"
+            elif result_type == 2:
+                win_str = "对方获胜"
+            else:
+                win_str = "PK结束"
 
-            my_score = data.get("my_score", 0) or 0
-            their_score = data.get("their_score", 0) or 0
-            my_info = data.get("my_info", {}) or {}
-            their_info = data.get("their_info", {}) or {}
-            if isinstance(my_info, dict):
-                my_score = my_info.get("score", my_score) or my_score
-            if isinstance(their_info, dict):
-                their_score = their_info.get("score", their_score) or their_score
+            # 分数：init_info.votes 是我方（胜者）得分
+            my_score = int(pk_init.get("votes", 0) or 0)
 
             msg = f"PK {win_str}"
-            if my_score or their_score:
-                msg += f" {my_score}:{their_score}"
+            if my_score:
+                msg += f" {my_score}"
 
             await self._enqueue_message(text=msg, reply_uid=None)
         except Exception as exc:

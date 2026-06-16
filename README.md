@@ -299,7 +299,13 @@ exe 包含以下内容，启动时自动释放到 `%LOCALAPPDATA%\Ayabot\`：
 
 ---
 
-## 📄 License
+## � 致谢
+
+- [bilibili-api-python](https://github.com/Nemo2011/bilibili-api) — B 站 API 的 Python 封装，本项目的弹幕监听、礼物解析等功能基于此库实现
+
+---
+
+## �📄 License
 
 GNU General Public License v3.0 — 详见 [LICENSE](LICENSE)。
 

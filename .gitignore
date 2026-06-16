@@ -15,3 +15,4 @@ dist
 *.spec
 *.ico
 test_*.py
+webui.log.err

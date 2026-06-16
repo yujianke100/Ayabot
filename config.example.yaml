@@ -34,9 +34,11 @@ features:
   like_thanks_enabled: false        # 点赞感谢开关
   like_thanks_template: "感谢 {uname} 的点赞~"
   share_thanks_enabled: false       # 转发感谢开关
-  share_thanks_template: "感谢 {uname} 的分享~"
+  share_thanks_template: "感谢分享直播间~"
   follow_thanks_enabled: false      # 关注感谢开关
-  follow_thanks_template: "感谢 {uname} 的关注~"  # PK汇报模板
+  follow_thanks_template: "感谢 {uname} 的关注~"
+  blindbox_glassheart_enabled: false   # 玻璃心模式（亏损时隐藏真实收益）
+  blindbox_glassheart_reply: "服务器繁忙，请稍后重试"  # PK汇报模板
 
 cooldown:
   welcome_user_seconds: 600

@@ -2711,8 +2711,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <div v-if="roomConfig.features.share_thanks_enabled" class="border rounded p-3 bg-gray-50 space-y-2 mt-2">
                         <h4 class="text-xs font-bold text-gray-600">🔁 转发感谢</h4>
                         <label class="text-xs text-gray-500 block">模板
-                            <input type="text" v-model="roomConfig.features.share_thanks_template" placeholder="感谢 {uname} 的分享~" class="border p-2 rounded w-full text-sm mt-1">
-                            <span class="text-gray-400 text-[10px]">支持占位符: {uname}用户名</span>
+                            <input type="text" v-model="roomConfig.features.share_thanks_template" placeholder="感谢分享直播间~" class="border p-2 rounded w-full text-sm mt-1">
+                            <span class="text-gray-400 text-[10px]">B站不提供分享者信息，无法使用 {uname}</span>
                         </label>
                     </div>
                     <div v-if="roomConfig.features.follow_thanks_enabled" class="border rounded p-3 bg-gray-50 space-y-2 mt-2">
@@ -2736,6 +2736,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="flex items-center gap-2 text-xs mb-2">
                         <input type="checkbox" v-model="roomConfig.features.use_chinese_numbers" class="w-4 h-4"> 数字转中文（六→六而非6，避开数字拦截）
                     </label>
+                    <div class="border rounded p-3 bg-gray-50 space-y-2 mb-2">
+                        <label class="flex items-center gap-2 text-xs">
+                            <input type="checkbox" v-model="roomConfig.features.blindbox_glassheart_enabled" class="w-4 h-4"> 💔 玻璃心模式（亏损时隐藏真实收益）
+                        </label>
+                        <label v-if="roomConfig.features.blindbox_glassheart_enabled" class="text-xs text-gray-500 block">亏损回复
+                            <input type="text" v-model="roomConfig.features.blindbox_glassheart_reply" placeholder="服务器繁忙，请稍后重试" class="border p-2 rounded w-full text-sm mt-1">
+                        </label>
+                    </div>
                     <label class="text-xs text-gray-500 block">#本月盲盒 有数据
                         <input type="text" v-model="roomConfig.features.blindbox_result_monthly" placeholder="本月盲盒共{count}个，花费{cost}，收益{profit}" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
