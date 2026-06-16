@@ -2218,7 +2218,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
         <div class="mt-5 pt-4 border-t border-gray-100 text-center">
             <p class="text-xs text-gray-400">
-                Ayabot v0.1.0 —
+                Ayabot v0.1.1 —
                 <a href="https://github.com/yujianke100/ayabot" target="_blank" class="text-blue-500 hover:underline">⭐ GitHub</a>
                 <span class="mx-1">·</span>
                 完全免费 · 开源
@@ -3529,7 +3529,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
         <div class="pt-4 border-t border-gray-200">
             <p class="text-xs text-gray-400 text-center">
-                Ayabot v0.1.0 —
+                Ayabot v0.1.1 —
                 <a href="https://github.com/yujianke100/ayabot" target="_blank" class="text-blue-500 hover:underline">⭐ 去 GitHub 给个 Star</a>
                 <span class="mx-1">·</span>
                 本软件完全免费，以 GPLv3 协议开源

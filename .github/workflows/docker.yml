@@ -19,11 +19,7 @@ name: Build & Push Docker Image
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-    paths-ignore:
-      - "**.md"
-      - ".gitignore"
   workflow_dispatch:
 
 env:
@@ -36,6 +32,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -67,8 +64,8 @@ jobs:
         with:
           images: ${{ env.DOCKERHUB_IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{ is_default_branch }}
-            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=raw,value=latest
 
       - name: Extract metadata for ghcr.io
         id: meta_ghcr
@@ -76,8 +73,8 @@ jobs:
         with:
           images: ${{ env.GHCR_IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{ is_default_branch }}
-            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=raw,value=latest
 
       - name: Build and push to Docker Hub
         if: env.DOCKERHUB_IMAGE != ''
@@ -97,3 +94,23 @@ jobs:
           push: true
           tags: ${{ steps.meta_ghcr.outputs.tags }}
           labels: ${{ steps.meta_ghcr.outputs.labels }}
+
+      - name: 清理 ghcr.io 上无 tag 的旧镜像
+        continue-on-error: true
+        run: |
+          echo "🔍 查找无 tag 的镜像版本..."
+          # 获取包的所有版本
+          VERSIONS=$(gh api "/orgs/${{ github.repository_owner }}/packages/container/ayabot/versions" --paginate 2>/dev/null) || {
+            # 如果 org 级别失败，尝试 user 级别
+            VERSIONS=$(gh api "/user/packages/container/ayabot/versions" --paginate 2>/dev/null) || {
+              echo "⚠️ 无法获取版本列表，跳过清理"
+              exit 0
+            }
+          }
+          echo "$VERSIONS" | jq -c '.[] | select(.metadata.container.tags == [] or .metadata.container.tags == null) | .id' | while read id; do
+            echo "🗑️  删除无 tag 版本: $id"
+            gh api -X DELETE "/orgs/${{ github.repository_owner }}/packages/container/ayabot/versions/$id" 2>/dev/null || \
+            gh api -X DELETE "/user/packages/container/ayabot/versions/$id" 2>/dev/null || \
+            echo "⚠️  删除版本 $id 失败，可能无权限"
+          done
+          echo "✅ 清理完成"

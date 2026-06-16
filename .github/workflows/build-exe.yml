@@ -1,0 +1,41 @@
+# ── Windows .exe 构建（打 tag 时自动构建并发布到 Release） ──
+
+name: Build Windows .exe
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller pystray pillow
+
+      - name: Build .exe
+        run: python scripts/build_exe.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ayabot-${{ github.ref_name }}.exe
+          path: dist/Ayabot.exe
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Ayabot.exe
+          generate_release_notes: true
