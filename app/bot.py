@@ -1048,14 +1048,13 @@ class LiveRobot:
                     return f"{n / 10000:.1f}万"
                 return str(n)
 
-            msg = self.config.features.pk_report_template
-            msg = msg.replace("{opponent}", opp_name)
-            msg = msg.replace("{fans}", _fmt(fans))
-            msg = msg.replace("{guards}", str(guard_count) + "舰" if guard_count else "0舰")
-            msg = msg.replace("{audience}", str(online))
-            msg = msg.replace("{score}", str(online))
-
-            await self._enqueue_message(text=msg, reply_uid=None)
+            # 拆成三条弹幕发送
+            line1 = f"PK开始！对手{opp_name}"
+            line2 = f"对手 {_fmt(fans)}粉，{guard_count}舰"
+            line3 = f"{online}观众，贡献{online}"
+            await self._enqueue_message(text=line1, reply_uid=None)
+            await self._enqueue_message(text=line2, reply_uid=None)
+            await self._enqueue_message(text=line3, reply_uid=None)
         except Exception as exc:
             self.logger.error("Error processing PK_BATTLE_START: %s", exc, exc_info=True)
 
