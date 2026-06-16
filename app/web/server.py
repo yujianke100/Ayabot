@@ -48,6 +48,35 @@ _DB_PATH = "data/bot.db"
 # LLM 配置（可变引用，webui 可保存更新）
 _LLM_CONFIG_DICT: dict[str, Any] = {}
 _CONFIG_YAML_PATH: str = "config.yaml"
+# 房间状态持久化文件（记录哪些房间在重启前是启动的）
+_ROOM_STATES_PATH: str = "data/room_states.json"
+
+
+def _save_room_states() -> None:
+    """保存当前各房间的运行状态到文件。"""
+    try:
+        rooms = _list_rooms_from_disk()
+        states = {}
+        for r in rooms:
+            rid = r["room_id"]
+            states[rid] = room_status(rid) == "running"
+        Path(_ROOMS_BASE_DIR).resolve().joinpath(_ROOM_STATES_PATH).parent.mkdir(parents=True, exist_ok=True)
+        Path(_ROOMS_BASE_DIR).resolve().joinpath(_ROOM_STATES_PATH).write_text(
+            json.dumps(states, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception as exc:
+        logger.warning("save room states failed: %s", exc)
+
+
+def _load_room_states() -> dict[str, bool]:
+    """读取之前保存的房间状态。"""
+    try:
+        p = Path(_ROOMS_BASE_DIR).resolve() / _ROOM_STATES_PATH
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("load room states failed: %s", exc)
+    return {}
 
 
 def get_llm_config() -> dict[str, Any]:
@@ -354,12 +383,11 @@ async def _startup():
 
 
 async def _auto_start_rooms() -> None:
-    """延迟扫描 rooms/ 目录，自动启动所有已配置的房间 Bot。"""
+    """延迟扫描 rooms/ 目录，按上次状态自动启停房间 Bot。"""
     try:
-        # 等 Web 服务完全就绪后再启动
         await asyncio.sleep(3)
-        # 清理旧会话残留的 PID/Lock 文件（容器重启后关键）
         cleanup_all_stale_pidfiles()
+        saved = _load_room_states()
         rooms = _list_rooms_from_disk()
         if not rooms:
             logger.info("auto-start: no rooms found on disk")
@@ -367,18 +395,23 @@ async def _auto_start_rooms() -> None:
         started = 0
         for room in rooms:
             room_id = room["room_id"]
+            should_run = saved.get(room_id, False)
             status = room_status(room_id)
-            if status == "running":
-                logger.info("auto-start: room %s already running, skip", room_id)
-                continue
-            logger.info("auto-start: starting room %s ...", room_id)
-            ok = await start_room_async(room_id)
-            if ok:
-                started += 1
-                logger.info("auto-start: room %s started successfully", room_id)
+            if should_run and status != "running":
+                logger.info("auto-start: starting room %s (was running before restart)", room_id)
+                ok = await start_room_async(room_id)
+                if ok:
+                    started += 1
+                else:
+                    logger.warning("auto-start: room %s failed to start", room_id)
+            elif not should_run and status == "running":
+                logger.info("auto-start: stopping room %s (was stopped before restart)", room_id)
+                await stop_room_async(room_id)
             else:
-                logger.warning("auto-start: room %s failed to start", room_id)
-        logger.info("auto-start: %d/%d rooms started", started, len(rooms))
+                logger.debug("auto-start: room %s status unchanged, skip", room_id)
+        logger.info("auto-start: %d rooms auto-started", started)
+        # 保存启动后的状态
+        _save_room_states()
     except Exception as exc:
         logger.error("auto-start: error: %s", exc, exc_info=True)
 
@@ -999,6 +1032,7 @@ async def api_restart_all_bots():
         if r["status"] == "running":
             await restart_room_async(r["room_id"])
             count += 1
+    _save_room_states()
     logger.info("restarted %d bots", count)
     return {"ok": True, "count": count}
 
@@ -1399,6 +1433,7 @@ async def api_start_room(room_id: str):
     ok = await start_room_async(room_id)
     if not ok:
         return JSONResponse({"error": "启动失败，请检查配置"}, status_code=500)
+    _save_room_states()
     return {"ok": True, "status": "running"}
 
 
@@ -1406,6 +1441,7 @@ async def api_start_room(room_id: str):
 async def api_stop_room(room_id: str):
     """停止房间 Bot（同时清理同进程和子进程）。"""
     await stop_room_async(room_id)
+    _save_room_states()
     return {"ok": True, "status": "stopped"}
 
 
@@ -1413,6 +1449,7 @@ async def api_stop_room(room_id: str):
 async def api_restart_room(room_id: str):
     """重启房间 Bot（自动选择同进程/子进程模式）。"""
     ok = await restart_room_async(room_id)
+    _save_room_states()
     return {"ok": ok, "status": "running" if ok else "stopped"}
 
 
@@ -1423,6 +1460,7 @@ async def api_delete_room(room_id: str):
     from app.config import get_room_path
 
     clean_room(room_id)
+    _save_room_states()
 
     # 删除目录
     room_dir = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR)
