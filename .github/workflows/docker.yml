@@ -57,25 +57,34 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 确保 ghcr.io 包可写（首次推送前设置仓库关联）
+      - name: 确保 ghcr.io 包存在并可写（用 gh CLI 比 GITHUB_TOKEN 权限更高）
         continue-on-error: true
         run: |
           PACKAGE="ayabot"
-          # 设置包为公开可见，并关联到当前仓库
           ORG="${{ github.repository_owner }}"
+          # gh CLI 自带 GITHUB_TOKEN 认证，尝试创建/更新包
+          if gh api "/orgs/$ORG/packages/container/$PACKAGE" --method GET --silent 2>/dev/null; then
+            echo "包已存在，更新可见性为公开"
+            gh api "/orgs/$ORG/packages/container/$PACKAGE/visibility" \
+              --method POST \
+              --field visibility="public" --silent 2>/dev/null || true
+          else
+            echo "包不存在，尝试用占位镜像触发创建..."
+            echo "FROM scratch" | docker build --push \
+              -t "ghcr.io/$ORG/$PACKAGE:__init__" - 2>/dev/null || true
+            sleep 3
+          fi
+          # 关联仓库
           REPO_ID="${{ github.repository_id }}"
-          echo "🔗 Linking $PACKAGE to repo $ORG/... (id=$REPO_ID)"
-          curl -sL -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/orgs/$ORG/packages/container/$PACKAGE/repository-connections" \
-            -d "{\"repository_ids\":[$REPO_ID]}" 2>/dev/null && echo "  ✅ org 级关联成功" || \
-          curl -sL -X PUT \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/user/packages/container/$PACKAGE/repository-connections" \
-            -d "{\"repository_ids\":[$REPO_ID]}" 2>/dev/null && echo "  ✅ user 级关联成功" || \
-          echo "  ⏳ 包尚未创建，首次推送时会自动建立"
+          gh api "/orgs/$ORG/packages/container/$PACKAGE/repository-connections" \
+            --method POST \
+            --input - <<< "{\"repository_ids\":[$REPO_ID]}" 2>/dev/null && echo "仓库关联成功" || \
+          echo "仓库关联跳过（可能已关联）"
+              curl -s -X DELETE \
+                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                "https://api.github.com/orgs/$ORG/packages/container/$PACKAGE/versions/$vid" 2>/dev/null || true
+            done
+          echo "=== 初始化完成 ==="
 
       - name: Extract metadata for Docker Hub
         id: meta_hub
@@ -118,19 +127,14 @@ jobs:
       - name: 清理 ghcr.io 上无 tag 的旧镜像
         continue-on-error: true
         run: |
-          echo "🔍 查找无 tag 的镜像版本..."
-          # 获取包的所有版本
-          VERSIONS=$(gh api "/orgs/${{ github.repository_owner }}/packages/container/ayabot/versions" --paginate 2>/dev/null) || {
-            # 如果 org 级别失败，尝试 user 级别
-            VERSIONS=$(gh api "/user/packages/container/ayabot/versions" --paginate 2>/dev/null) || {
-              echo "⚠️ 无法获取版本列表，跳过清理"
-              exit 0
-            }
-          }
-          echo "$VERSIONS" | jq -c '.[] | select(.metadata.container.tags == [] or .metadata.container.tags == null) | .id' | while read id; do
-            echo "🗑️  删除无 tag 版本: $id"
-            gh api -X DELETE "/orgs/${{ github.repository_owner }}/packages/container/ayabot/versions/$id" 2>/dev/null || \
-            gh api -X DELETE "/user/packages/container/ayabot/versions/$id" 2>/dev/null || \
-            echo "⚠️  删除版本 $id 失败，可能无权限"
-          done
-          echo "✅ 清理完成"
+          echo "查找无 tag 的镜像版本..."
+          ORG="${{ github.repository_owner }}"
+          PACKAGE="ayabot"
+          # 用 gh CLI 获取所有版本
+          gh api "/orgs/$ORG/packages/container/$PACKAGE/versions" --paginate 2>/dev/null \
+            | jq -c '.[] | select(.metadata.container.tags == [] or .metadata.container.tags == null) | .id' 2>/dev/null \
+            | while read id; do
+              echo "删除无 tag 版本: $id"
+              gh api -X DELETE "/orgs/$ORG/packages/container/$PACKAGE/versions/$id" --silent 2>/dev/null || true
+            done
+          echo "清理完成"
