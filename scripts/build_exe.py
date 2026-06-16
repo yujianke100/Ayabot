@@ -15,10 +15,10 @@ def _make_ico(png_path: Path) -> Path | None:
         img = img.resize((256, 256), Image.LANCZOS)
         # 保存多个标准尺寸供 Windows 在不同视图下选择
         img.save(ico_path, format="ICO", sizes=[(256, 256), (48, 48), (32, 32), (16, 16)])
-        print(f"✅ Converted {png_path.name} -> {ico_path.name}")
+        print(f"[OK] Converted {png_path.name} -> {ico_path.name}")
         return ico_path
     except Exception as exc:
-        print(f"⚠️  Could not convert to ICO: {exc}")
+        print(f"[WARN] Could not convert to ICO: {exc}")
         return None
 
 
@@ -103,13 +103,13 @@ def main() -> None:
             pass
 
     if result.returncode == 0:
-        print(f"\n✅ Build successful! Output: {base_dir / 'dist' / 'Ayabot.exe'}")
-        print(f"💡 如果 .exe 图标没刷新，请尝试：")
-        print(f"   1. 把 .exe 复制到新目录再查看")
-        print(f"   2. 重启 Windows 资源管理器 (任务管理器 → Windows 资源管理器 → 重新启动)")
-        print(f"   3. 或运行: ie4uinit.exe -Show")
+        print(f"\n[OK] Build successful! Output: {base_dir / 'dist' / 'Ayabot.exe'}")
+        print(f"[TIP] If .exe icon does not refresh, try:")
+        print(f"   1. Copy .exe to a new directory")
+        print(f"   2. Restart Windows Explorer (Task Manager -> Windows Explorer -> Restart)")
+        print(f"   3. Run: ie4uinit.exe -Show")
     else:
-        print(f"❌ Build failed (exit code {result.returncode})")
+        print(f"[FAIL] Build failed (exit code {result.returncode})")
 
 
 if __name__ == "__main__":
