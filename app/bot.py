@@ -1021,14 +1021,13 @@ class LiveRobot:
                         room_display_id=opp_room_id,
                         credential=self.credential,
                     )
+                    # get_room_play_info 包含 online 观众数
                     info = await asyncio.wait_for(
-                        opp_room.get_room_info(), timeout=5
+                        opp_room.get_room_play_info(), timeout=5
                     )
-                    self.logger.info("PK opponent room info: %s",
-                                     json.dumps(info, ensure_ascii=False, default=str)[:600])
-                    room_info = info.get("room_info", {}) or {}
-                    fans = int(room_info.get("fans_count", 0) or 0)
-                    online = int(room_info.get("popularity_count", room_info.get("online", 0)) or 0)
+                    self.logger.info("PK opponent play info: %s",
+                                     json.dumps(info, ensure_ascii=False, default=str)[:1000])
+                    online = int(info.get("online", 0) or 0)
                     got_stats = True
                 except asyncio.TimeoutError:
                     self.logger.warning("PK: opponent room info timeout")
