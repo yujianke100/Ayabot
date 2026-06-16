@@ -147,6 +147,7 @@ class LiveRobot:
         )
 
         self._danmaku.on("INTERACT_WORD_V2")(self._on_enter_room)
+        self._danmaku.on("INTERACT_WORD")(self._on_interact_word)
 
         self._danmaku.on("SEND_GIFT")(self._on_gift)
         self._danmaku.on("COMBO_SEND")(self._on_gift)
@@ -459,6 +460,28 @@ class LiveRobot:
             except asyncio.QueueFull:
                 self._pending_texts.discard(text)
                 self.logger.warning("queue full, welcome dropped: uid=%s", uid)
+
+    async def _on_interact_word(self, event: dict[str, Any]) -> None:
+        """监听 INTERACT_WORD（非V2），用于关注/分享检测。"""
+        data = event.get("data", {})
+        if not isinstance(data, dict):
+            return
+        msg_type = int(data.get("msg_type", 0) or 0)
+        uid = _safe_int(data.get("uid", 0))
+        uname = str(data.get("uname", "") or "")
+        if uid <= 0 or not uname:
+            return
+
+        if msg_type == 2 and self.config.features.follow_thanks_enabled:
+            template = self.config.features.follow_thanks_template
+            if template:
+                text = template.replace("{uname}", uname)
+                await self._enqueue_message(text=text, reply_uid=uid)
+        elif msg_type == 3 and self.config.features.share_thanks_enabled:
+            template = self.config.features.share_thanks_template
+            if template:
+                text = template.replace("{uname}", uname)
+                await self._enqueue_message(text=text, reply_uid=uid)
 
     async def _on_like(self, event: dict[str, Any]) -> None:
         """监听点赞事件，B站已聚合触发，每次事件感谢一次。"""
@@ -949,7 +972,7 @@ class LiveRobot:
                        "UNIVERSAL_EVENT_GIFT", "UNIVERSAL_EVENT_GIFT_V2",
                        "GUARD_BUY", "USER_TOAST_MSG", "USER_TOAST_MSG_V2",
                        "LIKE_INFO_V3_CLICK", "LIKE_INFO_V3_UPDATE",
-                       "WELCOME", "WELCOME_GUARD", "DANMU_MSG",
+                       "INTERACT_WORD", "WELCOME", "WELCOME_GUARD", "DANMU_MSG",
                        "STOP_LIVE_ROOM_LIST", "WIDGET_BANNER")
         if event_type in noisy_exact:
             return
