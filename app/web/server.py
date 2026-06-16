@@ -1414,14 +1414,18 @@ async def api_create_room(request: Request):
 
     # 写入房间配置
     port = body.get("port", 8000)
-    bot_name = body.get("bot_name", f"ayabot{room_id[:4]}")
+    room_name = body.get("room_name", "")
+    bot_name = f"ayabot{room_id[:4]}"
     from app.config import update_config_from_dict
-    update_config_from_dict({
+    cfg_update = {
         "room_display_id": int(room_display_id),
         "anchor_uid": int(anchor_uid),
         "bot_name": bot_name,
         "web_ui": {"port": int(port)},
-    }, str(cfg_path))
+    }
+    if room_name:
+        cfg_update["room_name"] = room_name
+    update_config_from_dict(cfg_update, str(cfg_path))
 
     logger.info("room created: id=%s uid=%s port=%s", room_id, anchor_uid, port)
     return {"ok": True, "room_id": room_id, "room_display_id": room_display_id}
@@ -2294,6 +2298,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                         <input type="number" v-model.number="newRoomUid" placeholder="B站 主播 UID"
                                class="border p-2 rounded w-full text-sm mt-1">
                     </label>
+                    <label class="text-xs text-gray-500">直播间名称
+                        <input type="text" v-model="newRoomName" placeholder="给房间起个名字（可选）"
+                               class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
                     <label class="text-xs text-gray-500">直播间号
                         <input type="number" v-model.number="newRoomDisplayId" placeholder="B站 直播间号，如 1946287911"
                                class="border p-2 rounded w-full text-sm mt-1">
@@ -2693,8 +2701,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <hr>
-                <h3 class="text-sm font-bold">🚦 限流</h3>
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('rateLimit')">
+                    <span v-if="configSections.rateLimit">▼</span><span v-else>▶</span> 🚦 限流
+                </h3>
+                <div v-show="configSections.rateLimit" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <label class="text-xs text-gray-500">弹幕发送间隔(秒)
                         <input type="number" v-model="roomConfig.rate_limit.send_interval_seconds" step="0.1" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
@@ -2710,7 +2720,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <hr>
-                <h3 class="text-sm font-bold">🎛️ 功能开关</h3>
+                <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('features')">
+                    <span v-if="configSections.features">▼</span><span v-else>▶</span> 🎛️ 功能开关
+                </h3>
+                <div v-show="configSections.features">
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.welcome_enabled" class="w-4 h-4"> 欢迎</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.thanks_enabled" class="w-4 h-4"> 感谢</label>
@@ -2724,9 +2737,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.danmaku_log_enabled" class="w-4 h-4"> 弹幕记录</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.allow_bare_commands" class="w-4 h-4"> 免#指令</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.llm_bare_trigger" class="w-4 h-4"> AI免#前缀唤醒</label>
-                    <label class="flex items-center gap-2" v-if="roomConfig.features.llm_bare_trigger"><input type="checkbox" v-model="roomConfig.features.llm_keyword_trigger" class="w-4 h-4"> 包含关键词触AI</label>
+                    <label class="flex items-center gap-2" v-if="roomConfig.features.llm_bare_trigger"><input type="checkbox" v-model="roomConfig.features.llm_keyword_trigger" class="w-4 h-4"> 包含关键词触发AI</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.use_chinese_numbers_global" class="w-4 h-4"> 全局大写数字（反屏蔽）</label>
                 </div>
-                <div class="text-xs text-gray-400 mb-2">免#指令：开启后可不带 # 使用指令（签到、今日盲盒等） | AI免#：弹幕开头匹配唤醒词即触发AI | 包含关键词：弹幕含唤醒词即触发AI（需免#指令）</div>
+                <div class="text-xs text-gray-400 mb-2">免#指令：开启后可不带 # 使用指令（签到、今日盲盒等） | AI免#：弹幕开头匹配唤醒词即触发AI | 包含关键词：弹幕含唤醒词即触发AI（需AI免#前缀唤醒）</div>
                 <div v-if="roomConfig.features.danmaku_log_enabled" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <label class="text-xs text-gray-500">弹幕记录最大条数
                         <input type="number" v-model.number="roomConfig.features.danmaku_log_max_entries" min="100" max="100000" class="border p-2 rounded w-full text-sm mt-1">
@@ -2743,10 +2757,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
                         <span class="text-xs text-gray-400">保存后重启机器人生效</span>
                     </label>
                 </div>
+                </div>
 
                 <hr>
-                <h3 class="text-sm font-bold">⚔️ PK汇报</h3>
-                <div class="space-y-3">
+                <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('pk')">
+                    <span v-if="configSections.pk">▼</span><span v-else>▶</span> ⚔️ PK汇报
+                </h3>
+                <div v-show="configSections.pk" class="space-y-3">
                     <label class="flex items-center gap-2 text-sm"><input type="checkbox" v-model="roomConfig.features.pk_report_enabled" class="w-4 h-4"> PK开始/结束时汇报对手信息</label>
                     <label class="text-xs text-gray-500 block">PK开始模板
                         <input type="text" v-model="roomConfig.features.pk_report_template" placeholder="PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}" class="border p-2 rounded w-full text-sm mt-1">
@@ -2759,8 +2776,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <hr>
-                <h3 class="text-sm font-bold">📝 回复模板</h3>
-                <div class="space-y-3">
+                <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('templates')">
+                    <span v-if="configSections.templates">▼</span><span v-else>▶</span> 📝 回复模板
+                </h3>
+                <div v-show="configSections.templates" class="space-y-3">
                     <label class="text-xs text-gray-500 block">欢迎模板
                         <input type="text" v-model="roomConfig.features.welcome_template" placeholder="欢迎{uname}来到直播间" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
@@ -2816,10 +2835,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <h4 class="text-xs font-bold text-gray-600 mt-2">📦 盲盒统计（支持 {count} {cost} {profit} 占位符）</h4>
                     <p class="text-[10px] text-gray-400">修改盲盒指令的回复文本。如发送失败可尝试开启「数字转中文」或使用简短表述。</p>
                     <label class="flex items-center gap-2 text-xs mb-2">
-                        <input type="checkbox" v-model="roomConfig.features.use_chinese_numbers" class="w-4 h-4"> 盲盒数字转中文
-                    </label>
-                    <label class="flex items-center gap-2 text-xs mb-2">
-                        <input type="checkbox" v-model="roomConfig.features.use_chinese_numbers_global" class="w-4 h-4"> 🌐 全局数字转大写（所有回复生效）
+                        <input type="checkbox" v-model="roomConfig.features.use_chinese_numbers" class="w-4 h-4" :disabled="roomConfig.features.use_chinese_numbers_global"> 盲盒数字转中文
+                        <span v-if="roomConfig.features.use_chinese_numbers_global" class="text-gray-400 text-[10px]">（全局已开启，无需单独设置）</span>
                     </label>
                     <div class="border rounded p-3 bg-gray-50 space-y-2 mb-2">
                         <label class="flex items-center gap-2 text-xs">
@@ -2844,8 +2861,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <hr>
-                <h3 class="text-sm font-bold">⏰ 定时消息</h3>
-                <div class="space-y-3">
+                <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('periodic')">
+                    <span v-if="configSections.periodic">▼</span><span v-else>▶</span> ⏰ 定时消息
+                </h3>
+                <div v-show="configSections.periodic" class="space-y-3">
                     <label class="flex items-center gap-2 text-sm">
                         <input type="checkbox" v-model="roomConfig.features.periodic_message_enabled" class="w-4 h-4">
                         启用定时消息（仅在开播时发送）
@@ -2867,11 +2886,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <hr>
-                <h3 class="text-sm font-bold">👤 UID特定欢迎模板</h3>
+                <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('uidWelcome')">
+                    <span v-if="configSections.uidWelcome">▼</span><span v-else>▶</span> 👤 UID特定欢迎模板
+                </h3>
+                <div v-show="configSections.uidWelcome">
                 <p class="text-xs text-gray-500">为特定UID的用户设置专属欢迎词（优先级高于默认和大航海欢迎）。</p>
                 <div class="border rounded p-3 bg-gray-50 flex items-center justify-between">
                     <span class="text-xs text-gray-500">共 {{ (roomConfig.features.welcome_templates_for_uids_entries||[]).length }} 条配置</span>
                     <button @click="openUidWelcomeModal" class="text-blue-500 text-xs underline">✏️ 编辑</button>
+                </div>
                 </div>
 
                 <!-- UID欢迎模板编辑弹窗 -->
@@ -3702,6 +3725,23 @@ createApp({
         const applyBotTemplate = ref('');
         const applyTemplateMsg = ref('');
         const applyTemplateOk = ref(false);
+
+        // 配置区折叠状态（默认全部收起，accordion 模式：开一个关其他）
+        const configSections = ref({
+            rateLimit: false,
+            features: false,
+            pk: false,
+            templates: false,
+            periodic: false,
+            uidWelcome: false,
+        });
+        function toggleSection(key) {
+            const next = !configSections.value[key];
+            // 收起所有
+            for (const k in configSections.value) configSections.value[k] = false;
+            // 只打开点击的那个
+            configSections.value[key] = next;
+        }
 
         // LLM Config
         const llmEnabled = ref(false);
@@ -4578,7 +4618,7 @@ createApp({
                 const body = {
                     anchor_uid: newRoomUid.value,
                 };
-                if (newRoomName.value) body.bot_name = newRoomName.value;
+                if (newRoomName.value) body.room_name = newRoomName.value;
                 if (newRoomPort.value && newRoomPort.value !== 8001) body.port = newRoomPort.value;
                 if (newRoomDisplayId.value) body.room_display_id = newRoomDisplayId.value;
                 const res = await fetch('/api/rooms', {
@@ -5511,7 +5551,8 @@ createApp({
                 restartingAll, restartAllMsg, restartAllOk,
                 loadTemplates, saveTemplate, deleteTemplate, restartAllBots, restartSingleBot,
                 applyLlmTemplate, applyBotTemplate, applyTemplateMsg, applyTemplateOk,
-                applyTemplateToLlm, applyTemplateToBot};
+                applyTemplateToLlm, applyTemplateToBot,
+                configSections, toggleSection};
     }
 }).mount('#app');
 </script>
