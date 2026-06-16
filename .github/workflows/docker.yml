@@ -30,7 +30,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
       id-token: write
 
@@ -56,6 +56,26 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 确保 ghcr.io 包可写（首次推送前设置仓库关联）
+        continue-on-error: true
+        run: |
+          PACKAGE="ayabot"
+          # 设置包为公开可见，并关联到当前仓库
+          ORG="${{ github.repository_owner }}"
+          REPO_ID="${{ github.repository_id }}"
+          echo "🔗 Linking $PACKAGE to repo $ORG/... (id=$REPO_ID)"
+          curl -sL -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/orgs/$ORG/packages/container/$PACKAGE/repository-connections" \
+            -d "{\"repository_ids\":[$REPO_ID]}" 2>/dev/null && echo "  ✅ org 级关联成功" || \
+          curl -sL -X PUT \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/user/packages/container/$PACKAGE/repository-connections" \
+            -d "{\"repository_ids\":[$REPO_ID]}" 2>/dev/null && echo "  ✅ user 级关联成功" || \
+          echo "  ⏳ 包尚未创建，首次推送时会自动建立"
 
       - name: Extract metadata for Docker Hub
         id: meta_hub
