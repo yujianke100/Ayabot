@@ -1983,12 +1983,13 @@ async def api_get_danmaku_log(room_id: str = "", limit: int = 50, offset: int = 
     try:
         db_path = _room_db_path(room_id) if room_id else Path(_DB_PATH)
         if not db_path.exists():
-            return {"rows": []}
+            return {"rows": [], "total": 0}
         from app.storage import StatsStore
         store = StatsStore(str(db_path))
         rows = store.get_danmaku_log(limit=limit, offset=offset)
+        total = store.get_danmaku_log_count()
         store.close()
-        return {"rows": rows}
+        return {"rows": rows, "total": total}
     except Exception as exc:
         logger.exception("danmaku_log get failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -2648,6 +2649,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.thanks_enabled" class="w-4 h-4"> 感谢</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.blindbox_enabled" class="w-4 h-4"> 盲盒统计</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.guard_thanks_enabled" class="w-4 h-4"> 大航海感谢</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.like_thanks_enabled" class="w-4 h-4"> 点赞感谢</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.share_thanks_enabled" class="w-4 h-4"> 转发感谢</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.follow_thanks_enabled" class="w-4 h-4"> 关注感谢</label>
 
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.connected_message_enabled" class="w-4 h-4"> 连接消息</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.danmaku_log_enabled" class="w-4 h-4"> 弹幕记录</label>
@@ -2678,6 +2682,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="text-xs text-gray-500 block">欢迎模板
                         <input type="text" v-model="roomConfig.features.welcome_template" placeholder="欢迎{uname}来到直播间" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
+                    <div class="border rounded p-3 bg-gray-50 flex items-center justify-between">
+                        <span class="text-xs text-gray-500">📋 多模板（随机+时段）共 {{ ((roomConfig?.features?.welcome_templates_list||[]).length) }} 条</span>
+                        <button @click="openWelcomeTplModal" class="text-blue-500 text-xs underline">✏️ 编辑</button>
+                    </div>
                     <label class="text-xs text-gray-500 block">感谢模板
                         <input type="text" v-model="roomConfig.features.thanks_template" placeholder="感谢{uname}的{gift_name}x{gift_num}!" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
@@ -2693,17 +2701,32 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="text-xs text-gray-500 block">大航海 - 默认
                         <input type="text" v-model="roomConfig.features.guard_thanks_template_default" placeholder="感谢{uname}开通大航海！" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
+                    <div v-if="roomConfig.features.like_thanks_enabled" class="border rounded p-3 bg-gray-50 mt-2">
+                        <h4 class="text-xs font-bold text-gray-600">👍 点赞感谢</h4>
+                        <label class="text-xs text-gray-500 block">模板
+                            <input type="text" v-model="roomConfig.features.like_thanks_template" placeholder="感谢 {uname} 的点赞~" class="border p-2 rounded w-full text-sm mt-1">
+                            <span class="text-gray-400 text-[10px]">支持占位符: {uname}用户名</span>
+                        </label>
+                    </div>
+                    <div v-if="roomConfig.features.share_thanks_enabled" class="border rounded p-3 bg-gray-50 space-y-2 mt-2">
+                        <h4 class="text-xs font-bold text-gray-600">🔁 转发感谢</h4>
+                        <label class="text-xs text-gray-500 block">模板
+                            <input type="text" v-model="roomConfig.features.share_thanks_template" placeholder="感谢 {uname} 的分享~" class="border p-2 rounded w-full text-sm mt-1">
+                            <span class="text-gray-400 text-[10px]">支持占位符: {uname}用户名</span>
+                        </label>
+                    </div>
+                    <div v-if="roomConfig.features.follow_thanks_enabled" class="border rounded p-3 bg-gray-50 space-y-2 mt-2">
+                        <h4 class="text-xs font-bold text-gray-600">❤️ 关注感谢</h4>
+                        <label class="text-xs text-gray-500 block">模板
+                            <input type="text" v-model="roomConfig.features.follow_thanks_template" placeholder="感谢 {uname} 的关注~" class="border p-2 rounded w-full text-sm mt-1">
+                            <span class="text-gray-400 text-[10px]">支持占位符: {uname}用户名</span>
+                        </label>
+                    </div>
                     <h4 class="text-xs font-bold text-gray-600 mt-2">大航海欢迎（优先级高于默认欢迎模板）</h4>
-                    <label class="text-xs text-gray-500 block">舰长欢迎
-                        <input type="text" v-model="roomConfig.features.guard_welcome_templates.captain" placeholder="欢迎舰长{uname}！" class="border p-2 rounded w-full text-sm mt-1">
-                    </label>
-                    <label class="text-xs text-gray-500 block">提督欢迎
-                        <input type="text" v-model="roomConfig.features.guard_welcome_templates.commander" placeholder="欢迎提督{uname}！" class="border p-2 rounded w-full text-sm mt-1">
-                    </label>
-                    <label class="text-xs text-gray-500 block">总督欢迎
-                        <input type="text" v-model="roomConfig.features.guard_welcome_templates.governor" placeholder="欢迎总督{uname}！" class="border p-2 rounded w-full text-sm mt-1">
-                    </label>
-
+                    <div class="border rounded p-3 bg-gray-50 flex items-center justify-between">
+                        <span class="text-xs text-gray-500">📋 多模板（随机+时段）共 {{ guardWelcomeTotal }} 条</span>
+                        <button @click="openGuardWelcomeTplModal" class="text-blue-500 text-xs underline">✏️ 编辑</button>
+                    </div>
                     <label class="text-xs text-gray-500 block">连接消息
                         <input type="text" v-model="roomConfig.features.connected_message" placeholder="来了喵~" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
@@ -2740,9 +2763,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
                             <span class="text-xs text-gray-400">默认 600 秒（10 分钟）</span>
                         </label>
                     </div>
-                    <label class="text-xs text-gray-500 block">消息内容
+                    <div class="border rounded p-3 bg-gray-50 flex items-center justify-between">
+                        <span class="text-xs text-gray-500">📋 多模板（随机+时段）共 {{ ((roomConfig?.features?.periodic_messages_list||[]).length) }} 条</span>
+                        <button @click="openPeriodicTplModal" class="text-blue-500 text-xs underline">✏️ 编辑</button>
+                    </div>
+                    <label class="text-xs text-gray-500 block">旧版单模板（降级）
                         <input type="text" v-model="roomConfig.features.periodic_message_template" placeholder="欢迎关注直播间~点个关注不迷路！" class="border p-2 rounded w-full text-sm mt-1">
-                        <span class="text-xs text-gray-400">留空则不发送定时消息</span>
+                        <span class="text-xs text-gray-400">新版多模板填空时使用此项</span>
                     </label>
                 </div>
 
@@ -2775,8 +2802,20 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                         <input type="text" v-model="wt.template" class="border p-1 rounded w-full text-sm mt-1" placeholder="欢迎{uname}！">
                                     </label>
                                 </div>
+                                <label class="flex items-center gap-1 text-xs text-gray-500 mt-1">
+                                    <input type="checkbox" v-model="wt.allDay" class="w-3.5 h-3.5" @change="wt.time_start=0; wt.time_end=23">
+                                    全天生效
+                                </label>
+                                <div v-if="!wt.allDay" class="grid grid-cols-2 gap-2">
+                                    <label class="text-xs text-gray-500">起始小时
+                                        <input type="number" v-model.number="wt.time_start" min="0" max="23" class="border p-1 rounded w-full text-sm mt-1">
+                                    </label>
+                                    <label class="text-xs text-gray-500">结束小时
+                                        <input type="number" v-model.number="wt.time_end" min="0" max="23" class="border p-1 rounded w-full text-sm mt-1">
+                                    </label>
+                                </div>
                             </div>
-                            <button @click="uidWelcomeEditEntries.push({uid: 0, template: ''})" class="text-blue-500 text-xs underline">➕ 添加</button>
+                            <button @click="uidWelcomeEditEntries.push({uid: 0, template: '', time_start: 0, time_end: 23, allDay: true})" class="text-blue-500 text-xs underline">➕ 添加</button>
                         </div>
                         <div class="p-4 border-t flex items-center gap-2 justify-end">
                             <button @click="closeUidWelcomeModal" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
@@ -2829,8 +2868,20 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                 <label class="text-xs text-gray-500">限制UID（逗号分隔，留空=全部用户）
                                     <input type="text" v-model="rule.allowedUidsStr" class="border p-1 rounded w-full text-sm mt-1" placeholder="12345, 67890">
                                 </label>
+                                <label class="flex items-center gap-1 text-xs text-gray-500 mt-1">
+                                    <input type="checkbox" v-model="rule.allDay" class="w-3.5 h-3.5" @change="rule.time_start=0; rule.time_end=23">
+                                    全天生效
+                                </label>
+                                <div v-if="!rule.allDay" class="grid grid-cols-2 gap-2">
+                                    <label class="text-xs text-gray-500">起始小时
+                                        <input type="number" v-model.number="rule.time_start" min="0" max="23" class="border p-1 rounded w-full text-sm mt-1">
+                                    </label>
+                                    <label class="text-xs text-gray-500">结束小时
+                                        <input type="number" v-model.number="rule.time_end" min="0" max="23" class="border p-1 rounded w-full text-sm mt-1">
+                                    </label>
+                                </div>
                             </div>
-                            <button @click="keywordEditRules.push({keywordsStr: '', reply: '', match_mode: 'contains', allowedUidsStr: ''})" class="text-blue-500 text-xs underline">➕ 添加规则</button>
+                            <button @click="keywordEditRules.push({keywordsStr: '', reply: '', match_mode: 'contains', allowedUidsStr: '', time_start: 0, time_end: 23, allDay: true})" class="text-blue-500 text-xs underline">➕ 添加规则</button>
                         </div>
                         <div class="p-4 border-t flex items-center gap-2 justify-end">
                             <button @click="closeKeywordModal" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
@@ -2839,32 +2890,165 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     </div>
                 </div>
 
+                <!-- ── 欢迎模板多模板编辑弹窗 ── -->
+                <div v-if="showWelcomeTplModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showWelcomeTplModal = false">
+                    <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4 max-h-[80vh] flex flex-col" @click.stop>
+                        <div class="p-4 border-b flex items-center justify-between">
+                            <h3 class="font-bold text-lg">📝 欢迎多模板</h3>
+                            <button @click="showWelcomeTplModal = false" class="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+                        </div>
+                        <div class="p-4 overflow-y-auto flex-1 space-y-3">
+                            <p class="text-xs text-gray-500">每条模板可设置生效时段，机器人每次随机选一条当前时段生效的发送。</p>
+                            <div v-for="(t, ti) in welcomeTplEntries" :key="ti" class="border rounded p-3 bg-gray-50 space-y-2">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-xs font-bold">模板 #{{ ti+1 }}</span>
+                                    <button @click="welcomeTplEntries.splice(ti, 1)" class="text-red-400 text-xs underline">删除</button>
+                                </div>
+                                <label class="text-xs text-gray-500">内容（支持 {uname}）
+                                    <input type="text" v-model="t.text" class="border p-1 rounded w-full text-sm mt-1" placeholder="欢迎 {uname} 来到直播间喵~">
+                                </label>
+                                <label class="flex items-center gap-1 text-xs text-gray-500 mt-1">
+                                    <input type="checkbox" v-model="t.allDay" class="w-3.5 h-3.5" @change="t.time_start=0; t.time_end=23">
+                                    全天生效
+                                </label>
+                                <div v-if="!t.allDay" class="grid grid-cols-2 gap-2">
+                                    <label class="text-xs text-gray-500">起始小时
+                                        <input type="number" v-model.number="t.time_start" min="0" max="23" class="border p-1 rounded w-full text-sm mt-1">
+                                    </label>
+                                    <label class="text-xs text-gray-500">结束小时
+                                        <input type="number" v-model.number="t.time_end" min="0" max="23" class="border p-1 rounded w-full text-sm mt-1">
+                                    </label>
+                                </div>
+                                <p class="text-[10px] text-gray-400">起始≤结束=当天时段，起始>结束=跨天（如 22~6 是深夜到凌晨）</p>
+                            </div>
+                            <button @click="welcomeTplEntries.push({text: '', time_start: 0, time_end: 23})" class="text-blue-500 text-xs underline">➕ 添加模板</button>
+                        </div>
+                        <div class="p-4 border-t flex items-center gap-2 justify-end">
+                            <button @click="showWelcomeTplModal = false" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
+                            <button @click="saveWelcomeTplModal" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">保存</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ── 大航海欢迎多模板编辑弹窗 ── -->
+                <div v-if="showGuardWelcomeTplModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showGuardWelcomeTplModal = false">
+                    <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4 max-h-[80vh] flex flex-col" @click.stop>
+                        <div class="p-4 border-b flex items-center justify-between">
+                            <h3 class="font-bold text-lg">🛳️ 大航海欢迎多模板</h3>
+                            <button @click="showGuardWelcomeTplModal = false" class="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+                        </div>
+                        <div class="p-4 overflow-y-auto flex-1 space-y-4">
+                            <p class="text-xs text-gray-500">每个等级可配置多条模板，支持时段，随机选择。</p>
+                            <div v-for="(level, lk) in {'captain':'舰长','commander':'提督','governor':'总督'}" :key="lk" class="border rounded p-3 bg-gray-100">
+                                <h4 class="text-xs font-bold mb-2">{{ level }} <span class="text-gray-400">({{ lk }})</span></h4>
+                                <div v-for="(t, ti) in (guardWelcomeTplEntries[lk]||[])" :key="ti" class="border-t border-gray-200 pt-2 mt-2 space-y-1">
+                                    <div class="flex items-center justify-between">
+                                        <span class="text-[10px] text-gray-400">#{{ ti+1 }}</span>
+                                        <button @click="guardWelcomeTplEntries[lk].splice(ti, 1)" class="text-red-400 text-[10px] underline">删除</button>
+                                    </div>
+                                    <label class="text-xs text-gray-500">内容
+                                        <input type="text" v-model="t.text" class="border p-1 rounded w-full text-sm mt-1" :placeholder="'欢迎'+level+'{uname}~'">
+                                    </label>
+                                    <label class="flex items-center gap-1 text-[10px] text-gray-500 mt-1">
+                                        <input type="checkbox" v-model="t.allDay" class="w-3 h-3" @change="t.time_start=0; t.time_end=23">
+                                        全天生效
+                                    </label>
+                                    <div v-if="!t.allDay" class="grid grid-cols-2 gap-2">
+                                        <label class="text-xs text-gray-500">起始
+                                            <input type="number" v-model.number="t.time_start" min="0" max="23" class="border p-1 rounded w-full text-sm">
+                                        </label>
+                                        <label class="text-xs text-gray-500">结束
+                                            <input type="number" v-model.number="t.time_end" min="0" max="23" class="border p-1 rounded w-full text-sm">
+                                        </label>
+                                    </div>
+                                </div>
+                                <button @click="addGuardTpl(lk)" class="text-blue-500 text-[10px] underline mt-1">➕ 添加{{ level }}模板</button>
+                            </div>
+                        </div>
+                        <div class="p-4 border-t flex items-center gap-2 justify-end">
+                            <button @click="showGuardWelcomeTplModal = false" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
+                            <button @click="saveGuardWelcomeTplModal" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">保存</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ── 定时消息多模板编辑弹窗 ── -->
+                <div v-if="showPeriodicTplModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showPeriodicTplModal = false">
+                    <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4 max-h-[80vh] flex flex-col" @click.stop>
+                        <div class="p-4 border-b flex items-center justify-between">
+                            <h3 class="font-bold text-lg">⏰ 定时消息多模板</h3>
+                            <button @click="showPeriodicTplModal = false" class="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+                        </div>
+                        <div class="p-4 overflow-y-auto flex-1 space-y-3">
+                            <p class="text-xs text-gray-500">每条消息可设置生效时段，机器人每次随机选一条当前时段生效的发送。</p>
+                            <div v-for="(t, ti) in periodicTplEntries" :key="ti" class="border rounded p-3 bg-gray-50 space-y-2">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-xs font-bold">消息 #{{ ti+1 }}</span>
+                                    <button @click="periodicTplEntries.splice(ti, 1)" class="text-red-400 text-xs underline">删除</button>
+                                </div>
+                                <label class="text-xs text-gray-500">内容
+                                    <input type="text" v-model="t.text" class="border p-1 rounded w-full text-sm mt-1" placeholder="点个关注不迷路喵~">
+                                </label>
+                                <label class="flex items-center gap-1 text-xs text-gray-500 mt-1">
+                                    <input type="checkbox" v-model="t.allDay" class="w-3.5 h-3.5" @change="t.time_start=0; t.time_end=23">
+                                    全天生效
+                                </label>
+                                <div v-if="!t.allDay" class="grid grid-cols-2 gap-2">
+                                    <label class="text-xs text-gray-500">起始小时
+                                        <input type="number" v-model.number="t.time_start" min="0" max="23" class="border p-1 rounded w-full text-sm mt-1">
+                                    </label>
+                                    <label class="text-xs text-gray-500">结束小时
+                                        <input type="number" v-model.number="t.time_end" min="0" max="23" class="border p-1 rounded w-full text-sm mt-1">
+                                    </label>
+                                </div>
+                                <p class="text-[10px] text-gray-400">起始≤结束=当天，起始>结束=跨天（如 22~6）</p>
+                            </div>
+                            <button @click="periodicTplEntries.push({text: '', time_start: 0, time_end: 23})" class="text-blue-500 text-xs underline">➕ 添加消息</button>
+                        </div>
+                        <div class="p-4 border-t flex items-center gap-2 justify-end">
+                            <button @click="showPeriodicTplModal = false" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
+                            <button @click="savePeriodicTplModal" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">保存</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ── 签文多文本编辑弹窗 ── -->
+                <div v-if="showFortuneTplModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showFortuneTplModal = false">
+                    <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4 max-h-[80vh] flex flex-col" @click.stop>
+                        <div class="p-4 border-b flex items-center justify-between">
+                            <h3 class="font-bold text-lg">🎴 签文编辑</h3>
+                            <button @click="showFortuneTplModal = false" class="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+                        </div>
+                        <div class="p-4 overflow-y-auto flex-1 space-y-4">
+                            <p class="text-xs text-gray-500">每个类型可添加多条签文，抽签时随机选一条使用。留空则使用默认签文。</p>
+                            <div v-for="(ft, fti) in fortuneTypes" :key="ft.key" class="border rounded p-3 bg-gray-50">
+                                <h4 class="text-xs font-bold mb-1">{{ ft.label }}</h4>
+                                <div v-for="(txt, txi) in (fortuneTplEntries[ft.key]||[])" :key="txi" class="flex items-center gap-2 mb-1">
+                                    <input type="text" v-model="fortuneTplEntries[ft.key][txi]" class="border p-1 rounded w-full text-sm" :placeholder="ft.placeholder">
+                                    <button @click="fortuneTplEntries[ft.key].splice(txi, 1)" class="text-red-400 text-xs underline shrink-0">删</button>
+                                </div>
+                                <button @click="addFortuneText(ft.key)" class="text-blue-500 text-[10px] underline mt-1">➕ 添加{{ ft.label }}签文</button>
+                            </div>
+                        </div>
+                        <div class="p-4 border-t flex items-center gap-2 justify-end">
+                            <button @click="showFortuneTplModal = false" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
+                            <button @click="saveFortuneTplModal" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">保存</button>
+                        </div>
+                    </div>
+                </div>
+
                 <hr>
                 <h3 class="text-sm font-bold">🎴 自定义签文</h3>
-                <p class="text-xs text-gray-500">修改 #抽签 命令的签文内容。每种签类型一句即可，留空使用默认。</p>
-                <label class="text-xs text-gray-500">大吉
-                    <input type="text" v-model="roomConfig.custom_fortunes.daiji" class="border p-2 rounded w-full text-sm mt-1" placeholder="今天运气爆棚！">
-                </label>
-                <label class="text-xs text-gray-500">中吉
-                    <input type="text" v-model="roomConfig.custom_fortunes.zhongji" class="border p-2 rounded w-full text-sm mt-1">
-                </label>
-                <label class="text-xs text-gray-500">小吉
-                    <input type="text" v-model="roomConfig.custom_fortunes.xiaoji" class="border p-2 rounded w-full text-sm mt-1">
-                </label>
-                <label class="text-xs text-gray-500">末吉
-                    <input type="text" v-model="roomConfig.custom_fortunes.moji" class="border p-2 rounded w-full text-sm mt-1">
-                </label>
-                <label class="text-xs text-gray-500">凶
-                    <input type="text" v-model="roomConfig.custom_fortunes.xiong" class="border p-2 rounded w-full text-sm mt-1">
-                </label>
-                <label class="text-xs text-gray-500">大凶
-                    <input type="text" v-model="roomConfig.custom_fortunes.daxiong" class="border p-2 rounded w-full text-sm mt-1">
-                </label>
+                <p class="text-xs text-gray-500">修改 #抽签 命令的签文内容。每个类型可填多条，随机选。留空用默认。</p>
+                <div class="border rounded p-3 bg-gray-50 flex items-center justify-between">
+                    <span class="text-xs text-gray-500">📋 全部签文共 {{ fortuneTotalEntries }} 条</span>
+                    <button @click="openFortuneTplModal" class="text-blue-500 text-xs underline">✏️ 编辑</button>
+                </div>
 
                 <div class="flex items-center gap-4 mt-4 flex-wrap">
                     <button @click="saveRoomConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
                     <span v-if="roomSaveMsg" class="text-sm" :class="roomSaveOk ? 'text-green-600' : 'text-red-500'">{{ roomSaveMsg }}</span>
-                    <span v-if="roomSaveOk" class="text-xs text-yellow-600">💡 配置已保存，需重启机器人才能生效</span>
+                    <span v-if="roomSaveOk" class="text-xs text-yellow-600">💡 更改配置后需重启机器人才能生效</span>
                     <button v-if="selectedRoom" @click="restartSingleBot(selectedRoom.room_id)" class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-2 rounded text-sm text-xs">🔄 重启此机器人</button>
                     <button @click="editRoomConfig(selectedRoom?.room_id)" class="text-gray-500 hover:text-gray-700 underline text-sm">刷新</button>
                 </div>
@@ -2927,9 +3111,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                     :class="danmakuOffset === 0 ? 'text-gray-300 cursor-not-allowed' : 'hover:bg-gray-100'">上一页</button>
                             <span class="text-gray-500">第 {{ danmakuPage }} 页</span>
                             <button @click="danmakuOffset += danmakuLimit"
-                                    :disabled="danmakuRows.length < danmakuLimit"
+                                    :disabled="danmakuOffset + danmakuLimit >= danmakuTotal"
                                     class="px-3 py-1 rounded border text-sm"
-                                    :class="danmakuRows.length < danmakuLimit ? 'text-gray-300 cursor-not-allowed' : 'hover:bg-gray-100'">下一页</button>
+                                    :class="danmakuOffset + danmakuLimit >= danmakuTotal ? 'text-gray-300 cursor-not-allowed' : 'hover:bg-gray-100'">下一页</button>
                         </div>
                     </div>
                 </div>
@@ -3951,6 +4135,7 @@ createApp({
                 if (!res.ok) throw new Error((await res.text()).slice(0,80));
                 const data = await res.json();
                 danmakuRows.value = data.rows || [];
+                danmakuTotal.value = data.total || 0;
             } catch(e) { danmakuErr.value = '加载失败: ' + e.message; }
         }
         async function clearDanmakuLog() {
@@ -3966,6 +4151,8 @@ createApp({
                 danmakuRows.value = [];
                 danmakuOffset.value = 0;
                 danmakuTotal.value = 0;
+                // 重新加载弹幕记录列表
+                loadDanmakuLog();
             } catch(e) { danmakuErr.value = '清空失败: ' + e.message; }
         }
         function fmtDanmakuTime(ts) {
@@ -3973,6 +4160,10 @@ createApp({
             const d = new Date(ts * 1000);
             return d.toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
         }
+        // 翻页时自动重新加载弹幕
+        Vue.watch([danmakuOffset, danmakuLimit], () => {
+            if (selectedRoom.value?.room_id) loadDanmakuLog();
+        });
 
         // ── LLM Config ──
         async function loadLlmConfig() {
@@ -4800,7 +4991,12 @@ createApp({
         const showUidWelcomeModal = ref(false);
         const uidWelcomeEditEntries = ref([]);
         function openUidWelcomeModal() {
-            uidWelcomeEditEntries.value = JSON.parse(JSON.stringify(roomConfig.value.features.welcome_templates_for_uids_entries || []));
+            const raw = roomConfig.value.features.welcome_templates_for_uids_entries || [];
+            uidWelcomeEditEntries.value = raw.map(e => {
+                const entry = JSON.parse(JSON.stringify(e));
+                entry.allDay = (entry.time_start === 0 && entry.time_end === 23);
+                return entry;
+            });
             showUidWelcomeModal.value = true;
         }
         function closeUidWelcomeModal() {
@@ -4808,7 +5004,11 @@ createApp({
             uidWelcomeEditEntries.value = [];
         }
         function saveUidWelcomeModal() {
-            roomConfig.value.features.welcome_templates_for_uids_entries = JSON.parse(JSON.stringify(uidWelcomeEditEntries.value));
+            roomConfig.value.features.welcome_templates_for_uids_entries =
+                JSON.parse(JSON.stringify(uidWelcomeEditEntries.value.map(e => ({
+                    uid: e.uid, template: e.template,
+                    time_start: e.time_start || 0, time_end: e.time_end || 23,
+                }))));
             closeUidWelcomeModal();
         }
         function addUidWelcomeTemplate() {
@@ -4826,6 +5026,9 @@ createApp({
                 ...r,
                 keywordsStr: r.keywordsStr || (r.keywords || []).join(", "),
                 allowedUidsStr: r.allowedUidsStr || (r.allowed_uids || []).join(", "),
+                time_start: r.time_start || 0,
+                time_end: r.time_end || 23,
+                allDay: (r.time_start === 0 && r.time_end === 23),
             }))));
             showKeywordModal.value = true;
         }
@@ -4834,9 +5037,125 @@ createApp({
             keywordEditRules.value = [];
         }
         function saveKeywordModal() {
-            roomConfig.value.keyword_reply.rules = JSON.parse(JSON.stringify(keywordEditRules.value));
+            roomConfig.value.keyword_reply.rules = JSON.parse(JSON.stringify(keywordEditRules.value.map(r => ({
+                ...r,
+                time_start: r.time_start || 0,
+                time_end: r.time_end || 23,
+            }))));
             closeKeywordModal();
         }
+
+        // ── 欢迎多模板弹窗 ──
+        const showWelcomeTplModal = ref(false);
+        const welcomeTplEntries = ref([]);
+        function openWelcomeTplModal() {
+            welcomeTplEntries.value = JSON.parse(JSON.stringify(roomConfig.value.features.welcome_templates_list || []));
+            // 补齐 allDay 字段
+            welcomeTplEntries.value.forEach(e => { if (e.time_start === 0 && e.time_end === 23) e.allDay = true; else e.allDay = false; });
+            showWelcomeTplModal.value = true;
+        }
+        function saveWelcomeTplModal() {
+            const valid = welcomeTplEntries.value.filter(e => e.text && e.text.trim());
+            roomConfig.value.features.welcome_templates_list = valid.length ? valid.map(e => ({text: e.text, time_start: e.time_start || 0, time_end: e.time_end || 23})) : null;
+            showWelcomeTplModal.value = false;
+        }
+        // ── 大航海欢迎多模板弹窗 ──
+        const showGuardWelcomeTplModal = ref(false);
+        const guardWelcomeTplEntries = ref({captain: [], commander: [], governor: []});
+        function openGuardWelcomeTplModal() {
+            const src = roomConfig.value.features.guard_welcome_templates_list || {};
+            function load(lk) {
+                const arr = JSON.parse(JSON.stringify(src[lk] || []));
+                arr.forEach(e => { if (e.time_start === 0 && e.time_end === 23) e.allDay = true; else e.allDay = false; });
+                return arr;
+            }
+            guardWelcomeTplEntries.value = {
+                captain: load('captain'),
+                commander: load('commander'),
+                governor: load('governor'),
+            };
+            showGuardWelcomeTplModal.value = true;
+        }
+        function saveGuardWelcomeTplModal() {
+            function save(lk) {
+                return (guardWelcomeTplEntries.value[lk] || []).filter(e => e.text && e.text.trim()).map(e => ({text: e.text, time_start: e.time_start || 0, time_end: e.time_end || 23}));
+            }
+            const out = {};
+            for (const lk of ['captain', 'commander', 'governor']) {
+                const valid = save(lk);
+                if (valid.length) out[lk] = valid;
+            }
+            roomConfig.value.features.guard_welcome_templates_list = Object.keys(out).length ? out : null;
+            showGuardWelcomeTplModal.value = false;
+        }
+        function addGuardTpl(level) {
+            if (!guardWelcomeTplEntries.value[level]) guardWelcomeTplEntries.value[level] = [];
+            guardWelcomeTplEntries.value[level].push({text: '', time_start: 0, time_end: 23, allDay: true});
+        }
+        // ── 定时消息多模板弹窗 ──
+        const showPeriodicTplModal = ref(false);
+        const periodicTplEntries = ref([]);
+        function openPeriodicTplModal() {
+            periodicTplEntries.value = JSON.parse(JSON.stringify(roomConfig.value.features.periodic_messages_list || []));
+            periodicTplEntries.value.forEach(e => { if (e.time_start === 0 && e.time_end === 23) e.allDay = true; else e.allDay = false; });
+            showPeriodicTplModal.value = true;
+        }
+        function savePeriodicTplModal() {
+            const valid = periodicTplEntries.value.filter(e => e.text && e.text.trim());
+            roomConfig.value.features.periodic_messages_list = valid.length ? valid.map(e => ({text: e.text, time_start: e.time_start || 0, time_end: e.time_end || 23})) : null;
+            showPeriodicTplModal.value = false;
+        }
+        // ── 签文多文本弹窗 ──
+        const showFortuneTplModal = ref(false);
+        const fortuneTypes = [
+            {key: 'daiji', label: '大吉', placeholder: '今天运气爆棚！'},
+            {key: 'zhongji', label: '中吉', placeholder: '运势不错~'},
+            {key: 'xiaoji', label: '小吉', placeholder: '平稳的一天~'},
+            {key: 'moji', label: '末吉', placeholder: '平淡是福~'},
+            {key: 'xiong', label: '凶', placeholder: '今天低调行事~'},
+            {key: 'daxiong', label: '大凶', placeholder: '吃顿好的安慰自己~'},
+        ];
+        const fortuneTplEntries = ref({daiji: [], zhongji: [], xiaoji: [], moji: [], xiong: [], daxiong: []});
+        function openFortuneTplModal() {
+            const src = roomConfig.value.custom_fortunes || {};
+            const out = {};
+            for (const ft of fortuneTypes) {
+                const val = src[ft.key];
+                if (Array.isArray(val)) {
+                    out[ft.key] = JSON.parse(JSON.stringify(val));
+                } else if (typeof val === 'string' && val) {
+                    out[ft.key] = [val];
+                } else {
+                    out[ft.key] = [];
+                }
+            }
+            fortuneTplEntries.value = out;
+            showFortuneTplModal.value = true;
+        }
+        function saveFortuneTplModal() {
+            const out = {};
+            for (const ft of fortuneTypes) {
+                const arr = (fortuneTplEntries.value[ft.key] || []).filter(t => t && t.trim());
+                if (arr.length) {
+                    out[ft.key] = arr;
+                }
+            }
+            roomConfig.value.custom_fortunes = Object.keys(out).length ? out : {};
+            showFortuneTplModal.value = false;
+        }
+        function addFortuneText(key) {
+            if (!fortuneTplEntries.value[key]) fortuneTplEntries.value[key] = [];
+            fortuneTplEntries.value[key].push('');
+        }
+        // ── 计算属性: 统计条数 ──
+        const guardWelcomeTotal = computed(() => {
+            const gwl = roomConfig.value.features.guard_welcome_templates_list || {};
+            return (gwl.captain||[]).length + (gwl.commander||[]).length + (gwl.governor||[]).length;
+        });
+        const fortuneTotalEntries = computed(() => {
+            const cf = roomConfig.value.custom_fortunes || {};
+            return Object.values(cf).reduce((sum, arr) => sum + (Array.isArray(arr) ? arr.length : (arr ? 1 : 0)), 0);
+        });
 
         // ── 预设模板管理 ──
         async function loadTemplates() {
@@ -5039,6 +5358,11 @@ createApp({
                 addUidWelcomeTemplate, removeUidWelcomeTemplate,
                 showUidWelcomeModal, uidWelcomeEditEntries, openUidWelcomeModal, closeUidWelcomeModal, saveUidWelcomeModal,
                 showKeywordModal, keywordEditRules, openKeywordModal, closeKeywordModal, saveKeywordModal,
+                showWelcomeTplModal, welcomeTplEntries, openWelcomeTplModal, saveWelcomeTplModal,
+                showGuardWelcomeTplModal, guardWelcomeTplEntries, openGuardWelcomeTplModal, saveGuardWelcomeTplModal, addGuardTpl,
+                showPeriodicTplModal, periodicTplEntries, openPeriodicTplModal, savePeriodicTplModal,
+                showFortuneTplModal, fortuneTypes, fortuneTplEntries, openFortuneTplModal, saveFortuneTplModal, addFortuneText,
+                guardWelcomeTotal, fortuneTotalEntries,
                 llmTemplates, botTemplates, showAddTemplate, templateFormName, templateFormImportRoom,
                 savingTemplate, templateFormMsg, templateFormOk, newRoomLlmTemplate, newRoomBotTemplate,
                 restartingAll, restartAllMsg, restartAllOk,

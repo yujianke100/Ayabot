@@ -11,6 +11,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    # Python < 3.9 fallback
+    ZoneInfo = None  # type: ignore[assignment,misc]
+
 from bilibili_api import Credential, live
 from bilibili_api.utils.danmaku import Danmaku
 
@@ -51,10 +57,6 @@ class LiveRobot:
         self._danmaku: Optional[live.LiveDanmaku] = None
         self._danmaku_task: Optional[asyncio.Task[None]] = None
 
-        self._welcome_enabled = config.features.welcome_enabled
-        self._welcome_template = config.features.welcome_template
-        self._thanks_template = config.features.thanks_template
-
         self._last_welcome_ts: dict[int, float] = {}
         self._last_thanks_ts: dict[int, float] = {}
 
@@ -64,6 +66,17 @@ class LiveRobot:
         self._admin_uids: set[int] = set()
         self._periodic_task: Optional[asyncio.Task[None]] = None
         self._keyword_reply_cooldown_ts: dict[int, float] = {}
+
+        # 弹幕去重：(uid, text) -> 上次记录时间戳
+        self._recent_danmaku: dict[tuple[int, str], float] = {}
+        # 欢迎串行化锁（B站 create_task 并发推送多个事件，用锁保证一次只处理一个欢迎）
+        self._welcome_lock: asyncio.Lock = asyncio.Lock()
+
+        # PK 状态追踪，防重复触发
+        self._in_pk: bool = False
+
+        # 点赞计数: uid -> 累计点赞数（用于 ≥阈值 时一次性感谢）
+        self._like_counts: dict[int, int] = {}
 
         # 从配置读取唤醒词
         wake = getattr(config.llm, 'wake_word', 'ayabot')
@@ -78,6 +91,8 @@ class LiveRobot:
                 self._bot_uid = _safe_int(cookies.get("DedeUserID", 0))
             except Exception:
                 pass
+        # 根据配置设置时区（影响时段模板匹配）
+        set_bot_timezone(config.runtime.timezone)
         self.logger.info("bot uid set to %s (config=%s)", self._bot_uid, config.credential.dedeuserid)
 
     async def run(self) -> None:
@@ -111,6 +126,7 @@ class LiveRobot:
             self._periodic_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._periodic_task
+        self._in_pk = False
         self.store.close()
 
     async def _is_room_live(self) -> bool:
@@ -129,8 +145,6 @@ class LiveRobot:
         )
 
         self._danmaku.on("INTERACT_WORD_V2")(self._on_enter_room)
-        self._danmaku.on("WELCOME")(self._on_enter_room)
-        self._danmaku.on("WELCOME_GUARD")(self._on_enter_room)
 
         self._danmaku.on("SEND_GIFT")(self._on_gift)
         self._danmaku.on("COMBO_SEND")(self._on_gift)
@@ -141,6 +155,7 @@ class LiveRobot:
         self._danmaku.on("USER_TOAST_MSG")(self._on_guard_buy)
         self._danmaku.on("USER_TOAST_MSG_V2")(self._on_guard_buy)
 
+        self._danmaku.on("LIKE_INFO_V3_CLICK")(self._on_like)
         self._danmaku.on("ROOM_ADMINS")(self._on_room_admins)
         self._danmaku.on("DANMU_MSG")(self._on_danmaku)
 
@@ -158,7 +173,7 @@ class LiveRobot:
         self._danmaku_task = asyncio.create_task(_run_connect())
         self.logger.info("danmaku connected")
         # 记录开播日期
-        self.store.record_stream_date(datetime.now().strftime("%Y-%m-%d"))
+        self.store.record_stream_date(_now().strftime("%Y-%m-%d"))
 
     async def _stop_danmaku(self) -> None:
         if self._danmaku is not None:
@@ -176,22 +191,45 @@ class LiveRobot:
         self._danmaku_task = None
 
     async def _periodic_message_loop(self) -> None:
-        """定时发送提醒消息."""
+        """定时发送提醒消息（支持多模板随机+时段）。"""
         if not self.config.features.periodic_message_enabled:
             return
         interval = max(self.config.features.periodic_message_interval_seconds, 30)
-        template = self.config.features.periodic_message_template
-        if not template:
+
+        # 收集可用的定时消息模板
+        periodic_texts: list[str] = []
+        pm_list = self.config.features.periodic_messages_list
+        if pm_list:
+            # 多模板列表，运行时按时段过滤 + 随机
+            pass  # 在循环内处理
+        elif self.config.features.periodic_message_template:
+            # 旧版单模板
+            periodic_texts = [self.config.features.periodic_message_template]
+
+        if not periodic_texts and not pm_list:
             self.logger.info("periodic message disabled: no template configured")
             return
-        self.logger.info("periodic message loop started: interval=%ds template=%s", interval, template)
+
+        self.logger.info("periodic message loop started: interval=%ds templates=%s", interval,
+                         len(pm_list) if pm_list else len(periodic_texts))
         while True:
             await asyncio.sleep(interval)
             if self._danmaku is None:
                 continue  # 不在直播，跳过
-            self._pending_texts.discard(template)
-            self._pending_texts.add(template)
-            await self._msg_queue.put(OutboundMessage(text=template, reply_uid=None))
+
+            text = None
+            if pm_list:
+                # 新版：按时段过滤后随机
+                text = _pick_template_from_list(pm_list, logger=self.logger)
+            if not text and periodic_texts:
+                # 旧版：随机选一条
+                text = random.choice(periodic_texts)
+            if not text:
+                continue
+
+            self._pending_texts.discard(text)
+            self._pending_texts.add(text)
+            await self._msg_queue.put(OutboundMessage(text=text, reply_uid=None))
 
     async def _message_worker(self) -> None:
         min_interval = max(self.config.rate_limit.send_interval_seconds, 0.1)
@@ -313,50 +351,144 @@ class LiveRobot:
         if uid <= 0 or not uname:
             return
 
+        # ── 检测关注/转发事件（INTERACT_WORD_V2 msg_type） ──
         data = event.get("data", {})
-        msg_type = data.get("msg_type") if isinstance(data, dict) else None
-        if not self._welcome_enabled:
+        msg_type = 0
+        if isinstance(data, dict):
+            nested = data.get("data") if isinstance(data.get("data"), dict) else data
+            msg_type = int(nested.get("msg_type", 0))
+
+        self.logger.info("INTERACT_WORD: uid=%s uname=%s msg_type=%s", uid, uname, msg_type)
+
+        if msg_type == 2 and self.config.features.follow_thanks_enabled:
+            template = self.config.features.follow_thanks_template
+            if template:
+                text = template.replace("{uname}", uname)
+                await self._enqueue_message(text=text, reply_uid=uid)
+            return
+        if msg_type == 3 and self.config.features.share_thanks_enabled:
+            template = self.config.features.share_thanks_template
+            if template:
+                text = template.replace("{uname}", uname)
+                await self._enqueue_message(text=text, reply_uid=uid)
             return
 
-        now = time.time()
-        last = self._last_welcome_ts.get(uid, 0.0)
-        if now - last < self.config.cooldown.welcome_user_seconds:
+        if not self.config.features.welcome_enabled:
             return
 
-        self._last_welcome_ts[uid] = now
+        # 使用全局锁串行化欢迎处理：B站通过 create_task 并发推送多个事件，
+        # 必须确保同一 UID 的两次欢迎不会同时进入模板选择逻辑。
+        # 锁内做 cooldown 二次检查——第一个获得锁的协程会设置 _last_welcome_ts，
+        # 后续协程获得锁后检查到仍在冷却期内就返回。
+        async with self._welcome_lock:
+            now = time.time()
+            last = self._last_welcome_ts.get(uid, 0.0)
+            if now - last < self.config.cooldown.welcome_user_seconds:
+                return
+            self._last_welcome_ts[uid] = now
 
-        # Resolve template: uid-specific -> guard-level -> default
-        template = None
-        wtfu = self.config.features.welcome_templates_for_uids
-        if wtfu:
-            # YAML 存储的键可能是字符串，统一转 int 再查
-            if uid in wtfu:
-                template = wtfu[uid]
-            elif str(uid) in wtfu:
-                template = wtfu[str(uid)]
+            # Resolve template: uid-specific -> guard-level -> multi-template list -> default
+            template = None
+            wtfu = self.config.features.welcome_templates_for_uids
+            if wtfu:
+                # YAML 存储的键可能是字符串，统一转 int 再查
+                raw_tpl = None
+                if uid in wtfu:
+                    raw_tpl = wtfu[uid]
+                elif str(uid) in wtfu:
+                    raw_tpl = wtfu[str(uid)]
+                if raw_tpl:
+                    if isinstance(raw_tpl, dict):
+                        # 新版：{template, time_start, time_end}
+                        ts = int(raw_tpl.get("time_start", 0))
+                        te = int(raw_tpl.get("time_end", 23))
+                        if _is_in_time_slot(ts, te):
+                            template = str(raw_tpl.get("template", ""))
+                    elif isinstance(raw_tpl, str):
+                        # 旧版：直接的模板字符串
+                        template = raw_tpl
 
-        if template is None:
-            guard_level = self._get_guard_level(event)
-            if guard_level > 0:
-                self.logger.info("guard welcome: uid=%s uname=%s guard_level=%s", uid, uname, guard_level)
-                gwt = self.config.features.guard_welcome_templates
-                if gwt:
-                    if guard_level == 3:
-                        template = gwt.get("captain")
-                    elif guard_level == 2:
-                        template = gwt.get("commander")
-                    elif guard_level == 1:
-                        template = gwt.get("governor")
-                    if template:
-                        self.logger.info("guard welcome template found: level=%s template=%s", guard_level, template)
-                    else:
-                        self.logger.info("guard welcome template not configured for level=%s, fallback to default", guard_level)
+            if template is None:
+                guard_level = self._get_guard_level(event)
+                if guard_level > 0:
+                    self.logger.info("guard welcome: uid=%s uname=%s guard_level=%s", uid, uname, guard_level)
+                    # 新版大航海多模板列表
+                    gw_list = self.config.features.guard_welcome_templates_list
+                    if gw_list:
+                        level_key = {3: "captain", 2: "commander", 1: "governor"}.get(guard_level)
+                        if level_key and level_key in gw_list:
+                            template = _pick_template_from_list(gw_list[level_key], uname=uname, logger=self.logger)
+                            if template:
+                                self.logger.info("guard welcome from multi-list: level=%s template=%s", level_key, template)
+                    # 降级到旧版单模板
+                    if not template:
+                        gwt = self.config.features.guard_welcome_templates
+                        if gwt:
+                            if guard_level == 3:
+                                template = gwt.get("captain")
+                            elif guard_level == 2:
+                                template = gwt.get("commander")
+                            elif guard_level == 1:
+                                template = gwt.get("governor")
+                            if template:
+                                self.logger.info("guard welcome from single template: level=%s template=%s", guard_level, template)
+                            else:
+                                self.logger.info("guard welcome template not configured for level=%s, fallback to default", guard_level)
 
-        if not template:
-            template = self._welcome_template
+            # 新版普通欢迎多模板列表
+            if not template:
+                wl = self.config.features.welcome_templates_list
+                if wl:
+                    template = _pick_template_from_list(wl, uname=uname, logger=self.logger)
 
-        text = template.replace("{uname}", uname)
-        await self._enqueue_message(text=text, reply_uid=uid)
+            # 最后降级到旧版单模板
+            if not template:
+                template = self.config.features.welcome_template
+
+            if not template:
+                return
+
+            text = template.replace("{uname}", uname)
+            # 欢迎文本去重：相同的内容不重复入队（与 _enqueue_reply 的去重一致）
+            if text in self._pending_texts:
+                self.logger.debug("dedup welcome text: uid=%s text=%s", uid, text)
+                return
+            self._pending_texts.add(text)
+            try:
+                self._msg_queue.put_nowait(OutboundMessage(text=text, reply_uid=uid))
+            except asyncio.QueueFull:
+                self._pending_texts.discard(text)
+                self.logger.warning("queue full, welcome dropped: uid=%s", uid)
+
+    async def _on_like(self, event: dict[str, Any]) -> None:
+        """监听点赞事件，B站已聚合触发，每次事件感谢一次。"""
+        if not self.config.features.like_thanks_enabled:
+            return
+        try:
+            top = event.get("data", {})
+            if not isinstance(top, dict):
+                return
+            raw_data = top.get("data") if isinstance(top.get("data"), dict) else top
+
+            uid = _safe_int(raw_data.get("uid") or 0)
+            uname = str(raw_data.get("uname") or "")
+
+            if uid <= 0 or not uname:
+                return
+
+            # 冷却：同用户 60 秒内只感谢一次
+            now = time.time()
+            last = self._last_thanks_ts.get(uid, 0.0)
+            if now - last < 60:
+                return
+            self._last_thanks_ts[uid] = now
+
+            template = self.config.features.like_thanks_template
+            text = template.replace("{uname}", uname)
+            self.logger.info("LIKE thanks: %s", text)
+            await self._enqueue_message(text=text, reply_uid=uid)
+        except Exception as exc:
+            self.logger.warning("Error processing LIKE_INFO_V3_CLICK: %s", exc)
 
     async def _on_gift(self, event: dict[str, Any]) -> None:
         if not self.config.features.thanks_enabled:
@@ -391,7 +523,7 @@ class LiveRobot:
         actual = blind["actual_value"]
         profit = blind["profit_value"]
 
-        month = datetime.now().strftime("%Y-%m")
+        month = _now().strftime("%Y-%m")
         event_row = GiftEvent(
             ts=int(now),
             month=month,
@@ -416,7 +548,7 @@ class LiveRobot:
         self._last_thanks_ts[uid] = now
 
         thanks = (
-            self._thanks_template.replace("{uname}", uname)
+            self.config.features.thanks_template.replace("{uname}", uname)
             .replace("{gift_name}", gift_name)
             .replace("{gift_num}", str(gift_num))
         )
@@ -487,13 +619,22 @@ class LiveRobot:
             return
 
         if self.config.features.danmaku_log_enabled:
-            self.store.record_danmaku(
-                ts=int(time.time()),
-                uid=uid,
-                uname=uname,
-                content=text,
-                max_entries=self.config.features.danmaku_log_max_entries,
-            )
+            # 去重：3秒内相同 uid+text 只记录一次（B站可能重复推送弹幕）
+            key = (uid, text)
+            now_ts = time.time()
+            last_ts = self._recent_danmaku.get(key, 0.0)
+            if now_ts - last_ts < 3.0:
+                self.logger.debug("skip duplicate danmaku: uid=%s text=%s", uid, text)
+            else:
+                self._recent_danmaku[key] = now_ts
+                self._recent_danmaku = {k: v for k, v in self._recent_danmaku.items() if now_ts - v < 30.0}  # 定期清理
+                self.store.record_danmaku(
+                    ts=int(now_ts),
+                    uid=uid,
+                    uname=uname,
+                    content=text,
+                    max_entries=self.config.features.danmaku_log_max_entries,
+                )
 
         # Anchor exclusive reply
         if uid == self.config.anchor_uid:
@@ -553,7 +694,7 @@ class LiveRobot:
 
         if name == "blindbox_me":
             self.logger.info("blindbox stats requested: uid=%s arg=%s", uid, arg)
-            now = datetime.now()
+            now = _now()
             month_key = now.strftime("%Y-%m")
             if arg:
                 result = self.store.get_user_monthly_blindbox_by_uname(month=month_key, uname=arg)
@@ -588,7 +729,7 @@ class LiveRobot:
 
         if name == "today_blindbox":
             self.logger.info("today blindbox stats requested: uid=%s arg=%s", uid, arg)
-            now = datetime.now()
+            now = _now()
             today_start = int(datetime(now.year, now.month, now.day).timestamp())
             today_end = today_start + 86400
             if arg:
@@ -710,7 +851,7 @@ class LiveRobot:
 
         if name == "fortune":
             self.logger.info("fortune drawn: uid=%s", uid)
-            # 默认签文
+            # 默认签文（每种类型多条，随机选）
             default_fortunes = {
                 "大吉": ["今天运气爆棚，做什么都顺风顺水！", "主播都被你的欧气惊到了！"],
                 "中吉": ["运势不错，是个适合发财的好日子。", "心情舒畅，会有好事发生哦。"],
@@ -719,18 +860,24 @@ class LiveRobot:
                 "凶": ["今天适合低调行事，多看看直播转转运。", "别灰心，下次抽签一定是上签！"],
                 "大凶": ["生活总有低谷，吃顿好的安慰一下自己吧。", "多发几条弹幕，霉运都会跑掉的。"],
             }
-            # 从配置读取自定义签文
+            # 从配置读取自定义签文（支持列表或单字符串）
             cfg_fortunes = getattr(self.config, "custom_fortunes", {}) or {}
             fortunes = []
+            type_map = {
+                "大吉": "daiji", "中吉": "zhongji", "小吉": "xiaoji",
+                "末吉": "moji", "凶": "xiong", "大凶": "daxiong",
+            }
             for f_type, f_defaults in default_fortunes.items():
-                custom_text = cfg_fortunes.get({
-                    "大吉": "daiji", "中吉": "zhongji", "小吉": "xiaoji",
-                    "末吉": "moji", "凶": "xiong", "大凶": "daxiong",
-                }.get(f_type, ""), "")
-                if custom_text:
-                    fortunes.append((f_type, [custom_text]))
+                custom_val = cfg_fortunes.get(type_map.get(f_type, ""), "")
+                if isinstance(custom_val, list):
+                    # 新版：列表 -> 多条签文
+                    texts = [str(t) for t in custom_val if t]
+                elif isinstance(custom_val, str) and custom_val:
+                    # 旧版：单字符串
+                    texts = [custom_val]
                 else:
-                    fortunes.append((f_type, f_defaults))
+                    texts = f_defaults
+                fortunes.append((f_type, texts))
             f_type, jokes = random.choice(fortunes)
             joke = random.choice(jokes)
             msg = f"抽签结果：【{f_type}】！{joke}"
@@ -747,12 +894,12 @@ class LiveRobot:
             return
 
         if name == "welcome_on":
-            self._welcome_enabled = True
+            self.config.features.welcome_enabled = True
             await self._enqueue_reply(text="已开启欢迎", reply_uid=uid)
             return
 
         if name == "welcome_off":
-            self._welcome_enabled = False
+            self.config.features.welcome_enabled = False
             await self._enqueue_reply(text="已关闭欢迎", reply_uid=uid)
             return
 
@@ -760,25 +907,28 @@ class LiveRobot:
             if not arg:
                 await self._enqueue_reply(text="用法：#欢迎 词 <欢迎词模板>", reply_uid=uid)
                 return
-            self._welcome_template = arg
+            self.config.features.welcome_template = arg
             await self._enqueue_reply(text="欢迎词已更新", reply_uid=uid)
             return
 
     async def _on_all_events(self, event: dict[str, Any]) -> None:
         event_type = event.get("type", "?")
-        
-        # Handle PK Battle Start
-        if event_type == "PK_BATTLE_SETTLE_USER": # Note: Some events are not prefixed with PK_BATTLE_ in old versions but nemo2011 uses generic labels
-            pass 
 
-        if event_type == "PK_BATTLE_START":
-            self.logger.info("PK battle started, processing stats...")
-            await self._handle_pk_start(event)
-            return
+        # ── 捕获所有 PK 相关事件（不管叫什么名字） ──
+        if event_type.startswith("PK_") or event_type.startswith("pk_"):
+            self.logger.info("PK event received: type=%s data_keys=%s", event_type,
+                             list(event.get("data", {}).keys()) if isinstance(event.get("data"), dict) else "?")
 
-        if event_type in ("PK_BATTLE_SETTLE", "PK_BATTLE_SETTLE_V2", "PK_BATTLE_END"):
-            self.logger.info("PK battle ended")
-            await self._handle_pk_end(event)
+            # 只处理真正的 PK 开始/结束事件，跳过 PRE/PROCESS/INFO 等中间事件
+            if "BATTLE_START" in event_type and not self._in_pk:
+                self._in_pk = True
+                await self._handle_pk_start(event)
+            elif "SETTLE" in event_type or "BATTLE_END" in event_type or "END" in event_type:
+                self._in_pk = False
+                await self._handle_pk_end(event)
+            elif "PRE" in event_type or "PROCESS" in event_type or event_type == "PK_INFO":
+                # 记录日志但不弹幕回复
+                self.logger.debug("PK intermediate event ignored: %s", event_type)
             return
 
         # Suppress high-frequency / known events to reduce log noise
@@ -793,35 +943,83 @@ class LiveRobot:
                        "SPECIAL_GIFT", "VERIFICATION_SUCCESSFUL",
                        "UNIVERSAL_EVENT_GIFT", "UNIVERSAL_EVENT_GIFT_V2",
                        "GUARD_BUY", "USER_TOAST_MSG", "USER_TOAST_MSG_V2",
-                       "LIKE_INFO_V3_CLICK", "LIKE_INFO_V3_UPDATE")
+                       "LIKE_INFO_V3_UPDATE",
+                       "WELCOME", "WELCOME_GUARD")
         if event_type in noisy_exact:
             return
+
+        # ── 独立 SHARE 事件（非 INTERACT_WORD_V2 转发） ──
+        if event_type == "SHARE":
+            if self.config.features.share_thanks_enabled:
+                try:
+                    data = event.get("data", {})
+                    if isinstance(data, dict):
+                        nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+                        uid = _safe_int(data.get("uid") or nested.get("uid") or 0)
+                        uname = str(data.get("uname") or nested.get("uname") or "")
+                        if uid > 0 and uname:
+                            template = self.config.features.share_thanks_template
+                            text = template.replace("{uname}", uname)
+                            await self._enqueue_message(text=text, reply_uid=uid)
+                except Exception as exc:
+                    self.logger.warning("Error processing SHARE: %s", exc)
+            return
+
         self.logger.debug("unhandled event: type=%s", event_type)
 
     async def _handle_pk_start(self, event: dict[str, Any]) -> None:
         if not self.config.features.pk_report_enabled:
             return
         try:
-            data = event.get("data", {})
-            init_info = data.get("init_info", {})
+            raw = event.get("data", {})
 
-            opp_name = init_info.get("anchor_name", "对面主播") or "对面主播"
-            fans = init_info.get("fans_count", 0) or 0
-            online = init_info.get("online_count", 0) or 0
-            guard_count = init_info.get("guard_count", 0) or 0
+            # ── 深度搜索 init_info（适应不同版本的事件结构） ──
+            init_info = raw.get("init_info", {})
+            if not init_info:
+                # 尝试 event.data.data.init_info（_NEW 系列格式）
+                nested = raw.get("data")
+                if isinstance(nested, dict):
+                    init_info = nested.get("init_info", {})
+            if not init_info:
+                # 尝试 event.data.data.data.init_info（更深嵌套）
+                deeper = nested.get("data") if isinstance(nested, dict) else None
+                if isinstance(deeper, dict):
+                    init_info = deeper.get("init_info", {})
+            if not init_info:
+                # 尝试直接读取 PK_BATTLE_PRE_NEW 的顶层 data 字段
+                init_info = raw  # 降级到 data 本身
+
+            # 调试日志：输出完整数据结构
+            self.logger.info("PK raw_data keys: %s", list(raw.keys()) if isinstance(raw, dict) else "?")
+            inner = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+            self.logger.info("PK inner_data: %s", json.dumps(inner, ensure_ascii=False, default=str)[:800])
+            self.logger.info("PK init_info: %s", json.dumps(init_info, ensure_ascii=False, default=str)[:500])
+
+            # ── 从 init_info 提取字段（兼容多个字段名） ──
+            def _get(d, *keys, default=0):
+                for k in keys:
+                    v = d.get(k)
+                    if v not in (None, "", 0, "0"):
+                        return v
+                return default
+
+            opp_name = _get(init_info, "anchor_name", "opponent_name", "uname", "nickname", default="对面主播")
+            fans = int(_get(init_info, "fans_count", "fans", "follower_num", default=0))
+            online = int(_get(init_info, "online_count", "online", "viewer_count", default=0))
+            guard_count = int(_get(init_info, "guard_count", "guard_num", default=0))
 
             # 大航海细分
             guard_info = init_info.get("guard_info", {}) or {}
-            captains = guard_info.get("captain_count", 0) or 0
-            commanders = guard_info.get("commander_count", 0) or 0
-            governors = guard_info.get("governor_count", 0) or 0
+            captains = int(_get(guard_info, "captain_count", default=0))
+            commanders = int(_get(guard_info, "commander_count", default=0))
+            governors = int(_get(guard_info, "governor_count", default=0))
 
             # 贡献值
             contribution = init_info.get("contribution", {}) or {}
             if isinstance(contribution, dict):
-                contrib_score = contribution.get("score", 0) or 0
+                contrib_score = int(_get(contribution, "score", default=0))
             else:
-                contrib_score = int(contribution)
+                contrib_score = int(contribution) if contribution else 0
 
             # 粉丝数格式化
             def _fmt(n: int) -> str:
@@ -829,7 +1027,7 @@ class LiveRobot:
                     return f"{n / 10000:.1f}万"
                 return str(n)
 
-            # 替换模板占位符
+            # 大航海字符串
             guards_parts = []
             if captains:
                 guards_parts.append(f"{captains}舰")
@@ -854,7 +1052,13 @@ class LiveRobot:
         if not self.config.features.pk_report_enabled:
             return
         try:
-            data = event.get("data", {})
+            raw = event.get("data", {})
+
+            # 同样支持嵌套 data（_NEW 格式）
+            data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
+            self.logger.info("PK end raw keys: %s", list(raw.keys()) if isinstance(raw, dict) else "?")
+            self.logger.info("PK end data: %s", json.dumps(data, ensure_ascii=False, default=str)[:800])
+
             winner = data.get("winner_type", 0)
             win_str = "胜利！" if winner == 1 else "对方获胜" if winner == 2 else "PK结束"
 
@@ -1016,6 +1220,67 @@ def _extract_enter_uid_uname(event: dict[str, Any]) -> tuple[int, str]:
         return uid, str(uname or "")
 
     return 0, ""
+
+
+# ── 模块级时区，由 LiveRobot 初始化时根据 config 设置 ──
+_TZ = ZoneInfo("Asia/Shanghai") if ZoneInfo else None  # type: ignore[misc]
+
+
+def set_bot_timezone(tz_name: str) -> None:
+    """设置 Bot 运行时使用的时区（从 config.runtime.timezone 读取）。"""
+    global _TZ
+    if ZoneInfo:
+        try:
+            _TZ = ZoneInfo(tz_name)
+        except Exception:
+            _TZ = None
+
+
+def _now() -> datetime:
+    """返回配置时区的当前时间（兜底 UTC）。"""
+    if _TZ:
+        return datetime.now(_TZ)
+    return datetime.now()
+
+
+def _is_in_time_slot(time_start: int, time_end: int, current_hour: int | None = None) -> bool:
+    """检查当前小时是否在 [time_start, time_end] 时段内。
+    支持跨天：time_start=22, time_end=6 → 22:00~06:00 都满足。
+    """
+    if current_hour is None:
+        current_hour = _now().hour
+    if time_start <= time_end:
+        return time_start <= current_hour <= time_end
+    # 跨天: 22~6 → 22<=h<=23 或 0<=h<=6
+    return current_hour >= time_start or current_hour <= time_end
+
+
+def _pick_template_from_list(
+    templates_list: list[dict] | None,
+    uname: str = "",
+    uid: int = 0,
+    guard_level: int = 0,
+    logger: Any = None,
+) -> str | None:
+    """从模板列表中随机选择一条当前时段生效的模板。"""
+    if not templates_list:
+        return None
+    # 过滤当前时段生效的模板
+    valid = []
+    for t in templates_list:
+        ts = int(t.get("time_start", 0))
+        te = int(t.get("time_end", 23))
+        if _is_in_time_slot(ts, te):
+            valid.append(t.get("text", ""))
+    if not valid:
+        if logger:
+            logger.debug("no template in current time slot (list has %d entries)", len(templates_list))
+        return None
+    # 如果有时段匹配但 text 为空，尝试用第一条
+    text = random.choice(valid)
+    if not text and templates_list:
+        text = templates_list[0].get("text", "")
+    return text if text else None
 
 
 def _extract_gift_payload(event: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -1284,6 +1549,9 @@ def _set_wake_word(word: str) -> None:
 def _match_keyword_rule(text: str, rules: list[KeywordRule], uid: int = 0) -> Optional[str]:
     for rule in rules:
         if rule.allowed_uids and uid not in rule.allowed_uids:
+            continue
+        # 检查时段
+        if not _is_in_time_slot(rule.time_start, rule.time_end):
             continue
         for keyword in rule.keywords:
             if rule.match_mode == "exact":

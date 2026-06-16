@@ -43,6 +43,10 @@ class FeatureConfig:
     periodic_message_enabled: bool = True
     periodic_message_interval_seconds: int = 600
     periodic_message_template: str = ""
+    # 新版多模板（支持随机+时段）
+    welcome_templates_list: list[dict] | None = None       # [{"text":..., "time_start":0, "time_end":23}, ...]
+    guard_welcome_templates_list: dict[str, list[dict]] | None = None  # {"captain":[...], "commander":[...], "governor":[...]}
+    periodic_messages_list: list[dict] | None = None       # [{"text":..., "time_start":0, "time_end":23}, ...]
     welcome_templates_for_uids: dict[int, str] | None = None  # uid -> template
     guard_welcome_templates: dict[str, str] | None = None     # captain/commander/governor -> template
     danmaku_log_enabled: bool = False
@@ -58,6 +62,15 @@ class FeatureConfig:
     llm_keyword_trigger: bool = False  # 允许包含关键词就触发AI回复（需 AI免#前缀唤醒）
     pk_report_enabled: bool = True  # PK开始时汇报对手信息
     pk_report_template: str = "PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}"  # PK汇报模板
+    # 点赞感谢
+    like_thanks_enabled: bool = False
+    like_thanks_template: str = "感谢 {uname} 的点赞~"
+    # 转发感谢
+    share_thanks_enabled: bool = False
+    share_thanks_template: str = "感谢 {uname} 的分享~"
+    # 关注感谢
+    follow_thanks_enabled: bool = False
+    follow_thanks_template: str = "感谢 {uname} 的关注~"
 
 
 @dataclass(slots=True)
@@ -80,6 +93,8 @@ class KeywordRule:
     reply: str
     match_mode: str = "contains"
     allowed_uids: list[int] | None = None  # None = all users
+    time_start: int = 0    # 生效起始小时 0-23
+    time_end: int = 23     # 生效结束小时 0-23（支持跨天）
 
 
 @dataclass(slots=True)
@@ -260,6 +275,10 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             periodic_message_template=str(features.get("periodic_message_template", "")),
             welcome_templates_for_uids=_ensure_int_keys(features.get("welcome_templates_for_uids", None) or None),
             guard_welcome_templates=features.get("guard_welcome_templates", None) or None,
+            # 新版多模板（支持随机+时段）
+            welcome_templates_list=_normalize_template_list(features.get("welcome_templates_list") or features.get("welcome_templates")),
+            guard_welcome_templates_list=_normalize_guard_template_list(features.get("guard_welcome_templates_list") or features.get("guard_welcome_templates")),
+            periodic_messages_list=_normalize_template_list(features.get("periodic_messages_list") or features.get("periodic_messages")),
             danmaku_log_enabled=bool(features.get("danmaku_log_enabled", False)),
             danmaku_log_max_entries=int(features.get("danmaku_log_max_entries", 1000)),
             uid_configs=features.get("uid_configs", None) or None,
@@ -273,6 +292,12 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             use_chinese_numbers=bool(features.get("use_chinese_numbers", False)),
             pk_report_enabled=bool(features.get("pk_report_enabled", True)),
             pk_report_template=str(features.get("pk_report_template", "PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}")),
+            like_thanks_enabled=bool(features.get("like_thanks_enabled", False)),
+            like_thanks_template=str(features.get("like_thanks_template", "感谢 {uname} 的点赞~")),
+            share_thanks_enabled=bool(features.get("share_thanks_enabled", False)),
+            share_thanks_template=str(features.get("share_thanks_template", "感谢 {uname} 的分享~")),
+            follow_thanks_enabled=bool(features.get("follow_thanks_enabled", False)),
+            follow_thanks_template=str(features.get("follow_thanks_template", "感谢 {uname} 的关注~")),
         ),
         cooldown=CooldownConfig(
             welcome_user_seconds=int(cooldown.get("welcome_user_seconds", 600)),
@@ -357,6 +382,66 @@ def _ensure_int_keys(d: dict | None) -> dict[int, str] | None:
     return result if result else None
 
 
+def _normalize_template_list(raw: Any) -> list[dict] | None:
+    """标准化模板列表为统一格式 [{"text":..., "time_start":0, "time_end":23}, ...]
+    支持输入：单字符串、dict列表、None
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        # 单字符串 → 转为一条全天候模板
+        return [{"text": raw, "time_start": 0, "time_end": 23}]
+    if isinstance(raw, list):
+        result = []
+        for item in raw:
+            if isinstance(item, str):
+                result.append({"text": item, "time_start": 0, "time_end": 23})
+            elif isinstance(item, dict):
+                entry = {
+                    "text": str(item.get("text", "")),
+                    "time_start": int(item.get("time_start", 0)),
+                    "time_end": int(item.get("time_end", 23)),
+                }
+                if entry["text"]:
+                    result.append(entry)
+        return result if result else None
+    return None
+
+
+def _normalize_guard_template_list(raw: Any) -> dict[str, list[dict]] | None:
+    """标准化大航海欢迎模板。
+    旧格式: {"captain": "模板", "commander": "模板", "governor": "模板"}
+    新格式: {"captain": [{"text":"模板","time_start":0,"time_end":23}], ...}
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        result = {}
+        for level in ("captain", "commander", "governor"):
+            val = raw.get(level)
+            if val is None:
+                continue
+            if isinstance(val, str):
+                result[level] = [{"text": val, "time_start": 0, "time_end": 23}]
+            elif isinstance(val, list):
+                entries = []
+                for item in val:
+                    if isinstance(item, str):
+                        entries.append({"text": item, "time_start": 0, "time_end": 23})
+                    elif isinstance(item, dict):
+                        entry = {
+                            "text": str(item.get("text", "")),
+                            "time_start": int(item.get("time_start", 0)),
+                            "time_end": int(item.get("time_end", 23)),
+                        }
+                        if entry["text"]:
+                            entries.append(entry)
+                if entries:
+                    result[level] = entries
+        return result if result else None
+    return None
+
+
 def config_to_dict(config: AppConfig) -> dict[str, Any]:
     """将 AppConfig 序列化为 dict, 用于 Web UI 前端展示."""
     return {
@@ -391,6 +476,9 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "periodic_message_template": config.features.periodic_message_template,
             "welcome_templates_for_uids": config.features.welcome_templates_for_uids,
             "guard_welcome_templates": config.features.guard_welcome_templates,
+            "welcome_templates_list": config.features.welcome_templates_list,
+            "guard_welcome_templates_list": config.features.guard_welcome_templates_list,
+            "periodic_messages_list": config.features.periodic_messages_list,
             "danmaku_log_enabled": config.features.danmaku_log_enabled,
             "danmaku_log_max_entries": config.features.danmaku_log_max_entries,
             "uid_configs": config.features.uid_configs,
@@ -404,6 +492,12 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "use_chinese_numbers": config.features.use_chinese_numbers,
             "pk_report_enabled": config.features.pk_report_enabled,
             "pk_report_template": config.features.pk_report_template,
+            "like_thanks_enabled": config.features.like_thanks_enabled,
+            "like_thanks_template": config.features.like_thanks_template,
+            "share_thanks_enabled": config.features.share_thanks_enabled,
+            "share_thanks_template": config.features.share_thanks_template,
+            "follow_thanks_enabled": config.features.follow_thanks_enabled,
+            "follow_thanks_template": config.features.follow_thanks_template,
         },
         "keyword_reply": {
             "enabled": config.features.keyword_reply.enabled,
@@ -516,6 +610,8 @@ def _parse_keyword_reply(raw: Any) -> KeywordReplyConfig:
                 reply=reply,
                 match_mode=str(item.get("match_mode", "contains")),
                 allowed_uids=allowed_uids,
+                time_start=int(item.get("time_start", 0)),
+                time_end=int(item.get("time_end", 23)),
             ))
     return KeywordReplyConfig(
         enabled=enabled,

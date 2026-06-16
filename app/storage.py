@@ -399,6 +399,10 @@ class StatsStore:
             for r in rows
         ]
 
+    def get_danmaku_log_count(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) FROM danmaku_log").fetchone()
+        return int(row[0]) if row else 0
+
     def clear_danmaku_log(self) -> int:
         count = self._conn.execute("DELETE FROM danmaku_log").rowcount
         self._conn.commit()

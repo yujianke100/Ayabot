@@ -30,7 +30,13 @@ features:
   periodic_message_interval_seconds: 600
   periodic_message_template: "点个关注不迷路喵~"
   pk_report_enabled: true           # PK开始/结束时汇报对手信息
-  pk_report_template: "PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}"  # PK汇报模板
+  pk_report_template: "PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}"
+  like_thanks_enabled: false        # 点赞感谢开关
+  like_thanks_template: "感谢 {uname} 的点赞~"
+  share_thanks_enabled: false       # 转发感谢开关
+  share_thanks_template: "感谢 {uname} 的分享~"
+  follow_thanks_enabled: false      # 关注感谢开关
+  follow_thanks_template: "感谢 {uname} 的关注~"  # PK汇报模板
 
 cooldown:
   welcome_user_seconds: 600
