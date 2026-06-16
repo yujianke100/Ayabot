@@ -1,4 +1,5 @@
 """Ayabot PyInstaller 构建脚本（Windows）."""
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,15 @@ def _make_ico(png_path: Path) -> Path | None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Build Ayabot Windows .exe")
+    parser.add_argument("--version", default="", help="版本号, e.g. 0.1.1")
+    args = parser.parse_args()
+
+    exe_name = "Ayabot"
+    if args.version:
+        ver = args.version.lstrip("v")  # 去掉 "v" 前缀
+        exe_name = f"Ayabot-v{ver}"
+
     base_dir = Path(__file__).resolve().parent.parent
     entry = base_dir / "scripts" / "tray_win.py"
     icon_png = base_dir / "icon.png"
@@ -35,7 +45,7 @@ def main() -> None:
         "pyinstaller",
         "--onefile",
         "--windowed",
-        "--name", "Ayabot",
+        "--name", exe_name,
         "-p", str(base_dir),
         "--add-data", f"{base_dir / 'app'}{os.pathsep}app",
         "--hidden-import", "app.main",
@@ -92,7 +102,7 @@ def main() -> None:
 
     cmd.append(str(entry))
 
-    print(f"Building Ayabot.exe...")
+    print(f"Building {exe_name}.exe...")
     result = subprocess.run(cmd, cwd=base_dir)
 
     # 构建完成后清理临时 .ico
@@ -103,7 +113,7 @@ def main() -> None:
             pass
 
     if result.returncode == 0:
-        print(f"\n[OK] Build successful! Output: {base_dir / 'dist' / 'Ayabot.exe'}")
+        print(f"\n[OK] Build successful! Output: {base_dir / 'dist' / (exe_name + '.exe')}")
         print(f"[TIP] If .exe icon does not refresh, try:")
         print(f"   1. Copy .exe to a new directory")
         print(f"   2. Restart Windows Explorer (Task Manager -> Windows Explorer -> Restart)")

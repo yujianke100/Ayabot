@@ -28,17 +28,17 @@ jobs:
           pip install pyinstaller pystray pillow
 
       - name: Build .exe
-        run: python scripts/build_exe.py
+        run: python scripts/build_exe.py --version "${{ github.ref_name }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Ayabot-${{ github.ref_name }}.exe
-          path: dist/Ayabot.exe
+          name: Ayabot-${{ github.ref_name }}
+          path: dist/Ayabot-v*.exe
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Ayabot.exe
+          files: dist/Ayabot-v*.exe
           generate_release_notes: true
