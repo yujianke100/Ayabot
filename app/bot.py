@@ -1038,6 +1038,16 @@ class LiveRobot:
                             guard_count = int(dh.get("info", {}).get("num", 0) or 0)
                         except Exception:
                             pass
+                        # 高能榜在线人数（近似实际观众数）
+                        try:
+                            gnb = await asyncio.wait_for(
+                                opp_room.get_gaonengbang(page=1), timeout=5
+                            )
+                            gnb_online = int(gnb.get("onlineNum", 0) or 0)
+                            if gnb_online > 0:
+                                online = gnb_online
+                        except Exception:
+                            pass
                 except asyncio.TimeoutError:
                     self.logger.warning("PK: opponent info query timeout")
                 except Exception as exc:
