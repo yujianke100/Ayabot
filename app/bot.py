@@ -925,14 +925,14 @@ class LiveRobot:
             self.logger.info("PK event received: type=%s data_keys=%s", event_type,
                              list(event.get("data", {}).keys()) if isinstance(event.get("data"), dict) else "?")
 
-            # 只处理真正的 PK 开始/结束事件，跳过 PRE/PROCESS/PUNISH/INFO 等中间事件
-            if "BATTLE_START" in event_type and not self._in_pk:
+            # PK 开始：PRE_NEW 带对手匹配信息，BATTLE_START 是正式开始
+            if ("BATTLE_START" in event_type or "PRE" in event_type) and not self._in_pk:
                 self._in_pk = True
                 await self._handle_pk_start(event)
             elif "SETTLE" in event_type:
                 self._in_pk = False
                 await self._handle_pk_end(event)
-            elif "PRE" in event_type or "PROCESS" in event_type or "PUNISH" in event_type or event_type == "PK_INFO":
+            elif "PROCESS" in event_type or "PUNISH" in event_type or event_type == "PK_INFO":
                 self.logger.debug("PK intermediate event ignored: %s", event_type)
             return
 
@@ -1051,17 +1051,17 @@ class LiveRobot:
             # event.data.data 才是 B 站 PK 原始数据
             data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
 
-            # _NEW 格式：结果在 init_info.result_type（1=胜 2=负 3=平？）
+            # _NEW 格式：结果在 init_info.result_type（1=对方胜 2=我方胜）
             pk_init = data.get("init_info", {}) or {}
             result_type = int(pk_init.get("result_type", 0) or 0)
             if result_type == 1:
-                win_str = "胜利！"
-            elif result_type == 2:
                 win_str = "对方获胜"
+            elif result_type == 2:
+                win_str = "胜利！"
             else:
                 win_str = "PK结束"
 
-            # 分数：init_info.votes 是我方（胜者）得分
+            # 分数：init_info.votes 是胜者得分
             my_score = int(pk_init.get("votes", 0) or 0)
 
             msg = f"PK {win_str}"
