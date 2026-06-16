@@ -147,7 +147,7 @@ class LiveRobot:
         )
 
         self._danmaku.on("INTERACT_WORD_V2")(self._on_enter_room)
-        self._danmaku.on("INTERACT_WORD")(self._on_interact_word)
+        self._danmaku.on("INTERACT_WORD_V2")(self._on_interact_word)
 
         self._danmaku.on("SEND_GIFT")(self._on_gift)
         self._danmaku.on("COMBO_SEND")(self._on_gift)
@@ -354,26 +354,7 @@ class LiveRobot:
         if uid <= 0 or not uname:
             return
 
-        # ── 检测关注/转发事件（INTERACT_WORD_V2 msg_type） ──
-        data = event.get("data", {})
-        msg_type = 0
-        if isinstance(data, dict):
-            nested = data.get("data") if isinstance(data.get("data"), dict) else data
-            msg_type = int(nested.get("msg_type", 0))
-
-        if msg_type == 2 and self.config.features.follow_thanks_enabled:
-            template = self.config.features.follow_thanks_template
-            if template:
-                text = template.replace("{uname}", uname)
-                await self._enqueue_message(text=text, reply_uid=uid)
-            return
-        if msg_type == 3 and self.config.features.share_thanks_enabled:
-            template = self.config.features.share_thanks_template
-            if template:
-                text = template.replace("{uname}", uname)
-                await self._enqueue_message(text=text, reply_uid=uid)
-            return
-
+        # 关注/分享由 _on_interact_word 通过 pb_decoded 处理
         if not self.config.features.welcome_enabled:
             return
 
@@ -462,14 +443,19 @@ class LiveRobot:
                 self.logger.warning("queue full, welcome dropped: uid=%s", uid)
 
     async def _on_interact_word(self, event: dict[str, Any]) -> None:
-        """监听 INTERACT_WORD（非V2），用于关注/分享检测。"""
+        """监听 INTERACT_WORD_V2 的 pb_decoded，用于关注/分享检测。"""
         data = event.get("data", {})
         if not isinstance(data, dict):
             return
-        msg_type = int(data.get("msg_type", 0) or 0)
-        uid = _safe_int(data.get("uid", 0))
-        uname = str(data.get("uname", "") or "")
-        if uid <= 0 or not uname:
+        # protobuf 解析数据在 event.data.data.pb_decoded 中
+        nested = data.get("data") if isinstance(data.get("data"), dict) else data
+        pb = nested.get("pb_decoded") if isinstance(nested, dict) else None
+        if not isinstance(pb, dict):
+            return
+        msg_type = int(pb.get("msg_type", 0) or 0)
+        uid = _safe_int(pb.get("uid", 0))
+        uname = str(pb.get("uname", "") or "")
+        if uid <= 0 or not uname or msg_type <= 0:
             return
 
         if msg_type == 2 and self.config.features.follow_thanks_enabled:
@@ -1130,6 +1116,9 @@ class LiveRobot:
         return moderator_hint
 
     async def _enqueue_message(self, text: str, reply_uid: Optional[int]) -> None:
+        # 全局数字转大写
+        if self.config.features.use_chinese_numbers_global:
+            text = _to_chinese_num(text)
         # Deduplicate: skip if same text is already queued
         if text in self._pending_texts:
             self.logger.debug("dedup enqueue: text=%s", text)

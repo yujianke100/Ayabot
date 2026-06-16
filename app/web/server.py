@@ -1823,6 +1823,19 @@ def _room_db_path(room_id: str) -> Path:
     return get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "data" / "bot.db"
 
 
+@app.post("/api/rooms/{room_id}/log/clear")
+async def api_room_log_clear(room_id: str):
+    """清空房间 Bot 日志文件。"""
+    from app.config import get_room_path
+    log_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "bot.log"
+    try:
+        if log_path.exists():
+            log_path.write_text("", encoding="utf-8")
+        return {"ok": True}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @app.get("/api/rooms/{room_id}/log")
 async def api_room_log(room_id: str, request: Request, lines: int = 200):
     """返回房间 Bot 日志的最新 N 行。"""
@@ -2718,6 +2731,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="text-xs text-gray-500">弹幕记录最大条数
                         <input type="number" v-model.number="roomConfig.features.danmaku_log_max_entries" min="100" max="100000" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <label class="text-xs text-gray-500">日志级别
                         <select v-model="roomConfig.runtime.log_level" class="border p-2 rounded w-full text-sm mt-1">
                             <option value="DEBUG">DEBUG</option>
@@ -2725,6 +2740,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                             <option value="WARNING">WARNING</option>
                             <option value="ERROR">ERROR</option>
                         </select>
+                        <span class="text-xs text-gray-400">保存后重启机器人生效</span>
                     </label>
                 </div>
 
@@ -2800,7 +2816,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <h4 class="text-xs font-bold text-gray-600 mt-2">📦 盲盒统计（支持 {count} {cost} {profit} 占位符）</h4>
                     <p class="text-[10px] text-gray-400">修改盲盒指令的回复文本。如发送失败可尝试开启「数字转中文」或使用简短表述。</p>
                     <label class="flex items-center gap-2 text-xs mb-2">
-                        <input type="checkbox" v-model="roomConfig.features.use_chinese_numbers" class="w-4 h-4"> 数字转中文（六→六而非6，避开数字拦截）
+                        <input type="checkbox" v-model="roomConfig.features.use_chinese_numbers" class="w-4 h-4"> 盲盒数字转中文
+                    </label>
+                    <label class="flex items-center gap-2 text-xs mb-2">
+                        <input type="checkbox" v-model="roomConfig.features.use_chinese_numbers_global" class="w-4 h-4"> 🌐 全局数字转大写（所有回复生效）
                     </label>
                     <div class="border rounded p-3 bg-gray-50 space-y-2 mb-2">
                         <label class="flex items-center gap-2 text-xs">
@@ -3157,12 +3176,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <div class="flex items-center justify-between">
                     <h2 class="text-lg font-bold">📋 Bot 日志</h2>
                     <div class="flex items-center gap-2">
-                        <select v-model="logLevel" class="border p-1 rounded text-sm">
-                            <option value="DEBUG">DEBUG</option>
-                            <option value="INFO">INFO</option>
-                            <option value="WARNING">WARNING</option>
-                            <option value="ERROR">ERROR</option>
-                        </select>
+                        <span class="text-xs text-gray-400">日志级别在「机器人配置」中修改，重启后生效</span>
+                        <button @click="clearBotLog" class="bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded text-sm">清空</button>
                         <button @click="loadBotLog" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">刷新</button>
                     </div>
                 </div>
@@ -4231,14 +4246,7 @@ createApp({
                 const data = await res.json();
                 if (data.error) { botLogContent.value = '加载失败: ' + data.error; return; }
                 const lines = data.lines || [];
-                const level = logLevel.value;
-                const priorities = {DEBUG: 0, INFO: 1, WARNING: 2, ERROR: 3};
-                const minPrio = priorities[level] || 0;
-                const filtered = lines.filter(l => {
-                    const m = l.match(/\[(DEBUG|INFO|WARNING|ERROR)\]/);
-                    return m && priorities[m[1]] >= minPrio;
-                });
-                botLogContent.value = filtered.map(l => {
+                botLogContent.value = lines.map(l => {
                     return l
                         .replace(/ERROR/g, '<span class="text-red-400">ERROR</span>')
                         .replace(/WARNING/g, '<span class="text-yellow-400">WARNING</span>')
@@ -4247,6 +4255,15 @@ createApp({
                 }).join('\n');
                 setTimeout(() => { if (logContainer.value) logContainer.value.scrollTop = logContainer.value.scrollHeight; }, 50);
             } catch(e) { botLogContent.value = '加载失败: ' + e.message; }
+        }
+
+        async function clearBotLog() {
+            if (!selectedRoom.value?.room_id) return;
+            if (!confirm('确定清空 Bot 日志？')) return;
+            try {
+                await fetch(`/api/rooms/${selectedRoom.value.room_id}/log/clear`, {method:'POST', credentials:'include'});
+                botLogContent.value = '';
+            } catch(e) { /* ignore */ }
         }
 
         // ── Danmaku Log ──
@@ -5481,7 +5498,7 @@ createApp({
                 editStreamerRooms, savingStreamer, streamerMsg, streamerOk,
                 loadUsers, saveStreamer, editStreamer, deleteStreamer, toggleStreamerRoom, showRoomDropdown,
                 addUidWelcomeTemplate, removeUidWelcomeTemplate,
-                loadBotLog, botLogContent, logLevel, logContainer,
+                loadBotLog, clearBotLog, botLogContent, logLevel, logContainer,
                 showUidWelcomeModal, uidWelcomeEditEntries, openUidWelcomeModal, closeUidWelcomeModal, saveUidWelcomeModal,
                 showKeywordModal, keywordEditRules, openKeywordModal, closeKeywordModal, saveKeywordModal,
                 showWelcomeTplModal, welcomeTplEntries, openWelcomeTplModal, saveWelcomeTplModal,

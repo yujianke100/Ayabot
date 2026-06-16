@@ -201,6 +201,10 @@ def start_room(room_id: str) -> bool:
         return False
 
     # 用 subprocess.Popen 启动子进程
+    # 设置 PYTHONIOENCODING=utf-8 防止 Windows 下中文编码为 cp936 导致日志乱码
+    env = os.environ.copy()
+    if "PYTHONIOENCODING" not in env:
+        env["PYTHONIOENCODING"] = "utf-8"
     try:
         proc = subprocess.Popen(
             [
@@ -214,6 +218,7 @@ def start_room(room_id: str) -> bool:
             stdout=log_fp,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
+            env=env,
             # 跨平台：创建新进程组便于信号管理
             creationflags=_creation_flags(),
             start_new_session=True,

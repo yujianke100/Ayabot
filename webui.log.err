@@ -1,8 +1,0 @@
-INFO:     Started server process [13504]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-truncate log failed C:\Users\shinshi\Ayabot\rooms\1732021585\bot.log: 'utf-8' codec can't decode byte 0xb1 in position 747: invalid start byte
-INFO:     Uvicorn running on http://0.0.0.0:19810 (Press CTRL+C to quit)
-truncate log failed C:\Users\shinshi\Ayabot\rooms\1946287911\bot.log: 'utf-8' codec can't decode byte 0xb1 in position 747: invalid start byte
-truncate log failed C:\Users\shinshi\Ayabot\rooms\1732021585\bot.log: 'utf-8' codec can't decode byte 0xb1 in position 747: invalid start byte
-truncate log failed C:\Users\shinshi\Ayabot\rooms\1946287911\bot.log: 'utf-8' codec can't decode byte 0xb1 in position 747: invalid start byte

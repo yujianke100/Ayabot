@@ -58,6 +58,7 @@ class FeatureConfig:
     blindbox_glassheart_enabled: bool = False  # 玻璃心模式：亏损时隐藏真实收益
     blindbox_glassheart_reply: str = "服务器繁忙，请稍后重试"  # 亏损时的回复
     use_chinese_numbers: bool = False  # 数字转中文（避开数字拦截）
+    use_chinese_numbers_global: bool = False  # 全局数字转大写中文，所有回复都生效
     uid_configs: list[dict] | None = None  # list of {uid, welcome_template, keyword_rules}
     allow_bare_commands: bool = False  # 允许不带 # 前缀触发指令
     llm_bare_trigger: bool = False  # AI回复单独免#：弹幕开头匹配唤醒词即触发
@@ -295,6 +296,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             blindbox_glassheart_enabled=bool(features.get("blindbox_glassheart_enabled", False)),
             blindbox_glassheart_reply=str(features.get("blindbox_glassheart_reply", "服务器繁忙，请稍后重试")),
             use_chinese_numbers=bool(features.get("use_chinese_numbers", False)),
+            use_chinese_numbers_global=bool(features.get("use_chinese_numbers_global", False)),
             pk_report_enabled=bool(features.get("pk_report_enabled", True)),
             pk_report_template=str(features.get("pk_report_template", "PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}")),
             pk_end_template=str(features.get("pk_end_template", "{result} 我方分数{score}")),
@@ -498,6 +500,7 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "blindbox_glassheart_enabled": config.features.blindbox_glassheart_enabled,
             "blindbox_glassheart_reply": config.features.blindbox_glassheart_reply,
             "use_chinese_numbers": config.features.use_chinese_numbers,
+            "use_chinese_numbers_global": config.features.use_chinese_numbers_global,
             "pk_report_enabled": config.features.pk_report_enabled,
             "pk_report_template": config.features.pk_report_template,
             "pk_end_template": config.features.pk_end_template,
@@ -586,6 +589,8 @@ def update_config_from_dict(raw: dict[str, Any], cfg_path: str) -> bool:
             existing["custom_fortunes"] = raw["custom_fortunes"]
         if "llm" in raw:
             existing.setdefault("llm", {}).update(raw["llm"])
+        if "runtime" in raw:
+            existing.setdefault("runtime", {}).update(raw["runtime"])
 
         Path(cfg_path).write_text(
             yaml.dump(existing, default_flow_style=False, allow_unicode=True),
