@@ -17,7 +17,7 @@ except ImportError:
     # Python < 3.9 fallback
     ZoneInfo = None  # type: ignore[assignment,misc]
 
-from bilibili_api import Credential, live
+from bilibili_api import Credential, live, user
 from bilibili_api.utils.danmaku import Danmaku
 
 from .config import AppConfig, KeywordRule
@@ -995,8 +995,7 @@ class LiveRobot:
 
             # PK_BATTLE_PRE：对手信息在 inner 顶层
             opp_name = str(inner.get("uname", "") or "")
-            opp_room_id = int(inner.get("room_id", 0) or 0)
-
+            opp_uid = int(inner.get("uid", 0) or 0)
             if not opp_name:
                 # PK_BATTLE_START_NEW：尝试 match_info.init_info
                 match_info = inner.get("match_info", {}) or {}
@@ -1005,50 +1004,56 @@ class LiveRobot:
                 if not opp_name:
                     init_info = inner.get("init_info", {}) or {}
                     opp_name = str(init_info.get("anchor_name", "") or init_info.get("uname", "") or "对面主播")
-                opp_room_id = int(init_info.get("room_id", 0) or 0)
+                opp_uid = int(init_info.get("uid", 0) or 0)
 
             if not opp_name:
                 opp_name = "对面主播"
 
-            # ── 通过对手 room_id 查询详细数据 ──
-            fans = guard_count = online = contrib_score = 0
-            captains = commanders = governors = 0
-            got_stats = False
-
-            if opp_room_id > 0:
+            # ── 通过对手 uid 查粉丝数、直播间观众数、大航海数 ──
+            fans = online = guard_count = 0
+            if opp_uid > 0:
                 try:
-                    opp_room = live.LiveRoom(
-                        room_display_id=opp_room_id,
-                        credential=self.credential,
+                    opp_user = user.User(uid=opp_uid)
+                    # 粉丝数
+                    rel = await asyncio.wait_for(
+                        opp_user.get_relation_info(), timeout=5
                     )
-                    # get_room_play_info 包含 online 观众数
-                    info = await asyncio.wait_for(
-                        opp_room.get_room_play_info(), timeout=5
+                    fans = int(rel.get("follower", 0) or 0)
+                    # 直播间 ID → 观众数 + 大航海数
+                    uinfo = await asyncio.wait_for(
+                        opp_user.get_user_info(), timeout=5
                     )
-                    self.logger.info("PK opponent play info: %s",
-                                     json.dumps(info, ensure_ascii=False, default=str)[:1000])
-                    online = int(info.get("online", 0) or 0)
-                    got_stats = True
+                    room_id = (uinfo.get("live_room", {}) or {}).get("roomid")
+                    if room_id:
+                        opp_room = live.LiveRoom(room_display_id=room_id)
+                        rinfo = await asyncio.wait_for(
+                            opp_room.get_room_info(), timeout=5
+                        )
+                        ri = rinfo.get("room_info", {}) or {}
+                        online = int(ri.get("online", 0) or 0)
+                        try:
+                            dh = await asyncio.wait_for(
+                                opp_room.get_dahanghai(page=1), timeout=5
+                            )
+                            guard_count = int(dh.get("info", {}).get("num", 0) or 0)
+                        except Exception:
+                            pass
                 except asyncio.TimeoutError:
-                    self.logger.warning("PK: opponent room info timeout")
+                    self.logger.warning("PK: opponent info query timeout")
                 except Exception as exc:
-                    self.logger.warning("PK: failed to get opponent room info: %s", exc)
+                    self.logger.warning("PK: failed to get opponent info: %s", exc)
 
             def _fmt(n: int) -> str:
                 if n >= 10000:
                     return f"{n / 10000:.1f}万"
                 return str(n)
 
-            if not got_stats:
-                # 查询失败，只显示对手名
-                msg = f"PK开始！对手{opp_name}"
-            else:
-                msg = self.config.features.pk_report_template
-                msg = msg.replace("{opponent}", opp_name)
-                msg = msg.replace("{fans}", _fmt(fans))
-                msg = msg.replace("{guards}", "?")
-                msg = msg.replace("{audience}", str(online))
-                msg = msg.replace("{score}", "?")
+            msg = self.config.features.pk_report_template
+            msg = msg.replace("{opponent}", opp_name)
+            msg = msg.replace("{fans}", _fmt(fans))
+            msg = msg.replace("{guards}", str(guard_count) + "舰" if guard_count else "0舰")
+            msg = msg.replace("{audience}", str(online))
+            msg = msg.replace("{score}", str(online))
 
             await self._enqueue_message(text=msg, reply_uid=None)
         except Exception as exc:

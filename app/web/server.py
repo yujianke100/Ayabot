@@ -2675,7 +2675,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                         <span class="text-gray-400 text-[10px]">支持占位符: {opponent}对手名 {fans}粉丝数 {guards}大航海 {audience}观众 {score}贡献值</span>
                     </label>
                     <label class="text-xs text-gray-500 block">PK结束模板
-                        <input type="text" v-model="roomConfig.features.pk_end_template" placeholder="PK {result} {score}" class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="text" v-model="roomConfig.features.pk_end_template" placeholder=" 获胜方分数 {score}" class="border p-2 rounded w-full text-sm mt-1">
                         <span class="text-gray-400 text-[10px]">支持占位符: {result}结果(胜利！/对方获胜/PK结束) {score}分数</span>
                     </label>
                 </div>
