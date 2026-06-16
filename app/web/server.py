@@ -2670,9 +2670,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <h3 class="text-sm font-bold">⚔️ PK汇报</h3>
                 <div class="space-y-3">
                     <label class="flex items-center gap-2 text-sm"><input type="checkbox" v-model="roomConfig.features.pk_report_enabled" class="w-4 h-4"> PK开始/结束时汇报对手信息</label>
-                    <label class="text-xs text-gray-500 block">PK汇报模板
+                    <label class="text-xs text-gray-500 block">PK开始模板
                         <input type="text" v-model="roomConfig.features.pk_report_template" placeholder="PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}" class="border p-2 rounded w-full text-sm mt-1">
                         <span class="text-gray-400 text-[10px]">支持占位符: {opponent}对手名 {fans}粉丝数 {guards}大航海 {audience}观众 {score}贡献值</span>
+                    </label>
+                    <label class="text-xs text-gray-500 block">PK结束模板
+                        <input type="text" v-model="roomConfig.features.pk_end_template" placeholder="PK {result} {score}" class="border p-2 rounded w-full text-sm mt-1">
+                        <span class="text-gray-400 text-[10px]">支持占位符: {result}结果(胜利！/对方获胜/PK结束) {score}分数</span>
                     </label>
                 </div>
 

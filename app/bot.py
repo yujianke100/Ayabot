@@ -1076,9 +1076,14 @@ class LiveRobot:
             # 分数：init_info.votes 是胜者得分
             my_score = int(pk_init.get("votes", 0) or 0)
 
-            msg = f"PK {win_str}"
-            if my_score:
-                msg += f" {my_score}"
+            msg = self.config.features.pk_end_template
+            msg = msg.replace("{result}", win_str)
+            msg = msg.replace("{score}", str(my_score) if my_score else "")
+            msg = msg.strip()
+            if not msg:
+                msg = f"PK {win_str}"
+                if my_score:
+                    msg += f" {my_score}"
 
             await self._enqueue_message(text=msg, reply_uid=None)
         except Exception as exc:
