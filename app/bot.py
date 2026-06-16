@@ -1036,7 +1036,7 @@ class LiveRobot:
             fans = online = guard_count = total_score = 0
             if opp_uid > 0:
                 try:
-                    opp_user = user.User(uid=opp_uid)
+                    opp_user = user.User(uid=opp_uid, credential=self.credential)
                     rel = await asyncio.wait_for(
                         opp_user.get_relation_info(), timeout=5
                     )
@@ -1046,7 +1046,7 @@ class LiveRobot:
                     )
                     room_id = (uinfo.get("live_room", {}) or {}).get("roomid")
                     if room_id:
-                        opp_room = live.LiveRoom(room_display_id=room_id)
+                        opp_room = live.LiveRoom(room_display_id=room_id, credential=self.credential)
                         try:
                             dh = await asyncio.wait_for(
                                 opp_room.get_dahanghai(page=1), timeout=5
@@ -1054,7 +1054,6 @@ class LiveRobot:
                             guard_count = int(dh.get("info", {}).get("num", 0) or 0)
                         except Exception:
                             pass
-                        # 高能榜：在线人数 + 总贡献
                         try:
                             gnb = await asyncio.wait_for(
                                 opp_room.get_gaonengbang(page=1), timeout=5
@@ -1220,9 +1219,9 @@ def _safe_int(value: Any) -> int:
 
 
 def _to_chinese_num(text: str) -> str:
-    """将字符串中的阿拉伯数字替换为中文数字，避免 B站 数字拦截."""
-    mapping = {"0": "零", "1": "一", "2": "二", "3": "三", "4": "四",
-               "5": "五", "6": "六", "7": "七", "8": "八", "9": "九"}
+    """将字符串中的阿拉伯数字替换为中文大写数字，避免 B站 数字拦截."""
+    mapping = {"0": "〇", "1": "壹", "2": "贰", "3": "叁", "4": "肆",
+               "5": "伍", "6": "陆", "7": "柒", "8": "捌", "9": "玖"}
     return "".join(mapping.get(ch, ch) for ch in text)
 
 

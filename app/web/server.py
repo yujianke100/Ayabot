@@ -1823,6 +1823,22 @@ def _room_db_path(room_id: str) -> Path:
     return get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "data" / "bot.db"
 
 
+@app.get("/api/rooms/{room_id}/log")
+async def api_room_log(room_id: str, request: Request, lines: int = 200):
+    """返回房间 Bot 日志的最新 N 行。"""
+    from app.config import get_room_path
+    log_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "bot.log"
+    if not log_path.exists():
+        return {"lines": []}
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        all_lines = text.splitlines()
+        tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        return {"lines": tail, "total": len(all_lines)}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @app.get("/api/rooms/{room_id}/ranking")
 async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType: str = "all"):
     """获取指定房间的送礼排行."""
@@ -2702,6 +2718,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="text-xs text-gray-500">弹幕记录最大条数
                         <input type="number" v-model.number="roomConfig.features.danmaku_log_max_entries" min="100" max="100000" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
+                    <label class="text-xs text-gray-500">日志级别
+                        <select v-model="roomConfig.runtime.log_level" class="border p-2 rounded w-full text-sm mt-1">
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                        </select>
+                    </label>
                 </div>
 
                 <hr>
@@ -3127,6 +3151,26 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <div v-if="delResult" class="mt-4 text-sm">{{ delResult }}</div>
         </div>
 
+        <!-- Bot 日志 -->
+        <div v-if="roomSubTab==='log'" class="max-w-full sm:max-w-4xl mx-auto">
+            <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm space-y-4">
+                <div class="flex items-center justify-between">
+                    <h2 class="text-lg font-bold">📋 Bot 日志</h2>
+                    <div class="flex items-center gap-2">
+                        <select v-model="logLevel" class="border p-1 rounded text-sm">
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                        </select>
+                        <button @click="loadBotLog" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">刷新</button>
+                    </div>
+                </div>
+                <div ref="logContainer" class="bg-gray-900 text-green-300 p-4 rounded text-xs font-mono max-h-[600px] overflow-y-auto whitespace-pre-wrap" v-html="botLogContent"></div>
+                <div v-if="!botLogContent" class="text-gray-400 text-center py-4">暂无日志或日志文件不存在</div>
+            </div>
+        </div>
+
         <!-- 弹幕记录 -->
         <div v-if="roomSubTab==='danmaku'" class="max-w-full sm:max-w-4xl mx-auto">
             <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm space-y-4">
@@ -3523,6 +3567,7 @@ createApp({
                     {key: 'llm', label: 'AI回复'},
                     {key: 'config', label: '机器人配置'},
                     {key: 'manage', label: '数据管理'},
+                    {key: 'log', label: '📋 日志'},
                 );
             }
             return tabs;
@@ -4172,6 +4217,36 @@ createApp({
                 const data = await res.json();
                 delResult.value = `已删除 ${data.deleted_events} 条事件记录`;
             } catch(e) { delResult.value = '删除失败: ' + e.message; }
+        }
+
+        // ── Bot Log ──
+        const botLogContent = ref('');
+        const logLevel = ref('INFO');
+        const logContainer = ref(null);
+        async function loadBotLog() {
+            if (!selectedRoom.value?.room_id) return;
+            try {
+                const res = await fetch(`/api/rooms/${selectedRoom.value.room_id}/log?lines=500`, {credentials: 'include'});
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.error) { botLogContent.value = '加载失败: ' + data.error; return; }
+                const lines = data.lines || [];
+                const level = logLevel.value;
+                const priorities = {DEBUG: 0, INFO: 1, WARNING: 2, ERROR: 3};
+                const minPrio = priorities[level] || 0;
+                const filtered = lines.filter(l => {
+                    const m = l.match(/\[(DEBUG|INFO|WARNING|ERROR)\]/);
+                    return m && priorities[m[1]] >= minPrio;
+                });
+                botLogContent.value = filtered.map(l => {
+                    return l
+                        .replace(/ERROR/g, '<span class="text-red-400">ERROR</span>')
+                        .replace(/WARNING/g, '<span class="text-yellow-400">WARNING</span>')
+                        .replace(/INFO/g, '<span class="text-green-300">INFO</span>')
+                        .replace(/DEBUG/g, '<span class="text-gray-500">DEBUG</span>');
+                }).join('\n');
+                setTimeout(() => { if (logContainer.value) logContainer.value.scrollTop = logContainer.value.scrollHeight; }, 50);
+            } catch(e) { botLogContent.value = '加载失败: ' + e.message; }
         }
 
         // ── Danmaku Log ──
@@ -5406,6 +5481,7 @@ createApp({
                 editStreamerRooms, savingStreamer, streamerMsg, streamerOk,
                 loadUsers, saveStreamer, editStreamer, deleteStreamer, toggleStreamerRoom, showRoomDropdown,
                 addUidWelcomeTemplate, removeUidWelcomeTemplate,
+                loadBotLog, botLogContent, logLevel, logContainer,
                 showUidWelcomeModal, uidWelcomeEditEntries, openUidWelcomeModal, closeUidWelcomeModal, saveUidWelcomeModal,
                 showKeywordModal, keywordEditRules, openKeywordModal, closeKeywordModal, saveKeywordModal,
                 showWelcomeTplModal, welcomeTplEntries, openWelcomeTplModal, saveWelcomeTplModal,

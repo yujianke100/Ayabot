@@ -521,6 +521,11 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
                 for rule in config.features.keyword_reply.rules
             ],
         },
+        "runtime": {
+            "poll_interval_seconds": config.runtime.poll_interval_seconds,
+            "timezone": config.runtime.timezone,
+            "log_level": config.runtime.log_level,
+        },
         "custom_fortunes": config.custom_fortunes,
         "web_ui": {
             "host": config.web_ui.host,
