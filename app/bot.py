@@ -992,52 +992,64 @@ class LiveRobot:
             raw = event.get("data", {})
             # event.data.data 才是 B 站 PK 原始数据
             inner = raw.get("data") if isinstance(raw.get("data"), dict) else raw
-            self.logger.info("PK inner keys: %s", list(inner.keys()) if isinstance(inner, dict) else "?")
-            self.logger.info("PK inner data: %s", json.dumps(inner, ensure_ascii=False, default=str)[:800])
 
-            # 对手信息在 match_info.init_info 中（_NEW 格式）
-            match_info = inner.get("match_info", {}) or {}
-            init_info = match_info.get("init_info", {}) or {}
-            if not init_info:
-                # 降级：部分旧版 PK 事件在 inner.init_info
-                init_info = inner.get("init_info", {}) or {}
+            # PK_BATTLE_PRE：对手信息在 inner 顶层
+            opp_name = str(inner.get("uname", "") or "")
+            opp_room_id = int(inner.get("room_id", 0) or 0)
 
-            opp_name = init_info.get("anchor_name", "") or init_info.get("uname", "") or "对面主播"
-            fans = int(init_info.get("fans_count", 0) or 0)
-            online = int(init_info.get("online_count", 0) or 0)
-            guard_count = int(init_info.get("guard_count", 0) or 0)
+            if not opp_name:
+                # PK_BATTLE_START_NEW：尝试 match_info.init_info
+                match_info = inner.get("match_info", {}) or {}
+                init_info = match_info.get("init_info", {}) or {}
+                opp_name = str(init_info.get("anchor_name", "") or init_info.get("uname", "") or "")
+                if not opp_name:
+                    init_info = inner.get("init_info", {}) or {}
+                    opp_name = str(init_info.get("anchor_name", "") or init_info.get("uname", "") or "对面主播")
+                opp_room_id = int(init_info.get("room_id", 0) or 0)
 
-            guard_info = init_info.get("guard_info", {}) or {}
-            captains = int(guard_info.get("captain_count", 0) or 0)
-            commanders = int(guard_info.get("commander_count", 0) or 0)
-            governors = int(guard_info.get("governor_count", 0) or 0)
+            if not opp_name:
+                opp_name = "对面主播"
 
-            contribution = init_info.get("contribution", {}) or {}
-            if isinstance(contribution, dict):
-                contrib_score = int(contribution.get("score", 0) or 0)
-            else:
-                contrib_score = int(contribution) if contribution else 0
+            # ── 通过对手 room_id 查询详细数据 ──
+            fans = guard_count = online = contrib_score = 0
+            captains = commanders = governors = 0
+            got_stats = False
+
+            if opp_room_id > 0:
+                try:
+                    opp_room = live.LiveRoom(
+                        room_display_id=opp_room_id,
+                        credential=self.credential,
+                    )
+                    info = await asyncio.wait_for(
+                        opp_room.get_room_info(), timeout=5
+                    )
+                    self.logger.info("PK opponent room info: %s",
+                                     json.dumps(info, ensure_ascii=False, default=str)[:600])
+                    room_info = info.get("room_info", {}) or {}
+                    fans = int(room_info.get("fans_count", 0) or 0)
+                    online = int(room_info.get("popularity_count", room_info.get("online", 0)) or 0)
+                    got_stats = True
+                except asyncio.TimeoutError:
+                    self.logger.warning("PK: opponent room info timeout")
+                except Exception as exc:
+                    self.logger.warning("PK: failed to get opponent room info: %s", exc)
 
             def _fmt(n: int) -> str:
                 if n >= 10000:
                     return f"{n / 10000:.1f}万"
                 return str(n)
 
-            guards_parts = []
-            if captains:
-                guards_parts.append(f"{captains}舰")
-            if commanders:
-                guards_parts.append(f"{commanders}提")
-            if governors:
-                guards_parts.append(f"{governors}总")
-            guard_str = "".join(guards_parts) if guards_parts else f"{guard_count}舰"
-
-            msg = self.config.features.pk_report_template
-            msg = msg.replace("{opponent}", opp_name)
-            msg = msg.replace("{fans}", _fmt(fans))
-            msg = msg.replace("{guards}", guard_str)
-            msg = msg.replace("{audience}", str(online))
-            msg = msg.replace("{score}", str(contrib_score))
+            if not got_stats:
+                # 查询失败，只显示对手名
+                msg = f"PK开始！对手{opp_name}"
+            else:
+                msg = self.config.features.pk_report_template
+                msg = msg.replace("{opponent}", opp_name)
+                msg = msg.replace("{fans}", _fmt(fans))
+                msg = msg.replace("{guards}", "?")
+                msg = msg.replace("{audience}", str(online))
+                msg = msg.replace("{score}", "?")
 
             await self._enqueue_message(text=msg, reply_uid=None)
         except Exception as exc:
