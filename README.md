@@ -60,7 +60,34 @@ Ayabot.exe 单独一个文件，双击即运行
 
 > 首次启动自动从 exe 中释放默认配置。浏览器打开 `http://localhost:19810`。
 
-### 🐍 用 Python 直接跑（推荐开发）
+### � 用 Docker 跑（小白首选，无需 Python）
+镜像支持 **AMD64（普通 PC / 云服务器）和 ARM64（树莓派、苹果 M 系列、Oracle ARM 云）**：
+
+```bash
+# GitHub Container Registry（主镜像）
+docker pull ghcr.io/yujianke100/ayabot:latest
+
+# Docker Hub（备用）
+docker pull yujianke100/ayabot:latest
+```
+
+> **🇨🇳 国内加速**：ghcr.io 国内拉取慢？用镜像站：`docker pull docker.mirrors.ustc.edu.cn/ghcr.io/yujianke100/ayabot:latest`
+> 更多可用镜像站可查 → [demo.kentxxq.com/app/mirror](https://demo.kentxxq.com/app/mirror)
+```bash
+mkdir ayabot && cd ayabot
+wget https://raw.githubusercontent.com/yujianke100/ayabot/main/config.example.yaml -O config.yaml
+wget https://raw.githubusercontent.com/yujianke100/ayabot/main/docker-compose.yml -O docker-compose.yml
+# 编辑 config.yaml，填直播间号和主播 UID
+mkdir -p data rooms accounts
+docker compose up -d
+```
+
+浏览器打开 `http://localhost:19810` 进入 Web 后台，在「B站账号」扫码登录，然后在「房间管理」中创建房间、启动机器人。
+
+> **改端口？** 编辑 `docker-compose.yml`，修改 `ports` 左侧值和 `AYABOT_PORT` 环境变量。
+> 例如 Nginx 反向代理用 8000 → 容器内 19810：`"8000:19810"` + `AYABOT_PORT=19810`
+
+### 🐍 用 Python 直接跑（开发/自定义）
 
 ```bash
 git clone https://github.com/yujianke100/ayabot.git
@@ -73,26 +100,9 @@ cp config.example.yaml config.yaml
 python web_serve.py
 ```
 
-浏览器打开 `http://localhost:19810` 进入 Web 后台，在「B站账号」扫码登录，然后在「房间管理」中创建房间、启动机器人。
+浏览器打开 `http://localhost:19810` 进入 Web 后台，操作同上。
 
 > **端口被占用了？** `python web_serve.py --port 你想要的端口号` 或 `AYABOT_PORT=你想要的端口号 python web_serve.py`
-
-### 🐳 或用 Docker 跑
-
-```bash
-mkdir ayabot && cd ayabot
-wget https://raw.githubusercontent.com/yujianke100/ayabot/main/config.example.yaml -O config.yaml
-wget https://raw.githubusercontent.com/yujianke100/ayabot/main/docker-compose.yml -O docker-compose.yml
-# 编辑 config.yaml，填直播间号和主播 UID
-mkdir -p data rooms accounts
-docker compose up -d
-```
-
-容器运行 WebUI（端口 19810），Bot 子进程由 WebUI 内建的 ProcessManager 自动管理。
-浏览器打开 `http://localhost:19810`。
-
-> **改端口？** 编辑 `docker-compose.yml`，修改 `ports` 左侧值和 `AYABOT_PORT` 环境变量。
-> 例如 Nginx 反向代理用 8000 → 容器内 19810：`"8000:19810"` + `AYABOT_PORT=19810`
 
 ---
 
@@ -134,6 +144,9 @@ python -m app.reset_admin --no-reset-flag
 | `#本月盲盒[:用户名]` | 本月盲盒汇总 |
 | `#ayabot <说点啥>` | AI 聊天（唤醒词可在后台修改） |
 | `#帮助` | 列出所有命令 |
+| 点赞直播间 | 自动感谢点赞（后台可开关） |
+| 分享直播间 | 自动感谢分享（后台可开关） |
+| 关注主播 | 自动感谢关注（后台可开关） |
 
 > 中文 `#` 和英文 `#` 都行，`＃签到` 也能识别。
 > 开启「免#指令」后，不带 `#` 前缀也能触发（如直接发「签到」）。
@@ -152,7 +165,7 @@ python -m app.reset_admin --no-reset-flag
 | 📊 **送礼排行** | 按日期看谁送了多少礼物/盲盒，带柱状图 |
 | 🎨 **精美导出** | 导出送礼明细卡片，可直接打印或截图 |
 | 🤖 **AI 回复** | 开关、改唤醒词、配 API Key、调温度、改人设。支持三种触发方式 |
-| ⚙️ **机器人配置** | 功能开关、冷却时间、弹幕限流、欢迎/感谢/盲盒模板、定时消息、关键词回复、签文 |
+| ⚙️ **机器人配置** | 功能开关、冷却时间、弹幕限流、欢迎/感谢/盲盒模板、PK汇报、点赞/转发/关注感谢、定时消息、关键词回复、签文 |
 | 👥 **用户管理** | 管理员增删改查、B站账号登录/验证 |
 | 💬 **弹幕记录** | 查看直播间历史弹幕 |
 | 🗑️ **数据管理** | 清理旧数据 |
@@ -163,11 +176,16 @@ python -m app.reset_admin --no-reset-flag
 |------|------|
 | 免#指令 | 不带 `#` 也能触发签到、盲盒等指令 |
 | AI免#前缀唤醒 | 弹幕以唤醒词开头即触发 AI 回复 |
-| 包含关键词触AI | 弹幕任何位置含唤醒词即触发 AI 回复 |
+| 包含关键词触AI | 弹幕任何位置含唤醒词即触发 AI 回复（需开启 AI免#前缀唤醒） |
+| 全局数字转大写（反屏蔽） | 所有回复中的数字转为大写中文，避开数字拦截 |
+| 点赞/转发/关注感谢 | 自动感谢观众的点赞、分享直播间、关注行为 |
+| PK汇报 | PK 开始时汇报对手粉丝数、大航海、观众数、贡献值 |
 | 弹幕记录 | 开启后记录所有弹幕到数据库，可在 Web 查看 |
 | 大航海欢迎/感谢 | 舰长/提督/总督专属模板 |
-| 自定义签文 | 修改抽签结果的六种签文内容 |
 | 盲盒统计（今日/本月） | 区分今日和本月的盲盒统计，支持自定义回复文本 |
+| 盲盒数字转中文 | 盲盒统计中的数字转为中文（全局未开启时可用） |
+| 玻璃心模式 | 盲盒亏损时隐藏真实收益，回复「服务器繁忙」 |
+| 自定义签文 | 修改抽签结果的六种签文内容 |
 
 ### 关键词回复
 
@@ -218,41 +236,6 @@ anchor_uid: 1000000                # ← 改成主播的 UID
 
 Windows .exe 版退出时会保存运行中的房间列表，下次启动自动恢复。
 无需手动重新启动每个房间。
-
----
-
-## 🐳 Docker 镜像（支持 ARM64 / AMD64）
-
-自动构建推送 multi-arch 镜像到 GitHub Container Registry 和 Docker Hub，
-**AMD64（普通 PC / 云服务器）和 ARM64（树莓派、苹果 M 系列、Oracle ARM 云）通用**：
-
-```bash
-# GitHub Container Registry（主镜像）
-docker pull ghcr.io/yujianke100/ayabot:latest
-
-# Docker Hub（备用）
-docker pull yujianke100/ayabot:latest
-```
-
-容器启动后即可在 WebUI 中管理机器人。
-完整部署步骤见上方的 [快速上手 → 用 Docker 跑](#-快速上手)。
-
-### 🇨🇳 国内镜像加速
-
-ghcr.io 国内拉取可能很慢，推荐以下方式：
-
-**方式一：通过 ghcr.io 镜像站拉取**
-
-```bash
-# 中科大 ghcr.io 镜像
-docker pull docker.mirrors.ustc.edu.cn/ghcr.io/yujianke100/ayabot:latest
-
-# 网易 ghcr.io 镜像
-docker pull hub-mirror.c.163.com/ghcr.io/yujianke100/ayabot:latest
-```
-
-**方式二：查询最新可用镜像站**
-→ [demo.kentxxq.com/app/mirror](https://demo.kentxxq.com/app/mirror)（实时检测国内各镜像站可用性）
 
 ---
 
