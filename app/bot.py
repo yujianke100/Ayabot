@@ -1009,28 +1009,21 @@ class LiveRobot:
             if not opp_name:
                 opp_name = "对面主播"
 
-            # ── 通过对手 uid 查粉丝数、直播间观众数、大航海数 ──
-            fans = online = guard_count = 0
+            # ── 通过对手 uid 查信息 ──
+            fans = online = guard_count = total_score = 0
             if opp_uid > 0:
                 try:
                     opp_user = user.User(uid=opp_uid)
-                    # 粉丝数
                     rel = await asyncio.wait_for(
                         opp_user.get_relation_info(), timeout=5
                     )
                     fans = int(rel.get("follower", 0) or 0)
-                    # 直播间 ID → 观众数 + 大航海数
                     uinfo = await asyncio.wait_for(
                         opp_user.get_user_info(), timeout=5
                     )
                     room_id = (uinfo.get("live_room", {}) or {}).get("roomid")
                     if room_id:
                         opp_room = live.LiveRoom(room_display_id=room_id)
-                        rinfo = await asyncio.wait_for(
-                            opp_room.get_room_info(), timeout=5
-                        )
-                        ri = rinfo.get("room_info", {}) or {}
-                        online = int(ri.get("online", 0) or 0)
                         try:
                             dh = await asyncio.wait_for(
                                 opp_room.get_dahanghai(page=1), timeout=5
@@ -1038,14 +1031,14 @@ class LiveRobot:
                             guard_count = int(dh.get("info", {}).get("num", 0) or 0)
                         except Exception:
                             pass
-                        # 高能榜在线人数（近似实际观众数）
+                        # 高能榜：在线人数 + 总贡献
                         try:
                             gnb = await asyncio.wait_for(
                                 opp_room.get_gaonengbang(page=1), timeout=5
                             )
-                            gnb_online = int(gnb.get("onlineNum", 0) or 0)
-                            if gnb_online > 0:
-                                online = gnb_online
+                            online = int(gnb.get("onlineNum", 0) or 0)
+                            items = gnb.get("OnlineRankItem", []) or []
+                            total_score = sum(int(item.get("score", 0) or 0) for item in items)
                         except Exception:
                             pass
                 except asyncio.TimeoutError:
@@ -1061,7 +1054,7 @@ class LiveRobot:
             # 拆成三条弹幕发送
             line1 = f"PK开始！对手{opp_name}"
             line2 = f"对手 {_fmt(fans)}粉，{guard_count}舰"
-            line3 = f"{online}观众，贡献{online}"
+            line3 = f"{online}观众，贡献{total_score}"
             await self._enqueue_message(text=line1, reply_uid=None)
             await self._enqueue_message(text=line2, reply_uid=None)
             await self._enqueue_message(text=line3, reply_uid=None)
@@ -1096,9 +1089,7 @@ class LiveRobot:
             msg = msg.replace("{score}", str(my_score) if my_score else "")
             msg = msg.strip()
             if not msg:
-                msg = f"PK {win_str}"
-                if my_score:
-                    msg += f" {my_score}"
+                msg = f"PK {win_str} 我方{my_score}"
 
             await self._enqueue_message(text=msg, reply_uid=None)
         except Exception as exc:

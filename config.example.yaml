@@ -31,7 +31,7 @@ features:
   periodic_message_template: "点个关注不迷路喵~"
   pk_report_enabled: true           # PK开始/结束时汇报对手信息
   pk_report_template: "PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}"
-  pk_end_template: "PK {result} 获胜方分数 {score}"       # {result}结果 {score}分数
+  pk_end_template: "{result} 我方分数{score}"       # {result}结果(胜利！/对方获胜/PK结束) {score}我方分数
   like_thanks_enabled: false        # 点赞感谢开关
   like_thanks_template: "感谢 {uname} 的点赞~"
   share_thanks_enabled: false       # 转发感谢开关
