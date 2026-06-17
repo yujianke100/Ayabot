@@ -23,15 +23,24 @@ def _make_ico(png_path: Path) -> Path | None:
         return None
 
 
+def _load_version() -> str:
+    """从项目根目录 VERSION 文件读取版本号。"""
+    base_dir = Path(__file__).resolve().parent.parent
+    ver_file = base_dir / "VERSION"
+    if ver_file.exists():
+        return ver_file.read_text(encoding="utf-8").strip()
+    return ""
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build Ayabot Windows .exe")
-    parser.add_argument("--version", default="", help="版本号, e.g. 0.1.1")
+    parser.add_argument("--version", default="", help="版本号, e.g. 0.1.2（默认从 VERSION 文件读取）")
     args = parser.parse_args()
 
-    exe_name = "Ayabot"
-    if args.version:
-        ver = args.version.lstrip("v")  # 去掉 "v" 前缀
-        exe_name = f"Ayabot-v{ver}"
+    # 优先用命令行参数，否则从 VERSION 文件读取
+    ver = args.version or _load_version()
+    ver = ver.lstrip("v")  # 去掉 "v" 前缀
+    exe_name = f"Ayabot-v{ver}" if ver else "Ayabot"
 
     base_dir = Path(__file__).resolve().parent.parent
     entry = base_dir / "scripts" / "tray_win.py"

@@ -34,6 +34,9 @@ from bilibili_api import live
 
 from app.config import DEFAULT_ROOMS_DIR
 from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room, set_rooms_base_dir, start_room_async, stop_room_async, restart_room_async, start_periodic_log_cleanup, cleanup_all_stale_pidfiles
+from app.version import get_version_display
+
+_APP_VERSION = get_version_display()
 
 logger = logging.getLogger("webui")
 
@@ -2223,10 +2226,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
         <div class="mt-5 pt-4 border-t border-gray-100 text-center">
             <p class="text-xs text-gray-400">
-                Ayabot v0.1.1 —
                 <a href="https://github.com/yujianke100/ayabot" target="_blank" class="text-blue-500 hover:underline">⭐ GitHub</a>
                 <span class="mx-1">·</span>
                 <span class="text-red-500 font-bold">完全免费</span> · 开源
+                <span class="block mt-1">Ayabot __AYABOT_VERSION__</span>
             </p>
         </div>
     </div>
@@ -3550,14 +3553,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
         <div class="pt-4 border-t border-gray-200">
             <p class="text-xs text-gray-400 text-center">
-                Ayabot v0.1.1 —
                 <a href="https://github.com/yujianke100/ayabot" target="_blank" class="text-blue-500 hover:underline">⭐ 去 GitHub 给个 Star</a>
                 <span class="mx-1">·</span>
                 本软件<span class="text-red-500 font-bold">完全免费</span>，以 GPLv3 协议开源
+                <span class="block mt-1">Ayabot __AYABOT_VERSION__</span>
             </p>
             <div class="mt-4 pt-4 border-t border-gray-100 text-center">
                 <p class="text-xs text-gray-500 mb-3">☕ 觉得好用？请作者喝杯咖啡吧 ❤️</p>
-                <p class="text-xs text-gray-400 mt-2">Ayabot v0.2.0</p>
                 <div class="flex justify-center gap-6">
                     <div class="text-center">
                         <img src="/alipay.jpg" width="150" height="150" alt="支付宝" class="rounded-xl border inline-block">
@@ -5665,6 +5667,9 @@ createApp({
 </body>
 </html>
 """
+
+# 注入版本号（从 VERSION 文件读取，一处修改全局同步）
+INDEX_HTML = INDEX_HTML.replace("__AYABOT_VERSION__", _APP_VERSION)
 
 
 @app.get("/", response_class=HTMLResponse)
