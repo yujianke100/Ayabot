@@ -2,7 +2,7 @@
   <img src="https://raw.githubusercontent.com/yujianke100/Ayabot/main/figs/logo.png" alt="ayabot" width="200" />
 </p>
 
-# ayabot
+# Ayabot：免费开源的 Bilibili 直播间机器人
 
 <p align="center">
   <a href="https://github.com/yujianke100/ayabot/releases"><img src="https://img.shields.io/github/v/release/yujianke100/ayabot" alt="Release"></a>
