@@ -2808,7 +2808,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <div class="flex items-center gap-4 flex-wrap">
                     <button @click="saveLlmConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
                     <button @click="downloadJson('/api/llm_config/export', 'llm_config.json')" class="bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded text-sm text-xs">📤 导出</button>
-                    <button @click="importJsonFile('选择 AI 配置 JSON','/api/llm_config/import',()=>loadLlmConfig())" class="bg-orange-500 hover:bg-orange-600 text-white px-3 py-2 rounded text-sm text-xs">📥 导入</button>
+                    <button @click="importJsonFile('选择 AI 配置 JSON','/api/llm_config/import', afterImportLlm)" class="bg-orange-500 hover:bg-orange-600 text-white px-3 py-2 rounded text-sm text-xs">📥 导入</button>
                     <span v-if="llmSaveMsg" class="text-sm" :class="llmSaveOk ? 'text-green-600' : 'text-red-500'">{{ llmSaveMsg }}</span>
                     <span v-if="llmSaveOk" class="text-xs text-green-600">✅ 即时生效，无需重启</span>
                     <select v-model="applyLlmTemplate" class="border p-1 rounded text-xs">
@@ -4102,6 +4102,21 @@ createApp({
             const rid = selectedRoom.value?.room_id;
             if (!rid) return;
             importJsonFile('选择机器人配置 JSON','/api/rooms/'+rid+'/config/import',()=>editRoomConfig(rid));
+        }
+        async function afterImportLlm() {
+            // 导入全局 LLM 配置后，如果在房间内还需同步写入房间配置
+            if (selectedRoom.value?.room_id) {
+                try {
+                    const r = await fetch('/api/llm_config/export', {credentials:'include'});
+                    const d = await r.json();
+                    await fetch('/api/rooms/'+selectedRoom.value.room_id+'/config', {
+                        method:'POST', headers:{'Content-Type':'application/json'},
+                        credentials:'include', body:JSON.stringify({llm:d}),
+                    });
+                } catch(e) { /* best-effort */ }
+            }
+            editRoomConfig(selectedRoom?.value?.room_id);
+            setTimeout(loadLlmConfig, 300);
         }
         function selectRoomSubTab(key) {
             roomSubTab.value = key;
@@ -5831,7 +5846,7 @@ createApp({
                 cfgSaveMsg, cfgSaveOk, loadGeneralConfig,
                 restartMsg, restartOk, restartService,
                 selectedRoom, roomSubTab, roomSubTabs, newRoomAccount, selectedRoomAccount,
-                selectRoom, goBackRoomList, assignAccountToRoom, toggleCreateRoom, toggleNewAccount, downloadUrl, downloadJson, importJsonFile, exportRoomConfig, importRoomConfig,
+                selectRoom, goBackRoomList, assignAccountToRoom, toggleCreateRoom, toggleNewAccount, downloadUrl, downloadJson, importJsonFile, exportRoomConfig, importRoomConfig, afterImportLlm,
                 selectRoomSubTab, accountAssignMsg, accountAssignOk, accountRestarting, assignAccountAndRestart,
                 startEditRoomName, saveRoomName, editingRoomName, roomNameEdit,
                 rooms, showCreateRoom, newRoomUid, newRoomName, newRoomPort, newRoomDisplayId,
