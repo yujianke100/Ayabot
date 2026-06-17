@@ -3991,7 +3991,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
                             <p v-if="updateData.hasUpdate" class="text-sm text-gray-600">
                                 最新版本：<span class="font-mono font-bold text-green-600">{{ updateData.latest }}</span>
                             </p>
-                            <p v-if="updateData.hasUpdate" class="text-xs text-gray-500 mt-2">{{ updateData.body }}</p>
                             <div v-if="updateData.hasUpdate" class="pt-2">
                                 <a :href="updateData.url" target="_blank" class="inline-block bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">前往 GitHub 下载</a>
                             </div>
@@ -4207,7 +4206,6 @@ createApp({
                     hasUpdate,
                     current: 'v' + current,
                     latest: 'v' + latest,
-                    body: (j.body || '').split('\n').slice(0, 5).join('\n').slice(0, 200),
                     url: j.html_url || 'https://github.com/yujianke100/ayabot/releases',
                 };
             } catch(e) {
