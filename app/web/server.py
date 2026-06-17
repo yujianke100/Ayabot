@@ -3403,7 +3403,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <!-- 日期选择 + 排序 -->
-                <div class="flex items-center gap-2 flex-wrap">
+                <div class="relative flex items-center gap-2 flex-wrap">
                     <button @click="dmShowCal = !dmShowCal" class="border p-2 rounded text-sm bg-white">
                         {{ dmSelectedDates.size ? '已选 '+dmSelectedDates.size+' 天' : '点击选择日期' }}
                         <span v-if="dmDateFrom && dmDateTo && dmDateFrom !== dmDateTo" class="text-gray-400 ml-1">({{ dmDateFrom }} ~ {{ dmDateTo }})</span>
