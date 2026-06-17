@@ -2902,7 +2902,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('features')">
                     <span v-if="configSections.features">▼</span><span v-else>▶</span> 🎛️ 功能开关
                 </h3>
-                <div v-show="roomConfig.features" class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                <div v-show="configSections.features">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.welcome_enabled" class="w-4 h-4"> 欢迎</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.thanks_enabled" class="w-4 h-4"> 感谢</label>
 
