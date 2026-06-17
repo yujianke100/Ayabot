@@ -3562,11 +3562,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <p class="text-xs text-gray-500 mb-3">☕ 觉得好用？请作者喝杯咖啡吧 ❤️</p>
                 <div class="flex justify-center gap-6">
                     <div class="text-center">
-                        <img src="/alipay.jpg" width="150" height="150" alt="支付宝" class="rounded-xl border inline-block">
+                        <img src="/figs/alipay.jpg" width="150" height="150" alt="支付宝" class="rounded-xl border inline-block">
                         <p class="text-xs text-gray-400 mt-1">支付宝</p>
                     </div>
                     <div class="text-center">
-                        <img src="/wechat.png" width="150" height="150" alt="微信" class="rounded-xl border inline-block">
+                        <img src="/figs/wechat.png" width="150" height="150" alt="微信" class="rounded-xl border inline-block">
                         <p class="text-xs text-gray-400 mt-1">微信</p>
                     </div>
                 </div>
@@ -5679,7 +5679,7 @@ async def index():
 
 @app.get("/favicon.ico")
 async def favicon():
-    favicon_path = Path(__file__).resolve().parent.parent.parent / "icon.png"
+    favicon_path = Path(__file__).resolve().parent.parent.parent / "figs" / "icon.png"
     if favicon_path.exists():
         return FastResponse(content=favicon_path.read_bytes(), media_type="image/x-icon")
     return Response(status_code=204)
@@ -5688,17 +5688,17 @@ async def favicon():
 # ── 打赏二维码 ──
 
 
-@app.get("/alipay.jpg")
+@app.get("/figs/alipay.jpg")
 async def alipay_qr():
-    p = Path(__file__).resolve().parent.parent.parent / "alipay.jpg"
+    p = Path(__file__).resolve().parent.parent.parent / "figs" / "alipay.jpg"
     if p.exists():
         return FastResponse(content=p.read_bytes(), media_type="image/jpeg")
     return Response(status_code=404)
 
 
-@app.get("/wechat.png")
+@app.get("/figs/wechat.png")
 async def wechat_qr():
-    p = Path(__file__).resolve().parent.parent.parent / "wechat.png"
+    p = Path(__file__).resolve().parent.parent.parent / "figs" / "wechat.png"
     if p.exists():
         return FastResponse(content=p.read_bytes(), media_type="image/png")
     return Response(status_code=404)

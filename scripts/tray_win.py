@@ -346,7 +346,7 @@ def _view_logs() -> None:
 
     # 尝试设置图标
     try:
-        ico = Path(sys._MEIPASS) / "icon.png" if getattr(sys, "_MEIPASS", None) else BASE_DIR / "icon.png"
+        ico = Path(sys._MEIPASS) / "figs" / "icon.png" if getattr(sys, "_MEIPASS", None) else BASE_DIR / "figs" / "icon.png"
         if ico.exists():
             from PIL import Image, ImageTk
             img = ImageTk.PhotoImage(Image.open(ico).resize((32, 32)))
@@ -617,15 +617,15 @@ def _create_tray_icon() -> None:
     if getattr(sys, "_MEIPASS", None):
         meipass = Path(sys._MEIPASS)
         icon_candidates.extend([
-            meipass / "icon.png",
-            meipass / "logo.png",
+            meipass / "figs" / "icon.png",
+            meipass / "figs" / "logo.png",
         ])
     # 2) .exe 同级目录
     icon_candidates += [
-        BASE_DIR / "icon.png",
-        BASE_DIR / "logo.png",
-        BASE_DIR / "assets" / "icon.png",
-        BASE_DIR / "assets" / "logo.png",
+        BASE_DIR / "figs" / "icon.png",
+        BASE_DIR / "figs" / "logo.png",
+        BASE_DIR / "assets" / "figs" / "icon.png",
+        BASE_DIR / "assets" / "figs" / "logo.png",
     ]
     loaded = False
     for lp in icon_candidates:

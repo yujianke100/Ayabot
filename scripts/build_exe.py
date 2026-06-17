@@ -44,8 +44,8 @@ def main() -> None:
 
     base_dir = Path(__file__).resolve().parent.parent
     entry = base_dir / "scripts" / "tray_win.py"
-    icon_png = base_dir / "icon.png"
-    logo_png = base_dir / "logo.png"
+    icon_png = base_dir / "figs" / "icon.png"
+    logo_png = base_dir / "figs" / "logo.png"
 
     if not entry.exists():
         sys.exit(f"ERROR: entry point not found: {entry}")
@@ -95,14 +95,14 @@ def main() -> None:
             cmd.extend(["--icon", str(ico)])
         else:
             cmd.extend(["--icon", str(icon_png)])
-        cmd.extend(["--add-data", f"{icon_png}{os.pathsep}."])
+        cmd.extend(["--add-data", f"{icon_png}{os.pathsep}figs"])
     elif logo_png.exists():
         ico = _make_ico(logo_png)
         if ico:
             cmd.extend(["--icon", str(ico)])
         else:
             cmd.extend(["--icon", str(logo_png)])
-        cmd.extend(["--add-data", f"{logo_png}{os.pathsep}."])
+        cmd.extend(["--add-data", f"{logo_png}{os.pathsep}figs"])
 
     # 打包默认配置（嵌入 exe，运行时自动释放到 DATA_DIR）
     example_cfg = base_dir / "config.example.yaml"

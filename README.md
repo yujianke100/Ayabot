@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/yujianke100/Ayabot/main/logo.png" alt="ayabot" width="200" />
+  <img src="https://raw.githubusercontent.com/yujianke100/Ayabot/main/figs/logo.png" alt="ayabot" width="200" />
 </p>
 
 # ayabot
@@ -100,6 +100,11 @@ cp config.example.yaml config.yaml
 
 # 启动 Web 管理后台（内置 Bot 进程管理器）
 python web_serve.py
+```
+
+或用启动脚本一键启动（自动激活虚拟环境）：
+```bash
+bash start.sh
 ```
 
 浏览器打开 `http://localhost:19810` 进入 Web 后台，操作同上。
@@ -267,7 +272,7 @@ python scripts/build_exe.py
 
 exe 包含以下内容，启动时自动释放到 `%LOCALAPPDATA%\Ayabot\`：
 - `config.example.yaml`（作为默认配置模板，首次启动自动复制）
-- `icon.png`（托盘图标）
+- `figs/icon.png`（托盘图标）
 
 运行所需的数据目录结构：
 
@@ -314,6 +319,6 @@ GNU General Public License v3.0 — 详见 [LICENSE](LICENSE)。
 如果觉得 Ayabot 有帮助，欢迎请作者喝杯咖啡 ❤️
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/yujianke100/Ayabot/main/alipay.jpg" width="200" alt="支付宝打赏">
-  <img src="https://raw.githubusercontent.com/yujianke100/Ayabot/main/wechat.png" width="200" alt="微信打赏">
+  <img src="https://raw.githubusercontent.com/yujianke100/Ayabot/main/figs/alipay.jpg" width="200" alt="支付宝打赏">
+  <img src="https://raw.githubusercontent.com/yujianke100/Ayabot/main/figs/wechat.png" width="200" alt="微信打赏">
 </p>
