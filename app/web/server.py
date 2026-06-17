@@ -5821,7 +5821,7 @@ createApp({
                 llmWakeWord, llmTemp, llmTopP, llmMaxTokens,
                 llmSaveMsg, llmSaveOk, llmTestText, llmTestResp,
                 ctxEnabled, ctxMode, ctxContent, ctxMaxMsg,
-                saveLlmConfig, testLlm,
+                saveLlmConfig, testLlm, loadLlmConfig,
                 cfgRoomId, cfgAnchorUid, cfgWelcomeCd, cfgThanksCd,
                 cfgSendInterval, cfgRetry, cfgMaxQueue, cfgReplyDelay,
                 cfgWelcomeOn, cfgThanksOn, cfgBlindboxOn, cfgGuardOn, cfgConnectedMsg,
