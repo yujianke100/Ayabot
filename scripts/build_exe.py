@@ -104,6 +104,11 @@ def main() -> None:
             cmd.extend(["--icon", str(logo_png)])
         cmd.extend(["--add-data", f"{logo_png}{os.pathsep}figs"])
 
+    # 打包 VERSION 文件（供 app/version.py 在冻结模式下读取）
+    ver_file = base_dir / "VERSION"
+    if ver_file.exists():
+        cmd.extend(["--add-data", f"{ver_file}{os.pathsep}."])
+
     # 打包默认配置（嵌入 exe，运行时自动释放到 DATA_DIR）
     example_cfg = base_dir / "config.example.yaml"
     if example_cfg.exists():
