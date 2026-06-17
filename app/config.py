@@ -66,6 +66,7 @@ class FeatureConfig:
     llm_bare_trigger: bool = False  # AI回复单独免#：弹幕开头匹配唤醒词即触发
     llm_keyword_trigger: bool = False  # 允许包含关键词就触发AI回复（需 AI免#前缀唤醒）
     pk_report_enabled: bool = True  # PK开始时汇报对手信息
+    pk_end_report_enabled: bool = False  # PK结束汇报（默认关闭，胜利失败易报错）
     pk_report_template: str = "PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}"  # PK汇报模板
     pk_end_template: str = "{result} 我方分数{score}"  # PK结束模板，{result}结果(胜利！/对方获胜/PK结束) {score}我方分数
     # 点赞感谢
@@ -314,6 +315,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             use_chinese_numbers=bool(features.get("use_chinese_numbers", False)),
             use_chinese_numbers_global=bool(features.get("use_chinese_numbers_global", False)),
             pk_report_enabled=bool(features.get("pk_report_enabled", True)),
+            pk_end_report_enabled=bool(features.get("pk_end_report_enabled", False)),
             pk_report_template=str(features.get("pk_report_template", "PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}")),
             pk_end_template=str(features.get("pk_end_template", "{result} 我方分数{score}")),
             like_thanks_enabled=bool(features.get("like_thanks_enabled", False)),
@@ -526,6 +528,7 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "uid_blacklist": config.features.uid_blacklist,
             "keyword_filter": config.features.keyword_filter,
             "pk_report_enabled": config.features.pk_report_enabled,
+            "pk_end_report_enabled": config.features.pk_end_report_enabled,
             "pk_report_template": config.features.pk_report_template,
             "pk_end_template": config.features.pk_end_template,
             "like_thanks_enabled": config.features.like_thanks_enabled,

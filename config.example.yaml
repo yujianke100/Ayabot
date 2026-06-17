@@ -43,7 +43,7 @@ features:
 
 cooldown:
   welcome_user_seconds: 600
-  thanks_user_seconds: 10
+  thanks_user_seconds: 0
 
 rate_limit:
   send_interval_seconds: 1.2

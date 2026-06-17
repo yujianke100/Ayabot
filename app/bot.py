@@ -1120,7 +1120,7 @@ class LiveRobot:
             self.logger.error("Error processing PK_BATTLE_START: %s", exc, exc_info=True)
 
     async def _handle_pk_end(self, event: dict[str, Any]) -> None:
-        if not self.config.features.pk_report_enabled:
+        if not self.config.features.pk_end_report_enabled:
             return
         try:
             raw = event.get("data", {})
