@@ -45,6 +45,10 @@
 
 下载 `Ayabot.exe` 后直接双击运行，无需 Python 环境：
 
+> **下载链接**：[Ayabot-latest.exe](https://github.com/yujianke100/ayabot/releases/latest/download/Ayabot-latest.exe)（永远指向最新版）
+>
+> 🇨🇳 **国内镜像**：[ghproxy.com 加速](https://ghproxy.com/https://github.com/yujianke100/ayabot/releases/latest/download/Ayabot-latest.exe)
+
 ```
 Ayabot.exe 单独一个文件，双击即运行
 ├── 托盘图标（右下角）

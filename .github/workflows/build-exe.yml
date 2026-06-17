@@ -44,6 +44,12 @@ jobs:
       - name: Build .exe
         run: python scripts/build_exe.py --version "${{ github.ref_name }}"
 
+      - name: 复制一份固定名称的 exe（供国内镜像下载）
+        run: |
+          $exe = (Get-ChildItem dist/Ayabot-v*.exe | Select-Object -First 1).FullName
+          Copy-Item $exe dist/Ayabot-latest.exe
+          echo "latest_exe=dist/Ayabot-latest.exe" >> $env:GITHUB_ENV
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -54,5 +60,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Ayabot-v*.exe
+          files: |
+            dist/Ayabot-v*.exe
+            dist/Ayabot-latest.exe
           generate_release_notes: true
