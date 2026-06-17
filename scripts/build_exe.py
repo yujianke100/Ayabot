@@ -95,14 +95,18 @@ def main() -> None:
             cmd.extend(["--icon", str(ico)])
         else:
             cmd.extend(["--icon", str(icon_png)])
-        cmd.extend(["--add-data", f"{icon_png}{os.pathsep}figs"])
     elif logo_png.exists():
         ico = _make_ico(logo_png)
         if ico:
             cmd.extend(["--icon", str(ico)])
         else:
             cmd.extend(["--icon", str(logo_png)])
-        cmd.extend(["--add-data", f"{logo_png}{os.pathsep}figs"])
+
+    # 打包 figs/ 目录下的图片（打赏二维码、logo、icon 等）
+    for fname in ["alipay.jpg", "wechat.png", "icon.png", "logo.png"]:
+        fp = base_dir / "figs" / fname
+        if fp.exists():
+            cmd.extend(["--add-data", f"{fp}{os.pathsep}figs"])
 
     # 打包 VERSION 文件（供 app/version.py 在冻结模式下读取）
     ver_file = base_dir / "VERSION"

@@ -19,6 +19,7 @@ import logging
 import os
 import secrets
 import sqlite3
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -6356,9 +6357,19 @@ async def favicon():
 # ── 打赏二维码 ──
 
 
+def _figs_path(name: str) -> Path:
+    """在 PyInstaller 冻结模式和正常模式下查找 figs/ 目录下的文件。"""
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        p = Path(sys._MEIPASS) / "figs" / name
+        if p.exists():
+            return p
+    p = Path(__file__).resolve().parent.parent.parent / "figs" / name
+    return p
+
+
 @app.get("/figs/alipay.jpg")
 async def alipay_qr():
-    p = Path(__file__).resolve().parent.parent.parent / "figs" / "alipay.jpg"
+    p = _figs_path("alipay.jpg")
     if p.exists():
         return FastResponse(content=p.read_bytes(), media_type="image/jpeg")
     return Response(status_code=404)
@@ -6366,7 +6377,7 @@ async def alipay_qr():
 
 @app.get("/figs/wechat.png")
 async def wechat_qr():
-    p = Path(__file__).resolve().parent.parent.parent / "figs" / "wechat.png"
+    p = _figs_path("wechat.png")
     if p.exists():
         return FastResponse(content=p.read_bytes(), media_type="image/png")
     return Response(status_code=404)
