@@ -1430,17 +1430,16 @@ async def api_create_room(request: Request):
 
     # 写入房间配置
     port = body.get("port", 8000)
-    room_name = body.get("room_name", "")
+    room_name = body.get("room_name", "") or str(anchor_uid)
     bot_name = f"ayabot{room_id[:4]}"
     from app.config import update_config_from_dict
     cfg_update = {
         "room_display_id": int(room_display_id),
         "anchor_uid": int(anchor_uid),
         "bot_name": bot_name,
+        "room_name": room_name,
         "web_ui": {"port": int(port)},
     }
-    if room_name:
-        cfg_update["room_name"] = room_name
     update_config_from_dict(cfg_update, str(cfg_path))
 
     logger.info("room created: id=%s uid=%s port=%s", room_id, anchor_uid, port)
@@ -1628,7 +1627,7 @@ def _list_accounts() -> list[dict[str, Any]]:
             except Exception:
                 meta = {}
         has_cred = cred_path.exists()
-        nick = meta.get("nickname", "") or meta.get("uname", "") or ""
+        nick = meta.get("nickname", "") or meta.get("uname", "") or f"UID:{uid}"
         accounts.append({
             "uid": uid,
             "nickname": nick,
@@ -1775,11 +1774,11 @@ async def api_save_account_credential(request: Request):
     except Exception:
         pass
 
-    if nickname:
-        (acc_dir / "meta.yaml").write_text(
-            yaml.dump({"nickname": nickname, "uname": nickname}, allow_unicode=True),
-            encoding="utf-8",
-        )
+    # 始终写入 meta.yaml（即使昵称获取失败也用 UID 兜底）
+    (acc_dir / "meta.yaml").write_text(
+        yaml.dump({"nickname": nickname or f"UID:{dedeuserid}", "uname": nickname or ""}, allow_unicode=True),
+        encoding="utf-8",
+    )
 
     _BILI_LOGIN_SESSIONS.pop(session_id, None)
     logger.info("bili account saved: uid=%s nickname=%s", dedeuserid, nickname)
