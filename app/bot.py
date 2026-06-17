@@ -624,6 +624,23 @@ class LiveRobot:
         uid, uname, text, moderator_hint = parsed
         self.logger.debug("danmaku received: uid=%s text=%s (anchor_uid=%s)", uid, text, self.config.anchor_uid)
 
+        # ── UID 黑名单 ──
+        bl = self.config.features.uid_blacklist
+        if bl:
+            h = datetime.datetime.now().hour
+            for rule in bl:
+                if rule.get("uid") == uid:
+                    ts = rule.get("time_start", 0)
+                    te = rule.get("time_end", 23)
+                    if ts <= te:
+                        if ts <= h <= te:
+                            self.logger.debug("uid_blacklist blocked: uid=%s text=%s", uid, text)
+                            return
+                    else:  # 跨天（如 22~6）
+                        if h >= ts or h <= te:
+                            self.logger.debug("uid_blacklist blocked (cross-day): uid=%s text=%s", uid, text)
+                            return
+
         # 忽略自己发的弹幕（AI 回复或系统消息被广播回来时，可能触发关键词规则）
         if self._bot_uid and uid == self._bot_uid:
             self.logger.debug("skip self-sent danmaku: uid=%s text=%s", uid, text)
@@ -1118,6 +1135,31 @@ class LiveRobot:
         return moderator_hint
 
     async def _enqueue_message(self, text: str, reply_uid: Optional[int]) -> None:
+        # ── 关键词过滤 ──
+        kf = self.config.features.keyword_filter
+        if kf:
+            blocked = False
+            for rule in kf:
+                kw = rule.get("keyword", "")
+                if not kw:
+                    continue
+                mode = rule.get("match_mode", "contains")
+                action = rule.get("action", "block")
+                if mode == "exact":
+                    matched = text.strip() == kw.strip()
+                else:
+                    matched = kw in text
+                if matched:
+                    if action == "censor":
+                        text = text.replace(kw, "*" * len(kw))
+                        self.logger.debug("keyword_filter censored: kw=%s text_after=%s", kw, text)
+                    else:
+                        blocked = True
+                        self.logger.debug("keyword_filter blocked: kw=%s text=%s", kw, text)
+                        break
+            if blocked:
+                return
+
         # 全局数字转大写
         if self.config.features.use_chinese_numbers_global:
             text = _to_chinese_num(text)

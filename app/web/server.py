@@ -2946,6 +2946,64 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <hr>
+                <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('uidBlacklist')">
+                    <span v-if="configSections.uidBlacklist">▼</span><span v-else>▶</span> 🚫 UID 黑名单
+                </h3>
+                <div v-show="configSections.uidBlacklist">
+                    <p class="text-xs text-gray-500 mb-2">无视指定 UID 用户发送的所有弹幕（不影响其送礼/盲盒记录）。</p>
+                    <div v-for="(r, ri) in (roomConfig.features.uid_blacklist||[])" :key="ri" class="border rounded p-3 bg-gray-50 mb-2 space-y-2">
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs font-bold">#{{ ri+1 }}</span>
+                            <button @click="roomConfig.features.uid_blacklist.splice(ri,1)" class="bg-red-50 hover:bg-red-100 text-red-500 px-2 py-0.5 rounded text-xs font-medium">删除</button>
+                        </div>
+                        <label class="text-xs text-gray-500">UID
+                            <input type="number" v-model.number="r.uid" class="border p-1 rounded w-full text-sm mt-1" placeholder="用户UID">
+                        </label>
+                        <label class="flex items-center gap-1 text-xs text-gray-500 mt-1">
+                            <input type="checkbox" v-model="r.allDay" class="w-3.5 h-3.5" @change="r.time_start=0; r.time_end=23"> 全天生效
+                        </label>
+                        <div v-if="!r.allDay" class="grid grid-cols-2 gap-2">
+                            <label class="text-xs text-gray-500">起始小时<input type="number" v-model.number="r.time_start" min="0" max="23" class="border p-1 rounded w-full text-sm mt-1"></label>
+                            <label class="text-xs text-gray-500">结束小时<input type="number" v-model.number="r.time_end" min="0" max="23" class="border p-1 rounded w-full text-sm mt-1"></label>
+                        </div>
+                    </div>
+                    <button @click="(roomConfig.features.uid_blacklist||(roomConfig.features.uid_blacklist=[])).push({uid:0,time_start:0,time_end:23,allDay:true})" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-3 py-1 rounded text-xs font-medium">➕ 添加 UID</button>
+                </div>
+
+                <hr>
+                <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('keywordFilter')">
+                    <span v-if="configSections.keywordFilter">▼</span><span v-else>▶</span> 🔤 关键词屏蔽
+                </h3>
+                <div v-show="configSections.keywordFilter">
+                    <p class="text-xs text-gray-500 mb-2">限制机器人发送包含指定关键词的弹幕。支持「包含匹配」和「精确匹配」，可选择拦截整条或替换为*。</p>
+                    <div v-for="(r, ri) in (roomConfig.features.keyword_filter||[])" :key="ri" class="border rounded p-3 bg-gray-50 mb-2 space-y-2">
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs font-bold">#{{ ri+1 }}</span>
+                            <button @click="roomConfig.features.keyword_filter.splice(ri,1)" class="bg-red-50 hover:bg-red-100 text-red-500 px-2 py-0.5 rounded text-xs font-medium">删除</button>
+                        </div>
+                        <label class="text-xs text-gray-500">关键词
+                            <input type="text" v-model="r.keyword" class="border p-1 rounded w-full text-sm mt-1" placeholder="输入关键词">
+                        </label>
+                        <div class="grid grid-cols-2 gap-2">
+                            <label class="text-xs text-gray-500">匹配模式
+                                <select v-model="r.match_mode" class="border p-1 rounded w-full text-sm mt-1">
+                                    <option value="contains">包含</option>
+                                    <option value="exact">精确</option>
+                                </select>
+                            </label>
+                            <label class="text-xs text-gray-500">触发动作
+                                <select v-model="r.action" class="border p-1 rounded w-full text-sm mt-1">
+                                    <option value="block">拦截不发送</option>
+                                    <option value="censor">关键词变*</option>
+                                </select>
+                            </label>
+                        </div>
+                        <p v-if="r.match_mode==='exact' && r.action==='censor'" class="text-[10px] text-yellow-600">精确匹配 + 变* 不会生效，已自动改为拦截</p>
+                    </div>
+                    <button @click="(roomConfig.features.keyword_filter||(roomConfig.features.keyword_filter=[])).push({keyword:'',match_mode:'contains',action:'block'})" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-3 py-1 rounded text-xs font-medium">➕ 添加关键词规则</button>
+                </div>
+
+                <hr>
                 <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('pk')">
                     <span v-if="configSections.pk">▼</span><span v-else>▶</span> ⚔️ PK汇报
                 </h3>
@@ -3987,6 +4045,8 @@ createApp({
         const configSections = ref({
             rateLimit: false,
             features: true,
+            uidBlacklist: false,
+            keywordFilter: false,
             pk: false,
             templates: false,
             periodic: false,
