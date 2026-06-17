@@ -2161,14 +2161,14 @@ async def api_room_delete_old(room_id: str, request: Request):
 
 
 @app.get("/api/danmaku_log")
-async def api_get_danmaku_log(room_id: str = "", limit: int = 50, offset: int = 0, date_from: str = "", date_to: str = ""):
+async def api_get_danmaku_log(room_id: str = "", limit: int = 50, offset: int = 0, date_from: str = "", date_to: str = "", asc: int = 1):
     try:
         db_path = _room_db_path(room_id) if room_id else Path(_DB_PATH)
         if not db_path.exists():
             return {"rows": [], "total": 0}
         from app.storage import StatsStore
         store = StatsStore(str(db_path))
-        rows = store.get_danmaku_log(limit=limit, offset=offset, date_from=date_from, date_to=date_to)
+        rows = store.get_danmaku_log(limit=limit, offset=offset, date_from=date_from, date_to=date_to, asc=bool(asc))
         total = store.get_danmaku_log_count(date_from=date_from, date_to=date_to)
         store.close()
         return {"rows": rows, "total": total}
@@ -2194,7 +2194,7 @@ async def api_room_danmaku_dates(room_id: str):
 
 
 @app.get("/api/rooms/{room_id}/danmaku/export")
-async def api_room_danmaku_export_dates(room_id: str, date_from: str = "", date_to: str = ""):
+async def api_room_danmaku_export_dates(room_id: str, date_from: str = "", date_to: str = "", asc: int = 1):
     """按日期范围导出弹幕为 CSV。"""
     import csv, io
     db_path = _room_db_path(room_id)
@@ -2203,7 +2203,7 @@ async def api_room_danmaku_export_dates(room_id: str, date_from: str = "", date_
     try:
         from app.storage import StatsStore
         store = StatsStore(str(db_path))
-        rows = store.get_danmaku_log(limit=100000, offset=0, date_from=date_from, date_to=date_to)
+        rows = store.get_danmaku_log(limit=100000, offset=0, date_from=date_from, date_to=date_to, asc=bool(asc))
         store.close()
         buf = io.StringIO()
         w = csv.writer(buf)
@@ -3402,14 +3402,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     </div>
                 </div>
 
-                <!-- 日期选择 -->
-                <div class="relative">
+                <!-- 日期选择 + 排序 -->
+                <div class="flex items-center gap-2 flex-wrap">
                     <button @click="dmShowCal = !dmShowCal" class="border p-2 rounded text-sm bg-white">
                         {{ dmSelectedDates.size ? '已选 '+dmSelectedDates.size+' 天' : '点击选择日期' }}
                         <span v-if="dmDateFrom && dmDateTo && dmDateFrom !== dmDateTo" class="text-gray-400 ml-1">({{ dmDateFrom }} ~ {{ dmDateTo }})</span>
                         <span v-else-if="dmDateFrom" class="text-gray-400 ml-1">({{ dmDateFrom }})</span>
                     </button>
-                    <span class="text-xs text-gray-400 ml-2">{{ dmDates.length }} 天有数据，点击日期可多选</span>
+                    <button @click="dmAsc = !dmAsc; loadDanmakuLog()" class="border p-2 rounded text-sm bg-white hover:bg-gray-50" :title="dmAsc ? '旧到新' : '新到旧'">
+                        {{ dmAsc ? '📅 旧→新' : '📅 新→旧' }}
+                    </button>
+                    <span class="text-xs text-gray-400">{{ dmDates.length }} 天有数据，点击日期可多选</span>
                     <div v-if="dmShowCal" @click.stop class="absolute top-full left-0 mt-1 bg-white border rounded-xl shadow-lg z-50 p-3 w-[300px]">
                         <div class="flex justify-between items-center mb-2">
                             <button @click="dmCalMonth--" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&lt;</button>
@@ -3925,6 +3928,7 @@ createApp({
         const dmShowCal = ref(false);
         const dmDateFrom = ref('');
         const dmDateTo = ref('');
+        const dmAsc = ref(false);
         const dmCalDays = Vue.computed(() => {
             const y = dmCalYear.value, m = dmCalMonth.value;
             const fd = new Date(y, m, 1).getDay();
@@ -4690,7 +4694,7 @@ createApp({
             let df = '', dt = '';
             if (sel.length) { df = sel[0]; dt = sel[sel.length-1]; }
             dmDateFrom.value = df; dmDateTo.value = dt;
-            const url = `/api/danmaku_log?room_id=${roomId}&limit=${danmakuLimit.value}&offset=${danmakuOffset.value}&date_from=${df}&date_to=${dt}`;
+            const url = `/api/danmaku_log?room_id=${roomId}&limit=${danmakuLimit.value}&offset=${danmakuOffset.value}&date_from=${df}&date_to=${dt}&asc=${dmAsc.value ? 1 : 0}`;
             try {
                 const res = await fetch(url, {credentials: 'include'});
                 if (res.status === 401) { loggedIn.value = false; return; }
@@ -4704,7 +4708,8 @@ createApp({
             const rid = selectedRoom.value?.room_id;
             if (!rid || !dmSelectedDates.value.size) { alert('请先选择日期'); return; }
             const sel = Array.from(dmSelectedDates.value).sort();
-            await downloadUrl(`/api/rooms/${rid}/danmaku/export?date_from=${sel[0]}&date_to=${sel[sel.length-1]}`, `danmaku_${rid}_${sel[0]}_${sel[sel.length-1]}.csv`);
+            const a = dmAsc.value ? 1 : 0;
+            await downloadUrl(`/api/rooms/${rid}/danmaku/export?date_from=${sel[0]}&date_to=${sel[sel.length-1]}&asc=${a}`, `danmaku_${rid}_${sel[0]}_${sel[sel.length-1]}.csv`);
         }
         async function clearDanmakuLog() {
             const rid = selectedRoom.value?.room_id;
@@ -5948,7 +5953,7 @@ createApp({
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
                 danmakuRows, danmakuErr, danmakuOffset, danmakuLimit, danmakuTotal, danmakuPage,
-                loadDanmakuLog, clearDanmakuLog, fmtDanmakuTime, loadDmDates, dmToggleDate, dmExportSelected, dmCalDays, dmCalYear, dmCalMonth, dmShowCal, dmSelectedDates, dmDates, dmDatesSet,
+                loadDanmakuLog, clearDanmakuLog, fmtDanmakuTime, loadDmDates, dmToggleDate, dmExportSelected, dmCalDays, dmCalYear, dmCalMonth, dmShowCal, dmSelectedDates, dmDates, dmDatesSet, dmAsc,
                 llmEnabled, llmProvider, llmApiKey, llmBaseUrl, llmModel, llmPrompt,
                 llmWakeWord, llmTemp, llmTopP, llmMaxTokens,
                 llmSaveMsg, llmSaveOk, llmTestText, llmTestResp,

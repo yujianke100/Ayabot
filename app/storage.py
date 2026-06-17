@@ -395,7 +395,7 @@ class StatsStore:
         ).fetchall()
         return [r[0] for r in rows if r[0]]
 
-    def get_danmaku_log(self, limit: int = 50, offset: int = 0, date_from: str = "", date_to: str = "") -> list[dict[str, int | str]]:
+    def get_danmaku_log(self, limit: int = 50, offset: int = 0, date_from: str = "", date_to: str = "", asc: bool = True) -> list[dict[str, int | str]]:
         where = ""
         params: list = [limit, offset]
         if date_from:
@@ -407,7 +407,8 @@ class StatsStore:
                 params.insert(0 if not date_from else 1, date_to)
         # rebuild params: limit/offset are last
         params = params[:-2] + [limit, offset] if len(params) > 2 else [limit, offset]
-        sql = f"SELECT id, ts, uid, uname, content FROM danmaku_log{where} ORDER BY id ASC LIMIT ? OFFSET ?"
+        order_dir = "ASC" if asc else "DESC"
+        sql = f"SELECT id, ts, uid, uname, content FROM danmaku_log{where} ORDER BY id {order_dir} LIMIT ? OFFSET ?"
         rows = self._conn.execute(sql, params).fetchall()
         return [
             {"id": int(r[0]), "ts": int(r[1]), "uid": int(r[2]), "uname": str(r[3]), "content": str(r[4])}
