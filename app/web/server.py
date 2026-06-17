@@ -385,6 +385,19 @@ async def _startup():
     asyncio.create_task(_auto_start_rooms())
 
 
+@app.on_event("shutdown")
+async def _shutdown():
+    """关闭时停掉所有正在运行的房间 Bot。"""
+    logger.info("WebUI shutting down, stopping all room bots...")
+    try:
+        rooms = _list_rooms_from_disk()
+        for r in rooms:
+            if r["status"] == "running":
+                await stop_room_async(r["room_id"])
+    except Exception as exc:
+        logger.warning("shutdown cleanup failed: %s", exc)
+
+
 async def _auto_start_rooms() -> None:
     """延迟扫描 rooms/ 目录，按上次状态自动启停房间 Bot。"""
     try:

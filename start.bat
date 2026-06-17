@@ -9,5 +9,6 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
-:: Single-line PowerShell command wrapped in quotes so batch won't interpret 2>$null as file redirect
-powershell -ExecutionPolicy Bypass -Command "& { $e=0; try { . .venv\Scripts\Activate.ps1; Write-Host '[Ayabot] Starting WebUI...' -ForegroundColor Cyan; Write-Host '       http://localhost:19810' -ForegroundColor Magenta; Write-Host '       Press Ctrl+C to stop'; $p=Start-Process -PassThru -NoNewWindow python web_serve.py; $p.WaitForExit(); $e=$p.ExitCode } catch {} finally { Get-Process -Name python -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $pid } | ForEach-Object { taskkill /F /T /PID $_.Id 2>$null }; if (Test-Path function:deactivate) { deactivate }; if ($e -ne 0) { Write-Host '[Ayabot] Exited.' -ForegroundColor Green } } }"
+:: Run python directly in foreground (not Start-Process) so Ctrl+C goes straight to uvicorn.
+:: After uvicorn exits, kill any leftover python processes (orphaned bots).
+powershell -ExecutionPolicy Bypass -Command "& { . .venv\Scripts\Activate.ps1; Write-Host '[Ayabot] Starting WebUI...' -ForegroundColor Cyan; Write-Host '       http://localhost:19810' -ForegroundColor Magenta; Write-Host '       Press Ctrl+C to stop'; try { python web_serve.py } catch {} finally { Get-Process -Name python -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $pid } | ForEach-Object { taskkill /F /T /PID $_.Id 2>$null }; if (Test-Path function:deactivate) { deactivate }; Write-Host '[Ayabot] Exited.' -ForegroundColor Green } }"
