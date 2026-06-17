@@ -435,7 +435,7 @@ def truncate_log_file(path: Path, max_lines: int = _MAX_LOG_LINES) -> bool:
     if not path.exists() or path.stat().st_size == 0:
         return True
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         if len(lines) > max_lines:
             tail = lines[-max_lines:]
             path.write_text("\n".join(tail) + "\n", encoding="utf-8")
