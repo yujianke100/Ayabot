@@ -3945,25 +3945,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <p class="text-xs text-gray-400 mt-2">开启「免#指令」后可不带 # 前缀触发指令。
             开启「AI免#前缀唤醒」后弹幕以唤醒词开头即触发 AI。</p>
         </div>
-        <div>
-            <h3 class="font-bold text-blue-600 mb-1">🤖 功能特性</h3>
-            <ul class="list-disc pl-4 space-y-1 text-xs">
-                <li>欢迎 — 新观众进入时自动欢迎</li>
-                <li>感谢 — 送礼物/盲盒时自动感谢</li>
-                <li>大航海感谢 — 舰长/提督/总督专属感谢</li>
-                <li>关键词回复 — 支持包含/精确匹配 + UID限制</li>
-                <li>AI 回复 — 三种触发方式 + 上下文记忆</li>
-                <li>多房间 — 一个 WebUI 管理多个主播</li>
-                <li>用户权限 — 管理员/普通用户，控制房间可见范围</li>
-                <li>跨平台 — Linux/macOS/Windows，无需 systemd/sudo</li>
-            </ul>
-        </div>
         <div class="pt-4 border-t border-gray-200">
             <p class="text-xs text-gray-400 text-center">
                 <a href="https://github.com/yujianke100/ayabot" target="_blank" class="text-blue-500 hover:underline">⭐ 去 GitHub 给个 Star</a>
                 <span class="mx-1">·</span>
                 本软件<span class="text-red-500 font-bold">完全免费</span>，以 GPLv3 协议开源
-                <span class="block mt-1">Ayabot __AYABOT_VERSION__</span>
+                <span class="block mt-1" data-ayabot-version="__AYABOT_VERSION__">Ayabot __AYABOT_VERSION__</span>
+                <button @click="checkUpdate" class="mt-3 w-full sm:w-auto bg-blue-50 hover:bg-blue-100 text-blue-600 font-medium px-5 py-2.5 rounded-lg text-sm">🔍 检查更新</button>
             </p>
             <div class="mt-4 pt-4 border-t border-gray-100 text-center">
                 <p class="text-xs text-gray-500 mb-3">☕ 觉得好用？请作者喝杯咖啡吧 ❤️</p>
@@ -3981,6 +3969,39 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
     </div>
 </div>
+
+                <!-- ── 检查更新弹窗 ── -->
+                <div v-if="showUpdateModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+                    <div class="bg-white rounded-xl shadow-lg w-full max-w-sm mx-4 p-6 text-center space-y-4" @click.stop>
+                        <div v-if="updateChecking" class="py-8">
+                            <p class="text-gray-500">正在检查更新...</p>
+                        </div>
+                        <div v-else-if="updateError" class="py-4">
+                            <p class="text-red-500 text-lg mb-2">❌ 检查失败</p>
+                            <p class="text-xs text-gray-500">{{ updateError }}</p>
+                        </div>
+                        <div v-else-if="updateData">
+                            <p class="text-4xl mb-3">{{ updateData.hasUpdate ? '📢' : '✅' }}</p>
+                            <p class="text-lg font-bold mb-2">
+                                {{ updateData.hasUpdate ? '发现新版本！' : '已是最新版本' }}
+                            </p>
+                            <p class="text-sm text-gray-600">
+                                当前版本：<span class="font-mono">{{ updateData.current }}</span>
+                            </p>
+                            <p v-if="updateData.hasUpdate" class="text-sm text-gray-600">
+                                最新版本：<span class="font-mono font-bold text-green-600">{{ updateData.latest }}</span>
+                            </p>
+                            <p v-if="updateData.hasUpdate" class="text-xs text-gray-500 mt-2">{{ updateData.body }}</p>
+                            <div v-if="updateData.hasUpdate" class="pt-2">
+                                <a :href="updateData.url" target="_blank" class="inline-block bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">前往 GitHub 下载</a>
+                            </div>
+                        </div>
+                        <div class="pt-2">
+                            <button @click="showUpdateModal = false" class="text-gray-400 hover:text-gray-600 text-sm">关闭</button>
+                        </div>
+                    </div>
+                </div>
+
 </div><!-- /loggedIn -->
 </div>
 
@@ -4160,6 +4181,41 @@ createApp({
         const roomSaveOk = ref(false);
         const editingRoomName = ref(false);
         const roomNameEdit = ref('');
+
+        // ── 检查更新 ──
+        const showUpdateModal = ref(false);
+        const updateChecking = ref(false);
+        const updateError = ref('');
+        const updateData = ref(null);
+        async function checkUpdate() {
+            showUpdateModal.value = true;
+            updateChecking.value = true;
+            updateError.value = '';
+            updateData.value = null;
+            try {
+                const r = await fetch('https://api.github.com/repos/yujianke100/ayabot/releases/latest', {
+                    signal: AbortSignal.timeout(8000)
+                });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                const j = await r.json();
+                const latest = (j.tag_name || '').replace(/^v/i, '');
+                // 从页面版本文本读取当前版本（格式如 v1.0.1，去掉 v 前缀再比较）
+                const verEl = document.querySelector('[data-ayabot-version]');
+                const current = (verEl ? verEl.getAttribute('data-ayabot-version') : '0').replace(/^v/i, '');
+                const hasUpdate = latest.localeCompare(current, undefined, {numeric: true}) > 0;
+                updateData.value = {
+                    hasUpdate,
+                    current: 'v' + current,
+                    latest: 'v' + latest,
+                    body: (j.body || '').split('\n').slice(0, 5).join('\n').slice(0, 200),
+                    url: j.html_url || 'https://github.com/yujianke100/ayabot/releases',
+                };
+            } catch(e) {
+                updateError.value = e.message || '网络错误，请稍后重试';
+            } finally {
+                updateChecking.value = false;
+            }
+        }
 
         // 模板管理
         const llmTemplates = ref([]);
@@ -6210,7 +6266,8 @@ createApp({
             setTimeout(() => { applyTemplateMsg.value = ''; }, 5000);
         }
 
-        return {loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
+        return {showUpdateModal, updateChecking, updateError, updateData, checkUpdate,
+                loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
                 tab, userRole,
                 showUserMenu, showChangePwd, changePwdOld, changePwdNew, changePwdNewUser, changePwdMsg, changePwdOk, changingPwd,
                 mustResetPwd,
