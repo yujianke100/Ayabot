@@ -3429,9 +3429,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                 </button>
                             </template>
                         </div>
-                        <div class="flex justify-between mt-2">
-                            <span class="text-[10px] text-gray-400">蓝色=有数据，选中=深蓝高亮</span>
-                            <button @click="dmSelectedDates = new Set(); dmShowCal = false" class="text-xs text-blue-500">取消选择</button>
+                        <div class="flex justify-between mt-3 pt-2 border-t border-gray-100">
+                            <button @click="dmSelectedDates = new Set(); dmShowCal = false" class="text-xs text-gray-500 hover:text-gray-700">取消</button>
+                            <span class="text-[10px] text-gray-400 leading-5">蓝色=有数据，点击多选</span>
+                            <button @click="dmShowCal = false; loadDanmakuLog()" class="text-xs bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600">✅ 确认</button>
                         </div>
                     </div>
                 </div>
