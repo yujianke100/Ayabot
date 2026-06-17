@@ -3350,21 +3350,18 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <button @click="saveRoomConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
                     <button @click="exportRoomConfig()" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">📤 导出配置</button>
                     <button @click="importRoomConfig()" class="bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded text-sm">📥 导入配置</button>
-                    <span v-if="roomSaveMsg" class="text-sm" :class="roomSaveOk ? 'text-green-600' : 'text-red-500'">{{ roomSaveMsg }}</span>
-                    <span v-if="roomSaveOk" class="text-xs text-yellow-600">💡 更改配置后需重启机器人才能生效</span>
-                    <button v-if="selectedRoom" @click="restartSingleBot(selectedRoom.room_id)" class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-2 rounded text-sm text-xs">🔄 重启此机器人</button>
-                    <button @click="editRoomConfig(selectedRoom?.room_id)" class="text-gray-500 hover:text-gray-700 underline text-sm">刷新</button>
-                </div>
-
-                <hr>
-                <h3 class="text-sm font-bold">📋 套用预设模板</h3>
-                <div class="flex items-center gap-2 flex-wrap">
                     <select v-model="applyBotTemplate" class="border p-1 rounded text-xs">
-                        <option value="">选择机器人模板...</option>
+                        <option value="">套用模板...</option>
                         <option v-for="t in botTemplates" :key="t.name" :value="t.name">{{ t.name }}</option>
                     </select>
-                    <button v-if="applyBotTemplate" @click="applyTemplateToBot" class="bg-purple-500 hover:bg-purple-600 text-white px-3 py-1.5 rounded text-xs">应用</button>
+                    <button v-if="applyBotTemplate" @click="applyTemplateToBot" class="bg-purple-500 hover:bg-purple-600 text-white px-2.5 py-1 rounded text-xs">应用</button>
+                    <span v-if="roomSaveMsg" class="text-sm" :class="roomSaveOk ? 'text-green-600' : 'text-red-500'">{{ roomSaveMsg }}</span>
+                    <span v-if="roomSaveOk" class="text-xs text-yellow-600">💡 更改配置后需重启机器人才能生效</span>
                     <span v-if="applyTemplateMsg" class="text-xs" :class="applyTemplateOk ? 'text-green-600' : 'text-red-500'">{{ applyTemplateMsg }}</span>
+                </div>
+                <div class="flex items-center gap-3 mt-2 flex-wrap">
+                    <button v-if="selectedRoom" @click="restartSingleBot(selectedRoom.room_id)" class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-2 rounded text-sm text-xs">🔄 重启此机器人</button>
+                    <button @click="editRoomConfig(selectedRoom?.room_id)" class="bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-2 rounded text-sm text-xs">🔄 刷新</button>
                 </div>
             </div>
         </div>
