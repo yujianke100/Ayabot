@@ -550,11 +550,12 @@ class LiveRobot:
         self.store.record_gift_event(event_row)
 
         # Cooldown only gates the thank-you message, not recording
-        last = self._last_thanks_ts.get(uid, 0.0)
-        if now - last < self.config.cooldown.thanks_user_seconds:
-            return
-
-        self._last_thanks_ts[uid] = now
+        # 当 cooldown=0 时跳过（完全依赖限流队列的 send_interval_seconds 控制发送间隔）
+        if self.config.cooldown.thanks_user_seconds > 0:
+            last = self._last_thanks_ts.get(uid, 0.0)
+            if now - last < self.config.cooldown.thanks_user_seconds:
+                return
+            self._last_thanks_ts[uid] = now
 
         thanks = (
             self.config.features.thanks_template.replace("{uname}", uname)
@@ -592,10 +593,11 @@ class LiveRobot:
         guard_type = guard["guard_type"]
 
         now = time.time()
-        last = self._last_thanks_ts.get(uid, 0.0)
-        if now - last < self.config.cooldown.thanks_user_seconds:
-            return
-        self._last_thanks_ts[uid] = now
+        if self.config.cooldown.thanks_user_seconds > 0:
+            last = self._last_thanks_ts.get(uid, 0.0)
+            if now - last < self.config.cooldown.thanks_user_seconds:
+                return
+            self._last_thanks_ts[uid] = now
 
         if guard_type == "captain":
             template = self.config.features.guard_thanks_template_captain

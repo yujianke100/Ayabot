@@ -311,7 +311,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
         ),
         cooldown=CooldownConfig(
             welcome_user_seconds=int(cooldown.get("welcome_user_seconds", 600)),
-            thanks_user_seconds=int(cooldown.get("thanks_user_seconds", 10)),
+            thanks_user_seconds=int(cooldown.get("thanks_user_seconds", 0)),
         ),
         rate_limit=RateLimitConfig(
             send_interval_seconds=float(rate_limit.get("send_interval_seconds", 1.2)),
