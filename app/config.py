@@ -68,6 +68,10 @@ class FeatureConfig:
     pk_report_template: str = "PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}"  # PK汇报模板
     pk_end_template: str = "{result} 我方分数{score}"  # PK结束模板，{result}结果(胜利！/对方获胜/PK结束) {score}我方分数
     # 点赞感谢
+    honor_welcome_enabled: bool = False
+    honor_welcome_min_level: int = 20
+    honor_welcome_template: str = "欢迎荣耀{uname}进入直播间~"
+    honor_welcome_templates_list: list[dict] | None = None
     uid_blacklist: list[dict] | None = None  # [{"uid":int, "time_start":0, "time_end":23}, ...]
     keyword_filter: list[dict] | None = None  # [{"keyword":str, "match_mode":"contains"|"exact", "action":"block"|"censor"}, ...]
     like_thanks_enabled: bool = False
@@ -290,6 +294,10 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             danmaku_log_max_entries=int(features.get("danmaku_log_max_entries", 1000)),
             danmaku_retention_days=int(features.get("danmaku_retention_days", 15)),
             uid_configs=features.get("uid_configs", None) or None,
+            honor_welcome_enabled=bool(features.get("honor_welcome_enabled", False)),
+            honor_welcome_min_level=int(features.get("honor_welcome_min_level", 20)),
+            honor_welcome_template=str(features.get("honor_welcome_template", "欢迎荣耀{uname}进入直播间~")),
+            honor_welcome_templates_list=_normalize_template_list(features.get("honor_welcome_templates_list")),
             uid_blacklist=features.get("uid_blacklist"),
             keyword_filter=features.get("keyword_filter"),
             allow_bare_commands=bool(features.get("allow_bare_commands", False)),
@@ -508,6 +516,10 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "blindbox_glassheart_reply": config.features.blindbox_glassheart_reply,
             "use_chinese_numbers": config.features.use_chinese_numbers,
             "use_chinese_numbers_global": config.features.use_chinese_numbers_global,
+            "honor_welcome_enabled": config.features.honor_welcome_enabled,
+            "honor_welcome_min_level": config.features.honor_welcome_min_level,
+            "honor_welcome_template": config.features.honor_welcome_template,
+            "honor_welcome_templates_list": config.features.honor_welcome_templates_list,
             "uid_blacklist": config.features.uid_blacklist,
             "keyword_filter": config.features.keyword_filter,
             "pk_report_enabled": config.features.pk_report_enabled,

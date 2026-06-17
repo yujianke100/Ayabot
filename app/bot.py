@@ -417,6 +417,19 @@ class LiveRobot:
                             else:
                                 self.logger.info("guard welcome template not configured for level=%s, fallback to default", guard_level)
 
+            # 荣耀等级欢迎（优先级：高于普通欢迎，低于大航海和 UID 特定）
+            if not template:
+                hw = self.config.features
+                if hw.honor_welcome_enabled:
+                    honor_medal_level = self._get_honor_level(event)
+                    if honor_medal_level >= hw.honor_welcome_min_level:
+                        self.logger.info("honor welcome: uid=%s uname=%s medal_level=%s", uid, uname, honor_medal_level)
+                        hw_list = hw.honor_welcome_templates_list
+                        if hw_list:
+                            template = _pick_template_from_list(hw_list, uname=uname, logger=self.logger)
+                        if not template:
+                            template = hw.honor_welcome_template
+
             # 新版普通欢迎多模板列表
             if not template:
                 wl = self.config.features.welcome_templates_list
@@ -1224,6 +1237,26 @@ class LiveRobot:
             if pt in (1, 2, 3):
                 return pt
 
+        return 0
+
+    def _get_honor_level(self, event: dict[str, Any]) -> int:
+        """从进房事件中提取用户的粉丝勋章等级（作为荣耀等级）。"""
+        data = event.get("data", {})
+        if isinstance(data, dict):
+            nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+            pb = nested.get("pb_decoded") if isinstance(nested.get("pb_decoded"), dict) else {}
+            if pb:
+                # pb_decoded 中的 fans_medal 或 medal_info
+                medal = pb.get("fans_medal") or pb.get("medal_info") or {}
+                if isinstance(medal, dict):
+                    return _safe_int(medal.get("medal_level") or medal.get("level") or 0)
+            # 兜底：从 data 顶层找
+            for src in (data, nested):
+                medal = src.get("fans_medal") or src.get("medal_info") or {}
+                if isinstance(medal, dict):
+                    lv = _safe_int(medal.get("medal_level") or medal.get("level") or 0)
+                    if lv:
+                        return lv
         return 0
 
     def _record_chat_context(self, text: str, uname: str, uid: int) -> None:

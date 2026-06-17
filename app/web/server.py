@@ -3034,6 +3034,21 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="text-xs text-gray-500 block">感谢模板
                         <input type="text" v-model="roomConfig.features.thanks_template" placeholder="感谢{uname}的{gift_name}x{gift_num}!" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
+                    <div class="border rounded p-3 bg-gray-50 space-y-2">
+                        <h4 class="text-xs font-bold text-gray-600">🏆 荣耀等级欢迎</h4>
+                        <label class="flex items-center gap-2 text-xs"><input type="checkbox" v-model="roomConfig.features.honor_welcome_enabled" class="w-4 h-4"> 启用</label>
+                        <label class="text-xs text-gray-500">最低勋章等级
+                            <input type="number" v-model.number="roomConfig.features.honor_welcome_min_level" min="1" max="40" class="border p-2 rounded w-full text-sm mt-1">
+                            <span class="text-[10px] text-gray-400">粉丝勋章等级 ≥ 此值时触发荣耀欢迎</span>
+                        </label>
+                        <label class="text-xs text-gray-500">单模板（多模板为空时使用）
+                            <input type="text" v-model="roomConfig.features.honor_welcome_template" placeholder="欢迎荣耀{uname}进入直播间~" class="border p-2 rounded w-full text-sm mt-1">
+                        </label>
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs text-gray-500">📋 多模板共 {{ ((roomConfig?.features?.honor_welcome_templates_list||[]).length) }} 条</span>
+                            <button @click="openHonorWelcomeTplModal" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-2.5 py-1 rounded text-xs font-medium">✏️ 编辑</button>
+                        </div>
+                    </div>
                     <label class="text-xs text-gray-500 block">大航海 - 舰长
                         <input type="text" v-model="roomConfig.features.guard_thanks_template_captain" placeholder="感谢{uname}上舰！" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
@@ -3286,6 +3301,40 @@ INDEX_HTML = r"""<!DOCTYPE html>
                         <div class="p-4 border-t flex items-center gap-2 justify-end">
                             <button @click="showWelcomeTplModal = false" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
                             <button @click="saveWelcomeTplModal" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">保存</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ── 荣耀等级欢迎多模板编辑弹窗 ── -->
+                <div v-if="showHonorWelcomeTplModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showHonorWelcomeTplModal = false">
+                    <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4 max-h-[80vh] flex flex-col" @click.stop>
+                        <div class="p-4 border-b flex items-center justify-between">
+                            <h3 class="font-bold text-lg">🏆 荣耀等级欢迎多模板</h3>
+                            <button @click="showHonorWelcomeTplModal = false" class="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+                        </div>
+                        <div class="p-4 overflow-y-auto flex-1 space-y-3">
+                            <p class="text-xs text-gray-500">每条模板可设置生效时段，机器人每次随机选一条当前时段生效的发送。</p>
+                            <div v-for="(t, ti) in honorWelcomeTplEntries" :key="ti" class="border rounded p-3 bg-gray-50 space-y-2">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-xs font-bold">模板 #{{ ti+1 }}</span>
+                                    <button @click="honorWelcomeTplEntries.splice(ti, 1)" class="bg-red-50 hover:bg-red-100 text-red-500 px-2 py-0.5 rounded text-xs font-medium">删除</button>
+                                </div>
+                                <label class="text-xs text-gray-500">内容（支持 {uname}）
+                                    <input type="text" v-model="t.text" class="border p-1 rounded w-full text-sm mt-1" placeholder="欢迎荣耀{uname}进入直播间~">
+                                </label>
+                                <label class="flex items-center gap-1 text-xs text-gray-500 mt-1">
+                                    <input type="checkbox" v-model="t.allDay" class="w-3.5 h-3.5" @change="t.time_start=0; t.time_end=23"> 全天生效
+                                </label>
+                                <div v-if="!t.allDay" class="grid grid-cols-2 gap-2">
+                                    <label class="text-xs text-gray-500">起始小时<input type="number" v-model.number="t.time_start" min="0" max="23" class="border p-1 rounded w-full text-sm mt-1"></label>
+                                    <label class="text-xs text-gray-500">结束小时<input type="number" v-model.number="t.time_end" min="0" max="23" class="border p-1 rounded w-full text-sm mt-1"></label>
+                                </div>
+                            </div>
+                            <button @click="honorWelcomeTplEntries.push({text: '', time_start: 0, time_end: 23})" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-3 py-1 rounded text-xs font-medium">➕ 添加模板</button>
+                        </div>
+                        <div class="p-4 border-t flex items-center gap-2 justify-end">
+                            <button @click="showHonorWelcomeTplModal = false" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
+                            <button @click="saveHonorWelcomeTplModal" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">保存</button>
                         </div>
                     </div>
                 </div>
@@ -5738,6 +5787,20 @@ createApp({
             closeKeywordModal();
         }
 
+        // ── 荣耀等级欢迎多模板弹窗 ──
+        const showHonorWelcomeTplModal = ref(false);
+        const honorWelcomeTplEntries = ref([]);
+        function openHonorWelcomeTplModal() {
+            honorWelcomeTplEntries.value = JSON.parse(JSON.stringify(roomConfig.value.features.honor_welcome_templates_list || []));
+            honorWelcomeTplEntries.value.forEach(e => { if (e.time_start === 0 && e.time_end === 23) e.allDay = true; else e.allDay = false; });
+            showHonorWelcomeTplModal.value = true;
+        }
+        function saveHonorWelcomeTplModal() {
+            const valid = honorWelcomeTplEntries.value.filter(e => e.text && e.text.trim());
+            roomConfig.value.features.honor_welcome_templates_list = valid.length ? valid.map(e => ({text: e.text, time_start: e.time_start || 0, time_end: e.time_end || 23})) : null;
+            showHonorWelcomeTplModal.value = false;
+        }
+
         // ── 欢迎多模板弹窗 ──
         const showWelcomeTplModal = ref(false);
         const welcomeTplEntries = ref([]);
@@ -6054,6 +6117,7 @@ createApp({
                 showKeywordModal, keywordEditRules, openKeywordModal, closeKeywordModal, saveKeywordModal,
                 showWelcomeTplModal, welcomeTplEntries, openWelcomeTplModal, saveWelcomeTplModal,
                 showGuardWelcomeTplModal, guardWelcomeTplEntries, openGuardWelcomeTplModal, saveGuardWelcomeTplModal, addGuardTpl,
+                showHonorWelcomeTplModal, honorWelcomeTplEntries, openHonorWelcomeTplModal, saveHonorWelcomeTplModal,
                 showPeriodicTplModal, periodicTplEntries, openPeriodicTplModal, savePeriodicTplModal,
                 showFortuneTplModal, fortuneTypes, fortuneTplEntries, openFortuneTplModal, saveFortuneTplModal, addFortuneText,
                 guardWelcomeTotal, fortuneTotalEntries,
