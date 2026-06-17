@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -442,6 +443,32 @@ class StatsStore:
             count = self._conn.execute("DELETE FROM danmaku_log").rowcount
         self._conn.commit()
         return count
+
+    def cleanup_old_data(self, gift_days: int = 733, danmaku_days: int = 0) -> dict[str, int]:
+        """删除超过指定天数的旧数据. 天数=0 表示不清理."""
+        now_ts = int(time.time())
+        result: dict[str, int] = {}
+        if gift_days > 0:
+            cutoff = now_ts - gift_days * 86400
+            deleted = self._conn.execute(
+                "DELETE FROM gift_events WHERE ts < ?", (cutoff,)
+            ).rowcount
+            result["deleted_gifts"] = deleted
+            if deleted:
+                self._conn.execute(
+                    "DELETE FROM monthly_blindbox_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)"
+                )
+                self._conn.execute(
+                    "DELETE FROM monthly_gift_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)"
+                )
+        if danmaku_days > 0:
+            cutoff = now_ts - danmaku_days * 86400
+            deleted = self._conn.execute(
+                "DELETE FROM danmaku_log WHERE ts < ?", (cutoff,)
+            ).rowcount
+            result["deleted_danmaku"] = deleted
+        self._conn.commit()
+        return result
 
     def close(self) -> None:
         self._conn.close()

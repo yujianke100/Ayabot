@@ -49,6 +49,17 @@ class LiveRobot:
         )
 
         self.store = StatsStore(config.storage.sqlite_path)
+        # 启动时清理过期数据（依据配置的保留天数）
+        try:
+            result = self.store.cleanup_old_data(
+                gift_days=config.features.gift_retention_days,
+                danmaku_days=config.features.danmaku_retention_days if config.features.danmaku_log_enabled else 0,
+            )
+            summary = ", ".join(f"{k}={v}" for k, v in result.items() if v)
+            if summary:
+                self.logger.info("startup cleanup: %s", summary)
+        except Exception as exc:
+            self.logger.warning("startup cleanup failed: %s", exc)
 
         max_queue = getattr(config.rate_limit, 'max_queue_size', 50)
         self._msg_queue: asyncio.Queue[OutboundMessage] = asyncio.Queue(maxsize=max_queue)
@@ -248,6 +259,13 @@ class LiveRobot:
 
             # Remove from pending set (no longer pending)
             self._pending_texts.discard(msg.text)
+
+            # ── 关键词过滤（最外层，覆盖所有消息类型）──
+            filtered = self._apply_keyword_filter(msg.text)
+            if filtered is None:
+                self.logger.debug("keyword_filter dropped in _message_worker: %s", msg.text)
+                continue
+            msg.text = filtered
 
             # Truncate to stay within Bilibili's danmaku length limit (~30 Chinese chars)
             MAX_TEXT_LEN = 30
@@ -640,7 +658,7 @@ class LiveRobot:
         # ── UID 黑名单 ──
         bl = self.config.features.uid_blacklist
         if bl:
-            h = datetime.datetime.now().hour
+            h = datetime.now().hour
             for rule in bl:
                 if rule.get("uid") == uid:
                     ts = rule.get("time_start", 0)
@@ -1147,32 +1165,42 @@ class LiveRobot:
             return True
         return moderator_hint
 
-    async def _enqueue_message(self, text: str, reply_uid: Optional[int]) -> None:
-        # ── 关键词过滤 ──
+    def _apply_keyword_filter(self, text: str) -> str | None:
+        """Apply keyword filter rules to text. Returns filtered text or None if blocked."""
         kf = self.config.features.keyword_filter
-        if kf:
-            blocked = False
-            for rule in kf:
-                kw = rule.get("keyword", "")
-                if not kw:
-                    continue
-                mode = rule.get("match_mode", "contains")
-                action = rule.get("action", "block")
-                if mode == "exact":
-                    matched = text.strip() == kw.strip()
+        if not kf:
+            return text
+        now_h = datetime.now().hour
+        for rule in kf:
+            kw = rule.get("keyword", "")
+            if not kw:
+                continue
+            # ── 时间段检查 ──
+            ts = rule.get("time_start", 0)
+            te = rule.get("time_end", 23)
+            if not (ts == 0 and te == 23):
+                if ts <= te:
+                    if not (ts <= now_h <= te):
+                        continue
+                else:  # 跨天
+                    if not (now_h >= ts or now_h <= te):
+                        continue
+            mode = rule.get("match_mode", "contains")
+            action = rule.get("action", "block")
+            if mode == "exact":
+                matched = text.strip() == kw.strip()
+            else:
+                matched = kw in text
+            if matched:
+                if action == "censor":
+                    text = text.replace(kw, "*" * len(kw))
+                    self.logger.debug("keyword_filter censored: kw=%s text_after=%s", kw, text)
                 else:
-                    matched = kw in text
-                if matched:
-                    if action == "censor":
-                        text = text.replace(kw, "*" * len(kw))
-                        self.logger.debug("keyword_filter censored: kw=%s text_after=%s", kw, text)
-                    else:
-                        blocked = True
-                        self.logger.debug("keyword_filter blocked: kw=%s text=%s", kw, text)
-                        break
-            if blocked:
-                return
+                    self.logger.debug("keyword_filter blocked: kw=%s text=%s", kw, text)
+                    return None
+        return text
 
+    async def _enqueue_message(self, text: str, reply_uid: Optional[int]) -> None:
         # 全局数字转大写
         if self.config.features.use_chinese_numbers_global:
             text = _to_chinese_num(text)
@@ -1195,6 +1223,10 @@ class LiveRobot:
         Dedup is done here (before the delay) so duplicate events from bilibili
         WebSocket reconnection don't cause multiple identical replies.
         """
+        # 全局数字转大写
+        if self.config.features.use_chinese_numbers_global:
+            text = _to_chinese_num(text)
+
         # Dedup immediately — before the delay window
         if text in self._pending_texts:
             self.logger.debug("dedup _enqueue_reply: text=%s", text)

@@ -50,8 +50,9 @@ class FeatureConfig:
     welcome_templates_for_uids: dict[int, str] | None = None  # uid -> template
     guard_welcome_templates: dict[str, str] | None = None     # captain/commander/governor -> template
     danmaku_log_enabled: bool = False
-    danmaku_log_max_entries: int = 1000
+    danmaku_log_max_entries: int = 10000
     danmaku_retention_days: int = 15
+    gift_retention_days: int = 733  # 0=永久保留
     blindbox_no_gift: str = "无送礼记录"  # 无任何送礼时的回复
     blindbox_no_blindbox: str = "无盲盒记录"  # 有送礼但无盲盒时的回复
     blindbox_result_monthly: str = "本月盲盒共{count}个，花费{cost}，收益{profit}"  # 本月盲盒统计
@@ -291,8 +292,9 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             guard_welcome_templates_list=_normalize_guard_template_list(features.get("guard_welcome_templates_list") or features.get("guard_welcome_templates")),
             periodic_messages_list=_normalize_template_list(features.get("periodic_messages_list") or features.get("periodic_messages")),
             danmaku_log_enabled=bool(features.get("danmaku_log_enabled", False)),
-            danmaku_log_max_entries=int(features.get("danmaku_log_max_entries", 1000)),
+            danmaku_log_max_entries=int(features.get("danmaku_log_max_entries", 10000)),
             danmaku_retention_days=int(features.get("danmaku_retention_days", 15)),
+            gift_retention_days=int(features.get("gift_retention_days", 733)),
             uid_configs=features.get("uid_configs", None) or None,
             honor_welcome_enabled=bool(features.get("honor_welcome_enabled", False)),
             honor_welcome_min_level=int(features.get("honor_welcome_min_level", 20)),
@@ -504,6 +506,7 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "danmaku_log_enabled": config.features.danmaku_log_enabled,
             "danmaku_log_max_entries": config.features.danmaku_log_max_entries,
             "danmaku_retention_days": config.features.danmaku_retention_days,
+            "gift_retention_days": config.features.gift_retention_days,
             "uid_configs": config.features.uid_configs,
             "allow_bare_commands": config.features.allow_bare_commands,
             "llm_bare_trigger": config.features.llm_bare_trigger,

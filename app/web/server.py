@@ -1375,6 +1375,27 @@ def _list_rooms_from_disk() -> list[dict[str, Any]]:
     return rooms
 
 
+@app.get("/api/bilibili/user_info")
+async def api_bilibili_user_info(mid: int):
+    """代理 B站 API（获取用户昵称），避免前端跨域问题."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://www.bilibili.com/",
+    }
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8), headers=headers) as s:
+            async with s.get(f"https://api.bilibili.com/x/web-interface/card?mid={mid}") as r:
+                if r.status == 200:
+                    j = await r.json()
+                    if j.get("code") == 0:
+                        name = j.get("data", {}).get("card", {}).get("name", "")
+                        return {"code": 0, "name": name}
+                    return {"code": j.get("code"), "name": ""}
+                return {"code": -1, "name": "", "error": "http error"}
+    except Exception as exc:
+        return {"code": -1, "name": "", "error": str(exc)}
+
+
 @app.get("/api/rooms")
 async def api_list_rooms(request: Request):
     """列出所有房间及状态."""
@@ -1434,12 +1455,16 @@ async def api_create_room(request: Request):
     if not room_name:
         # 尝试从 B站 API 获取主播用户名
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as s:
-                async with s.get(f"https://api.bilibili.com/x/space/wbi/acc/info?mid={anchor_uid}") as r:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://www.bilibili.com/",
+            }
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8), headers=headers) as s:
+                async with s.get(f"https://api.bilibili.com/x/web-interface/card?mid={anchor_uid}") as r:
                     if r.status == 200:
                         j = await r.json()
                         if j.get("code") == 0:
-                            room_name = j.get("data", {}).get("name", "")
+                            room_name = j.get("data", {}).get("card", {}).get("name", "")
         except Exception:
             pass
         if not room_name:
@@ -1777,13 +1802,17 @@ async def api_save_account_credential(request: Request):
     # 查询用户昵称
     nickname = ""
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as sess_aio:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://www.bilibili.com/",
+        }
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10), headers=headers) as sess_aio:
             async with sess_aio.get(
-                f"https://api.bilibili.com/x/space/wbi/acc/info?mid={dedeuserid}"
+                f"https://api.bilibili.com/x/web-interface/card?mid={dedeuserid}"
             ) as resp:
                 info = await resp.json()
                 if info.get("code") == 0:
-                    nickname = info.get("data", {}).get("name", "")
+                    nickname = info.get("data", {}).get("card", {}).get("name", "")
     except Exception:
         pass
 
@@ -2141,30 +2170,52 @@ async def api_room_user_dates(room_id: str, uid: int = 0):
 
 @app.post("/api/rooms/{room_id}/delete_old")
 async def api_room_delete_old(room_id: str, request: Request):
-    """删除指定房间的旧数据."""
+    """删除指定房间的旧数据. data_type: 'gift' | 'danmaku' | 'all'."""
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "bad request"}, status_code=400)
 
     date_str = body.get("date", "")
+    data_type = body.get("type", "gift")
     if not date_str:
         return JSONResponse({"error": "date required"}, status_code=400)
 
     db_path = _room_db_path(room_id)
     if not db_path.exists():
-        return {"deleted_events": 0, "deleted_gifts": 0}
+        return {"deleted_gifts": 0, "deleted_danmaku": 0}
 
     try:
         conn = sqlite3.connect(str(db_path))
         cur = conn.cursor()
-        cur.execute("DELETE FROM gift_events WHERE date(ts, 'unixepoch') <= date(?)", (date_str,))
-        deleted = cur.rowcount
+        result = {"deleted_gifts": 0, "deleted_danmaku": 0}
+        if data_type in ("gift", "all"):
+            cur.execute("DELETE FROM gift_events WHERE date(ts, 'unixepoch') <= date(?)", (date_str,))
+            result["deleted_gifts"] = cur.rowcount
+        if data_type in ("danmaku", "all"):
+            cur.execute("DELETE FROM danmaku_log WHERE date(ts, 'unixepoch', 'localtime') <= date(?)", (date_str,))
+            result["deleted_danmaku"] = cur.rowcount
         conn.commit()
         conn.close()
-        return {"deleted_events": 0, "deleted_gifts": deleted}
+        # 清理无数据的月度汇总
+        if result["deleted_gifts"]:
+            _clean_orphan_monthly_stats(db_path)
+        return result
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+def _clean_orphan_monthly_stats(db_path: Path) -> None:
+    """删除已无 gift_events 数据的月度汇总行."""
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute("DELETE FROM monthly_blindbox_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)")
+        cur.execute("DELETE FROM monthly_gift_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2472,10 +2523,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="text-xs text-gray-500">主播 UID
                         <input type="number" v-model.number="newRoomUid" placeholder="B站 主播 UID"
                                class="border p-2 rounded w-full text-sm mt-1">
+                        <span v-if="newRoomAnchorName" class="text-[11px]" :class="newRoomAnchorName.startsWith('(') ? 'text-yellow-500' : 'text-green-600'">
+                            👤 {{ newRoomAnchorName }}
+                        </span>
                     </label>
                     <label class="text-xs text-gray-500">直播间名称
-                        <input type="text" v-model="newRoomName" placeholder="给房间起个名字（可选）"
-                               class="border p-2 rounded w-full text-sm mt-1">
+                        <input type="text" v-model="newRoomName" placeholder="留空则使用主播用户名" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
                     <label class="text-xs text-gray-500">直播间号
                         <input type="number" v-model.number="newRoomDisplayId" placeholder="B站 直播间号，如 1946287911"
@@ -2922,8 +2975,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
                 <div class="text-xs text-gray-400 mb-2">免#指令：开启后可不带 # 使用指令（签到、今日盲盒等） | AI免#：弹幕开头匹配唤醒词即触发AI | 包含关键词：弹幕含唤醒词即触发AI（需AI免#前缀唤醒）</div>
                 <div v-if="roomConfig.features.danmaku_log_enabled" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <label class="text-xs text-gray-500">弹幕记录最大条数
+                    <label class="text-xs text-gray-500">弹幕总条数上限
                         <input type="number" v-model.number="roomConfig.features.danmaku_log_max_entries" min="100" max="100000" class="border p-2 rounded w-full text-sm mt-1">
+                        <span class="text-gray-400 text-[10px]">数据库保留的总条数，超出时自动删除最旧记录，不是单日上限</span>
                     </label>
                     <label class="text-xs text-gray-500">
                         保留天数
@@ -2931,8 +2985,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
                         <span class="text-gray-400 text-[10px]">关闭弹幕记录时此配置不生效，且不会主动删除旧数据</span>
                     </label>
                 </div>
-                <div v-else class="text-xs text-gray-400 ml-1">弹幕记录关闭时，保留天数不生效，已有数据保留不删除。</div>
+                <div v-else class="text-xs text-gray-400 ml-1 mb-2">弹幕记录关闭时，保留天数不生效，已有数据保留不删除。</div>
+                <hr class="my-3">
+                <h4 class="text-xs font-bold text-gray-600 mb-2">📦 数据保留</h4>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <label class="text-xs text-gray-500">礼物保留天数
+                        <input type="number" v-model.number="roomConfig.features.gift_retention_days" min="0" max="3650" class="border p-2 rounded w-full text-sm mt-1">
+                        <span class="text-gray-400 text-[10px]">0=永久保存，默认733天(~2年)，机器人启动时自动清理过期数据</span>
+                    </label>
                     <label class="text-xs text-gray-500">日志级别
                         <select v-model="roomConfig.runtime.log_level" class="border p-2 rounded w-full text-sm mt-1">
                             <option value="DEBUG">DEBUG</option>
@@ -2946,61 +3006,24 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <hr>
-                <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('uidBlacklist')">
-                    <span v-if="configSections.uidBlacklist">▼</span><span v-else>▶</span> 🚫 UID 黑名单
+                <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('filter')">
+                    <span v-if="configSections.filter">▼</span><span v-else>▶</span> 🚫 弹幕过滤
                 </h3>
-                <div v-show="configSections.uidBlacklist">
-                    <p class="text-xs text-gray-500 mb-2">无视指定 UID 用户发送的所有弹幕（不影响其送礼/盲盒记录）。</p>
-                    <div v-for="(r, ri) in (roomConfig.features.uid_blacklist||[])" :key="ri" class="border rounded p-3 bg-gray-50 mb-2 space-y-2">
-                        <div class="flex items-center justify-between">
-                            <span class="text-xs font-bold">#{{ ri+1 }}</span>
-                            <button @click="roomConfig.features.uid_blacklist.splice(ri,1)" class="bg-red-50 hover:bg-red-100 text-red-500 px-2 py-0.5 rounded text-xs font-medium">删除</button>
+                <div v-show="configSections.filter" class="space-y-3">
+                    <div class="border rounded p-3 bg-gray-50 flex items-center justify-between">
+                        <div>
+                            <span class="text-xs font-bold text-gray-600">🚫 UID 黑名单</span>
+                            <span class="text-xs text-gray-400 ml-2">{{ (roomConfig.features.uid_blacklist||[]).length }} 条规则</span>
                         </div>
-                        <label class="text-xs text-gray-500">UID
-                            <input type="number" v-model.number="r.uid" class="border p-1 rounded w-full text-sm mt-1" placeholder="用户UID">
-                        </label>
-                        <label class="flex items-center gap-1 text-xs text-gray-500 mt-1">
-                            <input type="checkbox" v-model="r.allDay" class="w-3.5 h-3.5" @change="r.time_start=0; r.time_end=23"> 全天生效
-                        </label>
-                        <div v-if="!r.allDay" class="grid grid-cols-2 gap-2">
-                            <label class="text-xs text-gray-500">起始小时<input type="number" v-model.number="r.time_start" min="0" max="23" class="border p-1 rounded w-full text-sm mt-1"></label>
-                            <label class="text-xs text-gray-500">结束小时<input type="number" v-model.number="r.time_end" min="0" max="23" class="border p-1 rounded w-full text-sm mt-1"></label>
-                        </div>
+                        <button @click="openUidBlacklistModal" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-2.5 py-1 rounded text-xs font-medium">✏️ 编辑</button>
                     </div>
-                    <button @click="(roomConfig.features.uid_blacklist||(roomConfig.features.uid_blacklist=[])).push({uid:0,time_start:0,time_end:23,allDay:true})" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-3 py-1 rounded text-xs font-medium">➕ 添加 UID</button>
-                </div>
-
-                <hr>
-                <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('keywordFilter')">
-                    <span v-if="configSections.keywordFilter">▼</span><span v-else>▶</span> 🔤 关键词屏蔽
-                </h3>
-                <div v-show="configSections.keywordFilter">
-                    <p class="text-xs text-gray-500 mb-2">限制机器人发送包含指定关键词的弹幕。支持「包含匹配」和「精确匹配」，可选择拦截整条或替换为*。</p>
-                    <div v-for="(r, ri) in (roomConfig.features.keyword_filter||[])" :key="ri" class="border rounded p-3 bg-gray-50 mb-2 space-y-2">
-                        <div class="flex items-center justify-between">
-                            <span class="text-xs font-bold">#{{ ri+1 }}</span>
-                            <button @click="roomConfig.features.keyword_filter.splice(ri,1)" class="bg-red-50 hover:bg-red-100 text-red-500 px-2 py-0.5 rounded text-xs font-medium">删除</button>
+                    <div class="border rounded p-3 bg-gray-50 flex items-center justify-between">
+                        <div>
+                            <span class="text-xs font-bold text-gray-600">🔤 关键词屏蔽</span>
+                            <span class="text-xs text-gray-400 ml-2">{{ (roomConfig.features.keyword_filter||[]).length }} 条规则</span>
                         </div>
-                        <label class="text-xs text-gray-500">关键词
-                            <input type="text" v-model="r.keyword" class="border p-1 rounded w-full text-sm mt-1" placeholder="输入关键词">
-                        </label>
-                        <div class="grid grid-cols-2 gap-2">
-                            <label class="text-xs text-gray-500">匹配模式
-                                <select v-model="r.match_mode" class="border p-1 rounded w-full text-sm mt-1">
-                                    <option value="contains">包含</option>
-                                    <option value="exact">精确</option>
-                                </select>
-                            </label>
-                            <label class="text-xs text-gray-500">触发动作
-                                <select v-model="r.action" class="border p-1 rounded w-full text-sm mt-1">
-                                    <option value="block">拦截不发送</option>
-                                    <option value="censor">关键词变*</option>
-                                </select>
-                            </label>
-                        </div>
-                        <p v-if="r.match_mode==='exact' && r.action==='censor'" class="text-[10px] text-yellow-600">精确匹配 + 变* 不会生效，已自动改为拦截</p>
+                        <button @click="openKeywordFilterModal" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-2.5 py-1 rounded text-xs font-medium">✏️ 编辑</button>
                     </div>
-                    <button @click="(roomConfig.features.keyword_filter||(roomConfig.features.keyword_filter=[])).push({keyword:'',match_mode:'contains',action:'block'})" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-3 py-1 rounded text-xs font-medium">➕ 添加关键词规则</button>
                 </div>
 
                 <hr>
@@ -3157,7 +3180,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <!-- UID欢迎模板编辑弹窗 -->
-                <div v-if="showUidWelcomeModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showUidWelcomeModal = false">
+                <div v-if="showUidWelcomeModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
                     <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4 max-h-[80vh] flex flex-col" @click.stop>
                         <div class="p-4 border-b flex items-center justify-between">
                             <h3 class="font-bold text-lg">👤 UID特定欢迎模板</h3>
@@ -3216,7 +3239,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <!-- 关键词回复编辑弹窗 -->
-                <div v-if="showKeywordModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showKeywordModal = false">
+                <div v-if="showKeywordModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
                     <div class="bg-white rounded-xl shadow-lg w-full max-w-xl mx-4 max-h-[80vh] flex flex-col" @click.stop>
                         <div class="p-4 border-b flex items-center justify-between">
                             <h3 class="font-bold text-lg">🔑 关键词规则</h3>
@@ -3266,7 +3289,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <!-- ── 欢迎模板多模板编辑弹窗 ── -->
-                <div v-if="showWelcomeTplModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showWelcomeTplModal = false">
+                <div v-if="showWelcomeTplModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
                     <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4 max-h-[80vh] flex flex-col" @click.stop>
                         <div class="p-4 border-b flex items-center justify-between">
                             <h3 class="font-bold text-lg">📝 欢迎多模板</h3>
@@ -3305,8 +3328,73 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     </div>
                 </div>
 
+                <!-- ── UID 黑名单编辑弹窗 ── -->
+                <div v-if="showUidBlacklistModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+                    <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4 max-h-[80vh] flex flex-col" @click.stop>
+                        <div class="p-4 border-b flex items-center justify-between">
+                            <h3 class="font-bold text-lg">🚫 UID 黑名单</h3>
+                            <button @click="closeUidBlacklistModal" class="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+                        </div>
+                        <div class="p-4 overflow-y-auto flex-1 space-y-3">
+                            <p class="text-xs text-gray-500">无视指定 UID 的所有弹幕（不影响送礼记录）。UID为空时保存自动清理。</p>
+                            <div v-for="(r, ri) in uidBlacklistEdit" :key="ri" class="border rounded p-3 bg-gray-50 space-y-2">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-xs font-bold">#{{ ri+1 }}</span>
+                                    <button @click="uidBlacklistEdit.splice(ri,1)" class="bg-red-50 hover:bg-red-100 text-red-500 px-2 py-0.5 rounded text-xs font-medium">删除</button>
+                                </div>
+                                <label class="text-xs text-gray-500">UID<input type="number" v-model.number="r.uid" class="border p-1 rounded w-full text-sm mt-1"></label>
+                                <label class="flex items-center gap-1 text-xs text-gray-500 mt-1"><input type="checkbox" v-model="r.allDay" class="w-3.5 h-3.5" @change="if(r.allDay){r.time_start=0;r.time_end=23}"> 全天生效</label>
+                                <div v-if="!r.allDay" class="grid grid-cols-2 gap-2">
+                                    <label class="text-xs text-gray-500">起始<input type="number" v-model.number="r.time_start" min="0" max="23" class="border p-1 rounded w-full text-sm"></label>
+                                    <label class="text-xs text-gray-500">结束<input type="number" v-model.number="r.time_end" min="0" max="23" class="border p-1 rounded w-full text-sm"></label>
+                                </div>
+                            </div>
+                            <button @click="uidBlacklistEdit.push({uid:0,time_start:0,time_end:23,allDay:true})" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-3 py-1 rounded text-xs font-medium">➕ 添加 UID</button>
+                        </div>
+                        <div class="p-4 border-t flex items-center gap-2 justify-end">
+                            <button @click="closeUidBlacklistModal" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
+                            <button @click="saveUidBlacklistModal" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">保存</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ── 关键词屏蔽编辑弹窗 ── -->
+                <div v-if="showKeywordFilterModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+                    <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4 max-h-[80vh] flex flex-col" @click.stop>
+                        <div class="p-4 border-b flex items-center justify-between">
+                            <h3 class="font-bold text-lg">🔤 关键词屏蔽</h3>
+                            <button @click="closeKeywordFilterModal" class="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+                        </div>
+                        <div class="p-4 overflow-y-auto flex-1 space-y-3">
+                            <p class="text-xs text-gray-500">限制机器人发送包含指定关键词的弹幕。空关键词条目保存时自动清理。</p>
+                            <div v-for="(r, ri) in keywordFilterEdit" :key="ri" class="border rounded p-3 bg-gray-50 space-y-2">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-xs font-bold">#{{ ri+1 }}</span>
+                                    <button @click="keywordFilterEdit.splice(ri,1)" class="bg-red-50 hover:bg-red-100 text-red-500 px-2 py-0.5 rounded text-xs font-medium">删除</button>
+                                </div>
+                                <label class="text-xs text-gray-500">关键词<input type="text" v-model="r.keyword" class="border p-1 rounded w-full text-sm mt-1" placeholder="输入关键词"></label>
+                                <div class="grid grid-cols-2 gap-2">
+                                    <label class="text-xs text-gray-500">匹配<select v-model="r.match_mode" class="border p-1 rounded w-full text-sm mt-1"><option value="contains">包含</option><option value="exact">精确</option></select></label>
+                                    <label class="text-xs text-gray-500">动作<select v-model="r.action" class="border p-1 rounded w-full text-sm mt-1"><option value="block">拦截不发送</option><option value="censor">关键词变*</option></select></label>
+                                </div>
+                                <label class="flex items-center gap-1 text-xs text-gray-500 mt-1"><input type="checkbox" v-model="r.allDay" class="w-3.5 h-3.5" @change="if(r.allDay){r.time_start=0;r.time_end=23}"> 全天生效</label>
+                                <div v-if="!r.allDay" class="grid grid-cols-2 gap-2">
+                                    <label class="text-xs text-gray-500">起始<input type="number" v-model.number="r.time_start" min="0" max="23" class="border p-1 rounded w-full text-sm"></label>
+                                    <label class="text-xs text-gray-500">结束<input type="number" v-model.number="r.time_end" min="0" max="23" class="border p-1 rounded w-full text-sm"></label>
+                                </div>
+                                <p v-if="r.match_mode==='exact' && r.action==='censor'" class="text-[10px] text-yellow-600">精确+变*不会生效</p>
+                            </div>
+                            <button @click="keywordFilterEdit.push({keyword:'',match_mode:'contains',action:'block',allDay:true,time_start:0,time_end:23})" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-3 py-1 rounded text-xs font-medium">➕ 添加规则</button>
+                        </div>
+                        <div class="p-4 border-t flex items-center gap-2 justify-end">
+                            <button @click="closeKeywordFilterModal" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
+                            <button @click="saveKeywordFilterModal" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">保存</button>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- ── 荣耀等级欢迎多模板编辑弹窗 ── -->
-                <div v-if="showHonorWelcomeTplModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showHonorWelcomeTplModal = false">
+                <div v-if="showHonorWelcomeTplModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
                     <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4 max-h-[80vh] flex flex-col" @click.stop>
                         <div class="p-4 border-b flex items-center justify-between">
                             <h3 class="font-bold text-lg">🏆 荣耀等级欢迎多模板</h3>
@@ -3340,7 +3428,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <!-- ── 大航海欢迎多模板编辑弹窗 ── -->
-                <div v-if="showGuardWelcomeTplModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showGuardWelcomeTplModal = false">
+                <div v-if="showGuardWelcomeTplModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
                     <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4 max-h-[80vh] flex flex-col" @click.stop>
                         <div class="p-4 border-b flex items-center justify-between">
                             <h3 class="font-bold text-lg">🛳️ 大航海欢迎多模板</h3>
@@ -3382,7 +3470,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <!-- ── 定时消息多模板编辑弹窗 ── -->
-                <div v-if="showPeriodicTplModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showPeriodicTplModal = false">
+                <div v-if="showPeriodicTplModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
                     <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4 max-h-[80vh] flex flex-col" @click.stop>
                         <div class="p-4 border-b flex items-center justify-between">
                             <h3 class="font-bold text-lg">⏰ 定时消息多模板</h3>
@@ -3422,7 +3510,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <!-- ── 签文多文本编辑弹窗 ── -->
-                <div v-if="showFortuneTplModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showFortuneTplModal = false">
+                <div v-if="showFortuneTplModal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
                     <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4 max-h-[80vh] flex flex-col" @click.stop>
                         <div class="p-4 border-b flex items-center justify-between">
                             <h3 class="font-bold text-lg">🎴 签文编辑</h3>
@@ -3477,10 +3565,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <!-- 数据管理 -->
         <div v-if="roomSubTab==='manage'" class="max-w-full sm:max-w-lg mx-auto bg-white p-4 sm:p-6 rounded-xl shadow-sm">
             <h2 class="text-lg font-bold mb-4 text-red-600">⚠️ 数据管理</h2>
-            <p class="text-sm text-gray-500 mb-4">注意：删除操作不可恢复。</p>
-            <div class="flex gap-2 items-end">
-                <label class="text-xs text-gray-500 flex-1">删除此日期之前的数据<input type="date" v-model="delDate" class="border p-2 rounded w-full text-sm mt-1"></label>
-                <button @click="confirmDelete" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded text-sm h-[38px]">删除</button>
+            <p class="text-sm text-gray-500 mb-4">注意：删除操作不可恢复。礼物数据保留天数在「机器人配置 → 数据保留」中设置。</p>
+            <div class="flex items-end gap-2">
+                <label class="text-xs text-gray-500 flex-1">日期<input type="date" v-model="delDate" class="border p-2 rounded w-full text-sm mt-1"></label>
+                <button @click="confirmDelete('gift')" class="bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded text-sm h-[38px]">删除送礼</button>
+                <button @click="confirmDelete('danmaku')" class="bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded text-sm h-[38px]">删除弹幕</button>
             </div>
             <div v-if="delResult" class="mt-4 text-sm">{{ delResult }}</div>
         </div>
@@ -3648,7 +3737,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
 
         <!-- 添加模板弹窗 -->
-        <div v-if="showAddTemplate" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50" @click="showAddTemplate = null">
+        <div v-if="showAddTemplate" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
             <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4" @click.stop>
                 <div class="p-4 border-b flex items-center justify-between">
                     <h3 class="font-bold text-lg">📋 {{ showAddTemplate === 'llm' ? 'AI回复模板' : '机器人配置模板' }}</h3>
@@ -3896,7 +3985,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </div>
 
 <script>
-const {createApp, ref, computed, nextTick} = Vue;
+const {createApp, ref, computed, watch, nextTick} = Vue;
 createApp({
     setup() {
         const loggedIn = ref(document.cookie.includes('session='));
@@ -4059,6 +4148,7 @@ createApp({
         const showCreateRoom = ref(false);
         const newRoomUid = ref(0);
         const newRoomName = ref('');
+        const newRoomAnchorName = ref('');  // 自动获取的主播用户名
         const newRoomPort = ref(8001);
         const newRoomDisplayId = ref(0);
         const creatingRoom = ref(false);
@@ -4082,6 +4172,17 @@ createApp({
         const templateFormOk = ref(false);
         const newRoomLlmTemplate = ref('');
         const newRoomBotTemplate = ref('');
+        // 输入 UID 时自动查询主播用户名（通过后端代理，避免跨域）
+        watch(newRoomUid, async (val) => {
+            if (!val || val < 1000) { newRoomAnchorName.value = ''; return; }
+            newRoomAnchorName.value = '查询中...';
+            try {
+                const r = await fetch(`/api/bilibili/user_info?mid=${val}`, {credentials: 'include'});
+                if (!r.ok) { newRoomAnchorName.value = '(查询失败)'; return; }
+                const j = await r.json();
+                newRoomAnchorName.value = (j.code === 0 && j.name) ? j.name : '(未找到)';
+            } catch(e) { newRoomAnchorName.value = '(查询失败)'; }
+        });
         const restartingAll = ref(false);
         const restartAllMsg = ref('');
         const restartAllOk = ref(false);
@@ -4094,8 +4195,7 @@ createApp({
         const configSections = ref({
             rateLimit: false,
             features: true,
-            uidBlacklist: false,
-            keywordFilter: false,
+            filter: false,
             pk: false,
             templates: false,
             periodic: false,
@@ -4734,20 +4834,24 @@ createApp({
         }
 
         // ── Delete ──
-        async function confirmDelete() {
+        async function confirmDelete(type) {
             if (!delDate.value) { delResult.value = '请选择日期'; return; }
-            if (!confirm(`确定删除 ${delDate.value} 之前的所有数据？此操作不可恢复！`)) return;
+            const label = type === 'gift' ? '送礼' : '弹幕';
+            if (!confirm(`确定删除 ${delDate.value} 之前的所有${label}记录？此操作不可恢复！`)) return;
             const roomId = selectedRoom.value?.room_id;
             if (!roomId) return;
             try {
                 const res = await fetch(`/api/rooms/${roomId}/delete_old`, {
                     method: 'POST',
                     headers: {'Content-Type':'application/json'},
-                    body: JSON.stringify({date: delDate.value})
+                    body: JSON.stringify({date: delDate.value, type: type})
                 });
                 if (!res.ok) throw new Error((await res.text()).slice(0,80));
                 const data = await res.json();
-                delResult.value = `已删除 ${data.deleted_events} 条事件记录`;
+                const parts = [];
+                if (data.deleted_gifts > 0) parts.push(`${data.deleted_gifts} 条送礼`);
+                if (data.deleted_danmaku > 0) parts.push(`${data.deleted_danmaku} 条弹幕`);
+                delResult.value = parts.length ? `已删除 ${parts.join('、')}` : '没有需要删除的数据';
             } catch(e) { delResult.value = '删除失败: ' + e.message; }
         }
 
@@ -5128,7 +5232,11 @@ createApp({
                 const body = {
                     anchor_uid: newRoomUid.value,
                 };
-                if (newRoomName.value) body.room_name = newRoomName.value;
+                if (newRoomName.value) {
+                    body.room_name = newRoomName.value;
+                } else if (newRoomAnchorName.value && !newRoomAnchorName.value.startsWith('(') && newRoomAnchorName.value !== '查询中...') {
+                    body.room_name = newRoomAnchorName.value;
+                }
                 if (newRoomPort.value && newRoomPort.value !== 8001) body.port = newRoomPort.value;
                 if (newRoomDisplayId.value) body.room_display_id = newRoomDisplayId.value;
                 const res = await fetch('/api/rooms', {
@@ -5801,6 +5909,42 @@ createApp({
             showHonorWelcomeTplModal.value = false;
         }
 
+        // ── UID 黑名单弹窗 ──
+        const showUidBlacklistModal = ref(false);
+        const uidBlacklistEdit = ref([]);
+        function openUidBlacklistModal() {
+            uidBlacklistEdit.value = JSON.parse(JSON.stringify(roomConfig.value.features.uid_blacklist || []));
+            uidBlacklistEdit.value.forEach(e => { if (e.time_start === 0 && e.time_end === 23) e.allDay = true; else e.allDay = false; });
+            showUidBlacklistModal.value = true;
+        }
+        function closeUidBlacklistModal() {
+            showUidBlacklistModal.value = false;
+            uidBlacklistEdit.value = [];
+        }
+        function saveUidBlacklistModal() {
+            const valid = uidBlacklistEdit.value.filter(e => e.uid && e.uid > 0);
+            roomConfig.value.features.uid_blacklist = valid.length ? JSON.parse(JSON.stringify(valid.map(e => ({uid: e.uid, time_start: e.time_start || 0, time_end: e.time_end || 23})))) : null;
+            closeUidBlacklistModal();
+        }
+
+        // ── 关键词屏蔽弹窗 ──
+        const showKeywordFilterModal = ref(false);
+        const keywordFilterEdit = ref([]);
+        function openKeywordFilterModal() {
+            keywordFilterEdit.value = JSON.parse(JSON.stringify(roomConfig.value.features.keyword_filter || []));
+            keywordFilterEdit.value.forEach(e => { if (e.time_start === 0 && e.time_end === 23) e.allDay = true; else e.allDay = false; });
+            showKeywordFilterModal.value = true;
+        }
+        function closeKeywordFilterModal() {
+            showKeywordFilterModal.value = false;
+            keywordFilterEdit.value = [];
+        }
+        function saveKeywordFilterModal() {
+            const valid = keywordFilterEdit.value.filter(e => e.keyword && e.keyword.trim());
+            roomConfig.value.features.keyword_filter = valid.length ? JSON.parse(JSON.stringify(valid.map(e => ({keyword: e.keyword.trim(), match_mode: e.match_mode, action: e.action, time_start: e.time_start || 0, time_end: e.time_end || 23})))) : null;
+            closeKeywordFilterModal();
+        }
+
         // ── 欢迎多模板弹窗 ──
         const showWelcomeTplModal = ref(false);
         const welcomeTplEntries = ref([]);
@@ -6099,7 +6243,7 @@ createApp({
                 selectRoom, goBackRoomList, assignAccountToRoom, toggleCreateRoom, toggleNewAccount, downloadUrl, downloadJson, importJsonFile, exportRoomConfig, importRoomConfig, afterImportLlm,
                 selectRoomSubTab, accountAssignMsg, accountAssignOk, accountRestarting, assignAccountAndRestart,
                 startEditRoomName, saveRoomName, editingRoomName, roomNameEdit,
-                rooms, showCreateRoom, newRoomUid, newRoomName, newRoomPort, newRoomDisplayId,
+                rooms, showCreateRoom, newRoomUid, newRoomName, newRoomAnchorName, newRoomPort, newRoomDisplayId,
                 creatingRoom, createRoomMsg, createRoomOk, createRoom,
                 startRoom, stopRoom, deleteRoom, editRoomConfig, saveRoomConfig, editingRoom, roomConfig,
                 roomSaveMsg, roomSaveOk,
@@ -6118,6 +6262,8 @@ createApp({
                 showWelcomeTplModal, welcomeTplEntries, openWelcomeTplModal, saveWelcomeTplModal,
                 showGuardWelcomeTplModal, guardWelcomeTplEntries, openGuardWelcomeTplModal, saveGuardWelcomeTplModal, addGuardTpl,
                 showHonorWelcomeTplModal, honorWelcomeTplEntries, openHonorWelcomeTplModal, saveHonorWelcomeTplModal,
+                showUidBlacklistModal, uidBlacklistEdit, openUidBlacklistModal, closeUidBlacklistModal, saveUidBlacklistModal,
+                showKeywordFilterModal, keywordFilterEdit, openKeywordFilterModal, closeKeywordFilterModal, saveKeywordFilterModal,
                 showPeriodicTplModal, periodicTplEntries, openPeriodicTplModal, savePeriodicTplModal,
                 showFortuneTplModal, fortuneTypes, fortuneTplEntries, openFortuneTplModal, saveFortuneTplModal, addFortuneText,
                 guardWelcomeTotal, fortuneTotalEntries,
