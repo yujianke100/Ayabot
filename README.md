@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/yujianke100/Ayabot/main/figs/logo.png" alt="ayabot" width="200" />
+  <img src="https://raw.githubusercontent.com/yujianke100/Ayabot/main/figs/logo.png" alt="ayabot" width="600" />
 </p>
 
 # Ayabot：免费开源的 Bilibili 直播间机器人
