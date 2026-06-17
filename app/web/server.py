@@ -1521,6 +1521,83 @@ async def api_save_room_config(room_id: str, request: Request):
     return {"ok": ok}
 
 
+@app.get("/api/rooms/{room_id}/config/export")
+async def api_room_config_export(room_id: str):
+    """导出房间配置为 JSON 下载。"""
+    from app.config import get_room_path
+    cfg_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "config.yaml"
+    if not cfg_path.exists():
+        return JSONResponse({"error": "room not found"}, status_code=404)
+    try:
+        from app.config import load_config, config_to_dict
+        cfg = load_config(str(cfg_path))
+        data = config_to_dict(cfg)
+        return JSONResponse(data)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.post("/api/rooms/{room_id}/config/import")
+async def api_room_config_import(room_id: str, request: Request):
+    """导入 JSON 配置覆盖房间配置。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    from app.config import get_room_path
+    cfg_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "config.yaml"
+    if not cfg_path.exists():
+        return JSONResponse({"error": "room not found"}, status_code=404)
+    try:
+        from app.config import update_config_from_dict
+        ok = update_config_from_dict(body, str(cfg_path))
+        return {"ok": ok}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/llm_config/export")
+async def api_llm_config_export():
+    """导出 LLM 配置为 JSON 下载。"""
+    return JSONResponse({
+        "enabled": _LLM_CONFIG_DICT.get("enabled", False),
+        "provider": _LLM_CONFIG_DICT.get("provider", "openai"),
+        "api_key": _LLM_CONFIG_DICT.get("api_key", ""),
+        "base_url": _LLM_CONFIG_DICT.get("base_url", ""),
+        "model": _LLM_CONFIG_DICT.get("model", ""),
+        "wake_word": _LLM_CONFIG_DICT.get("wake_word", "ayabot"),
+        "temperature": _LLM_CONFIG_DICT.get("temperature", 0.7),
+        "top_p": _LLM_CONFIG_DICT.get("top_p", 0.9),
+        "max_tokens": _LLM_CONFIG_DICT.get("max_tokens", 150),
+        "system_prompt": _LLM_CONFIG_DICT.get("system_prompt", ""),
+        "context": _LLM_CONFIG_DICT.get("context", {}),
+    })
+
+
+@app.post("/api/llm_config/import")
+async def api_llm_config_import(request: Request):
+    """导入 JSON 覆盖 LLM 配置。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    for key in ("enabled", "provider", "api_key", "base_url", "model", "wake_word", "temperature", "top_p", "max_tokens", "system_prompt"):
+        if key in body:
+            _LLM_CONFIG_DICT[key] = body[key]
+    if "context" in body and isinstance(body["context"], dict):
+        _LLM_CONFIG_DICT.setdefault("context", {}).update(body["context"])
+    # 回写 config.yaml
+    try:
+        cfg_path = Path(_CONFIG_YAML_PATH)
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        raw["llm"] = {k: _LLM_CONFIG_DICT.get(k) for k in ("enabled","provider","api_key","base_url","model","wake_word","temperature","top_p","max_tokens","system_prompt")}
+        raw["llm"]["context"] = _LLM_CONFIG_DICT.get("context", {})
+        cfg_path.write_text(yaml.dump(raw, default_flow_style=False, allow_unicode=True), encoding="utf-8")
+    except Exception as exc:
+        return JSONResponse({"error": f"save failed: {exc}"}, status_code=500)
+    return {"ok": True}
+
+
 # ══════════════════════════════════════════════════════════════
 #  B站账号管理 API
 # ══════════════════════════════════════════════════════════════
@@ -1841,6 +1918,51 @@ def _room_db_path(room_id: str) -> Path:
     """返回房间的 SQLite 数据库路径."""
     from app.config import get_room_path
     return get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "data" / "bot.db"
+
+
+@app.get("/api/rooms/{room_id}/log/export")
+async def api_room_log_export(room_id: str):
+    """导出 Bot 日志为文本文件。"""
+    from app.config import get_room_path
+    log_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "bot.log"
+    if not log_path.exists():
+        return JSONResponse({"error": "log not found"}, status_code=404)
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        return Response(
+            content=text,
+            media_type="text/plain",
+            headers={"Content-Disposition": f'attachment; filename="bot_{room_id}.log"'},
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/rooms/{room_id}/danmaku/export")
+async def api_room_danmaku_export(room_id: str):
+    """导出弹幕记录为 CSV 文件。"""
+    import csv, io
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return JSONResponse({"error": "no data"}, status_code=404)
+    try:
+        from app.storage import StatsStore
+        store = StatsStore(str(db_path))
+        rows = store.get_danmaku_log(limit=100000, offset=0)
+        store.close()
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["时间", "用户", "UID", "内容"])
+        for r in rows:
+            ts = datetime.datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d %H:%M:%S") if r.get("ts") else ""
+            w.writerow([ts, r.get("uname",""), r.get("uid",""), r.get("content","")])
+        return Response(
+            content=buf.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="danmaku_{room_id}.csv"'},
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 @app.post("/api/rooms/{room_id}/log/clear")
@@ -2685,6 +2807,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
                 <div class="flex items-center gap-4 flex-wrap">
                     <button @click="saveLlmConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
+                    <button @click="downloadJson('/api/llm_config/export', 'llm_config.json')" class="bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded text-sm text-xs">📤 导出</button>
+                    <button @click="importJsonFile('选择 AI 配置 JSON','/api/llm_config/import',()=>loadLlmConfig())" class="bg-orange-500 hover:bg-orange-600 text-white px-3 py-2 rounded text-sm text-xs">📥 导入</button>
                     <span v-if="llmSaveMsg" class="text-sm" :class="llmSaveOk ? 'text-green-600' : 'text-red-500'">{{ llmSaveMsg }}</span>
                     <span v-if="llmSaveOk" class="text-xs text-green-600">✅ 即时生效，无需重启</span>
                     <select v-model="applyLlmTemplate" class="border p-1 rounded text-xs">
@@ -3191,6 +3315,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
                 <div class="flex items-center gap-4 mt-4 flex-wrap">
                     <button @click="saveRoomConfig" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">保存</button>
+                    <button @click="exportRoomConfig()" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">📤 导出配置</button>
+                    <button @click="importRoomConfig()" class="bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded text-sm">📥 导入配置</button>
                     <span v-if="roomSaveMsg" class="text-sm" :class="roomSaveOk ? 'text-green-600' : 'text-red-500'">{{ roomSaveMsg }}</span>
                     <span v-if="roomSaveOk" class="text-xs text-yellow-600">💡 更改配置后需重启机器人才能生效</span>
                     <button v-if="selectedRoom" @click="restartSingleBot(selectedRoom.room_id)" class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-2 rounded text-sm text-xs">🔄 重启此机器人</button>
@@ -3229,6 +3355,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <div class="flex items-center gap-2">
                         <span class="text-xs text-gray-400">日志级别在「机器人配置」中修改，重启后生效</span>
                         <button @click="clearBotLog" class="bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded text-sm">清空</button>
+                        <button @click="downloadUrl('/api/rooms/'+selectedRoom.room_id+'/log/export', 'bot_'+selectedRoom.room_id+'.log')" class="bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded text-sm">📤 导出</button>
                         <button @click="loadBotLog" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">刷新</button>
                     </div>
                 </div>
@@ -3247,6 +3374,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                 class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">刷新</button>
                         <button @click="clearDanmakuLog"
                                 class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded text-sm">清空</button>
+                        <button @click="downloadUrl('/api/rooms/'+selectedRoom.room_id+'/danmaku/export', 'danmaku_'+selectedRoom.room_id+'.csv')" class="bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded text-sm">📤 导出CSV</button>
                     </div>
                 </div>
                 <div v-if="danmakuErr" class="text-red-500 text-sm">{{ danmakuErr }}</div>
@@ -3964,6 +4092,16 @@ createApp({
                     await loadRooms();
                 }
             } catch(e) { /* ignore */ }
+        }
+        function exportRoomConfig() {
+            const rid = selectedRoom.value?.room_id;
+            if (!rid) return;
+            downloadJson('/api/rooms/'+rid+'/config/export', 'room_'+rid+'_config.json');
+        }
+        function importRoomConfig() {
+            const rid = selectedRoom.value?.room_id;
+            if (!rid) return;
+            importJsonFile('选择机器人配置 JSON','/api/rooms/'+rid+'/config/import',()=>editRoomConfig(rid));
         }
         function selectRoomSubTab(key) {
             roomSubTab.value = key;
@@ -4989,6 +5127,56 @@ createApp({
             }
         }
 
+        // ── Download helper ──
+        async function downloadUrl(url, filename) {
+            try {
+                const res = await fetch(url, {credentials: 'include'});
+                if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
+                const blob = await res.blob();
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = filename;
+                a.click();
+                URL.revokeObjectURL(a.href);
+            } catch(e) { alert('下载失败: ' + e.message); }
+        }
+        async function downloadJson(url, filename) {
+            try {
+                const res = await fetch(url, {credentials: 'include'});
+                if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
+                const data = await res.json();
+                const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = filename;
+                a.click();
+                URL.revokeObjectURL(a.href);
+            } catch(e) { alert('导出失败: ' + e.message); }
+        }
+        function importJsonFile(promptLabel, apiUrl, onSuccess) {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.json,application/json';
+            input.onchange = async () => {
+                const file = input.files[0];
+                if (!file) return;
+                try {
+                    const text = await file.text();
+                    const data = JSON.parse(text);
+                    const res = await fetch(apiUrl, {
+                        method: 'POST', headers: {'Content-Type':'application/json'},
+                        credentials: 'include', body: JSON.stringify(data),
+                    });
+                    if (!res.ok) throw new Error((await res.text()).slice(0,80));
+                    const ret = await res.json();
+                    if (ret.ok === false) throw new Error(ret.error || '导入失败');
+                    alert('✅ 导入成功');
+                    if (onSuccess) onSuccess();
+                } catch(e) { alert('❌ 导入失败: ' + e.message); }
+            };
+            input.click();
+        }
+
         // ── Restart ──
         async function restartService() {
             restartMsg.value = '';
@@ -5643,7 +5831,7 @@ createApp({
                 cfgSaveMsg, cfgSaveOk, loadGeneralConfig,
                 restartMsg, restartOk, restartService,
                 selectedRoom, roomSubTab, roomSubTabs, newRoomAccount, selectedRoomAccount,
-                selectRoom, goBackRoomList, assignAccountToRoom, toggleCreateRoom, toggleNewAccount,
+                selectRoom, goBackRoomList, assignAccountToRoom, toggleCreateRoom, toggleNewAccount, downloadUrl, downloadJson, importJsonFile, exportRoomConfig, importRoomConfig,
                 selectRoomSubTab, accountAssignMsg, accountAssignOk, accountRestarting, assignAccountAndRestart,
                 startEditRoomName, saveRoomName, editingRoomName, roomNameEdit,
                 rooms, showCreateRoom, newRoomUid, newRoomName, newRoomPort, newRoomDisplayId,
