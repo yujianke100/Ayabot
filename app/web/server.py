@@ -2973,6 +2973,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.llm_bare_trigger" class="w-4 h-4"> AI免#前缀唤醒</label>
                     <label class="flex items-center gap-2" v-if="roomConfig.features.llm_bare_trigger"><input type="checkbox" v-model="roomConfig.features.llm_keyword_trigger" class="w-4 h-4"> 包含关键词触发AI</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.use_chinese_numbers_global" class="w-4 h-4"> 全局大写数字（反屏蔽）</label>
+                    <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.pk_report_enabled" class="w-4 h-4"> ⚔️ PK汇报</label>
                 </div>
                 <div class="text-xs text-gray-400 mb-2">免#指令：开启后可不带 # 使用指令（签到、今日盲盒等） | AI免#：弹幕开头匹配唤醒词即触发AI | 包含关键词：弹幕含唤醒词即触发AI（需AI免#前缀唤醒）</div>
                 <div v-if="roomConfig.features.danmaku_log_enabled" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -3025,22 +3026,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
                         </div>
                         <button @click="openKeywordFilterModal" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-2.5 py-1 rounded text-xs font-medium">✏️ 编辑</button>
                     </div>
-                </div>
-
-                <hr>
-                <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('pk')">
-                    <span v-if="configSections.pk">▼</span><span v-else>▶</span> ⚔️ PK汇报
-                </h3>
-                <div v-show="configSections.pk" class="space-y-3">
-                    <label class="flex items-center gap-2 text-sm"><input type="checkbox" v-model="roomConfig.features.pk_report_enabled" class="w-4 h-4"> PK开始/结束时汇报对手信息</label>
-                    <label class="text-xs text-gray-500 block">PK开始模板
-                        <input type="text" v-model="roomConfig.features.pk_report_template" placeholder="PK开始！对手{opponent}，{fans}粉，{guards}，{audience}观众，贡献{score}" class="border p-2 rounded w-full text-sm mt-1">
-                        <span class="text-gray-400 text-[10px]">支持占位符: {opponent}对手名 {fans}粉丝数 {guards}大航海 {audience}观众 {score}贡献值</span>
-                    </label>
-                    <label class="text-xs text-gray-500 block">PK结束模板
-                        <input type="text" v-model="roomConfig.features.pk_end_template" placeholder="{result} 我方分数{score}" class="border p-2 rounded w-full text-sm mt-1">
-                        <span class="text-gray-400 text-[10px]">支持占位符: {result}结果(胜利！/对方获胜/PK结束) {score}我方分数</span>
-                    </label>
                 </div>
 
                 <hr>
@@ -4251,7 +4236,6 @@ createApp({
             rateLimit: false,
             features: true,
             filter: false,
-            pk: false,
             templates: false,
             periodic: false,
             uidWelcome: false,
