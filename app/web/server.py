@@ -2874,21 +2874,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
 
                 <hr>
-                <h3 class="text-sm font-bold">⏱️ 冷却时间（秒）</h3>
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <label class="text-xs text-gray-500">欢迎同用户间隔
-                        <input type="number" v-model.number="roomConfig.cooldown.welcome_user_seconds" class="border p-2 rounded w-full text-sm mt-1">
-                    </label>
-                    <label class="text-xs text-gray-500">感谢同用户间隔
-                        <input type="number" v-model.number="roomConfig.cooldown.thanks_user_seconds" class="border p-2 rounded w-full text-sm mt-1">
-                    </label>
-                </div>
-
-                <hr>
                 <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('rateLimit')">
-                    <span v-if="configSections.rateLimit">▼</span><span v-else>▶</span> 🚦 限流
+                    <span v-if="configSections.rateLimit">▼</span><span v-else>▶</span> 🚦 限流 / 冷却
                 </h3>
                 <div v-show="configSections.rateLimit" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <label class="text-xs text-gray-500">欢迎同用户间隔（秒）
+                        <input type="number" v-model.number="roomConfig.cooldown.welcome_user_seconds" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
+                    <label class="text-xs text-gray-500">感谢同用户间隔（秒）
+                        <input type="number" v-model.number="roomConfig.cooldown.thanks_user_seconds" class="border p-2 rounded w-full text-sm mt-1">
+                    </label>
                     <label class="text-xs text-gray-500">弹幕发送间隔(秒)
                         <input type="number" v-model="roomConfig.rate_limit.send_interval_seconds" step="0.1" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
@@ -2907,10 +2902,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <h3 class="text-sm font-bold cursor-pointer select-none hover:text-blue-600" @click="toggleSection('features')">
                     <span v-if="configSections.features">▼</span><span v-else>▶</span> 🎛️ 功能开关
                 </h3>
-                <div v-show="configSections.features">
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                <div v-show="roomConfig.features" class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.welcome_enabled" class="w-4 h-4"> 欢迎</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.thanks_enabled" class="w-4 h-4"> 感谢</label>
+
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.blindbox_enabled" class="w-4 h-4"> 盲盒统计</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.guard_thanks_enabled" class="w-4 h-4"> 大航海感谢</label>
                     <label class="flex items-center gap-2"><input type="checkbox" v-model="roomConfig.features.like_thanks_enabled" class="w-4 h-4"> 点赞感谢</label>
@@ -2975,7 +2970,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     </label>
                     <div class="border rounded p-3 bg-gray-50 flex items-center justify-between">
                         <span class="text-xs text-gray-500">📋 多模板（随机+时段）共 {{ ((roomConfig?.features?.welcome_templates_list||[]).length) }} 条</span>
-                        <button @click="openWelcomeTplModal" class="text-blue-500 text-xs underline">✏️ 编辑</button>
+                        <button @click="openWelcomeTplModal" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-2.5 py-1 rounded text-xs font-medium">✏️ 编辑</button>
                     </div>
                     <label class="text-xs text-gray-500 block">感谢模板
                         <input type="text" v-model="roomConfig.features.thanks_template" placeholder="感谢{uname}的{gift_name}x{gift_num}!" class="border p-2 rounded w-full text-sm mt-1">
@@ -3016,7 +3011,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <h4 class="text-xs font-bold text-gray-600 mt-2">大航海欢迎（优先级高于默认欢迎模板）</h4>
                     <div class="border rounded p-3 bg-gray-50 flex items-center justify-between">
                         <span class="text-xs text-gray-500">📋 多模板（随机+时段）共 {{ guardWelcomeTotal }} 条</span>
-                        <button @click="openGuardWelcomeTplModal" class="text-blue-500 text-xs underline">✏️ 编辑</button>
+                        <button @click="openGuardWelcomeTplModal" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-2.5 py-1 rounded text-xs font-medium">✏️ 编辑</button>
                     </div>
                     <label class="text-xs text-gray-500 block">连接消息
                         <input type="text" v-model="roomConfig.features.connected_message" placeholder="来了喵~" class="border p-2 rounded w-full text-sm mt-1">
@@ -3067,7 +3062,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     </div>
                     <div class="border rounded p-3 bg-gray-50 flex items-center justify-between">
                         <span class="text-xs text-gray-500">📋 多模板（随机+时段）共 {{ ((roomConfig?.features?.periodic_messages_list||[]).length) }} 条</span>
-                        <button @click="openPeriodicTplModal" class="text-blue-500 text-xs underline">✏️ 编辑</button>
+                        <button @click="openPeriodicTplModal" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-2.5 py-1 rounded text-xs font-medium">✏️ 编辑</button>
                     </div>
                     <label class="text-xs text-gray-500 block">旧版单模板（降级）
                         <input type="text" v-model="roomConfig.features.periodic_message_template" placeholder="欢迎关注直播间~点个关注不迷路！" class="border p-2 rounded w-full text-sm mt-1">
@@ -3083,7 +3078,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <p class="text-xs text-gray-500">为特定UID的用户设置专属欢迎词（优先级高于默认和大航海欢迎）。</p>
                 <div class="border rounded p-3 bg-gray-50 flex items-center justify-between">
                     <span class="text-xs text-gray-500">共 {{ (roomConfig.features.welcome_templates_for_uids_entries||[]).length }} 条配置</span>
-                    <button @click="openUidWelcomeModal" class="text-blue-500 text-xs underline">✏️ 编辑</button>
+                    <button @click="openUidWelcomeModal" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-2.5 py-1 rounded text-xs font-medium">✏️ 编辑</button>
                 </div>
                 </div>
 
@@ -3098,7 +3093,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                             <div v-for="(wt, wti) in uidWelcomeEditEntries" :key="wti" class="border rounded p-3 bg-gray-50 space-y-2">
                                 <div class="flex items-center justify-between">
                                     <span class="text-xs font-bold">#{{ wti+1 }}</span>
-                                    <button @click="uidWelcomeEditEntries.splice(wti, 1)" class="text-red-400 text-xs underline">删除</button>
+                                    <button @click="uidWelcomeEditEntries.splice(wti, 1)" class="bg-red-50 hover:bg-red-100 text-red-500 px-2 py-0.5 rounded text-xs font-medium">删除</button>
                                 </div>
                                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                                     <label class="text-xs text-gray-500">UID
@@ -3121,7 +3116,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                     </label>
                                 </div>
                             </div>
-                            <button @click="uidWelcomeEditEntries.push({uid: 0, template: '', time_start: 0, time_end: 23, allDay: true})" class="text-blue-500 text-xs underline">➕ 添加</button>
+                            <button @click="uidWelcomeEditEntries.push({uid: 0, template: '', time_start: 0, time_end: 23, allDay: true})" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-3 py-1 rounded text-xs font-medium">➕ 添加</button>
                         </div>
                         <div class="p-4 border-t flex items-center gap-2 justify-end">
                             <button @click="closeUidWelcomeModal" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
@@ -3142,7 +3137,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     </label>
                     <div class="flex items-center justify-between pt-1">
                         <span class="text-xs text-gray-500">共 {{ (roomConfig.keyword_reply.rules||[]).length }} 条规则</span>
-                        <button @click="openKeywordModal" class="text-blue-500 text-xs underline">✏️ 编辑</button>
+                        <button @click="openKeywordModal" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-2.5 py-1 rounded text-xs font-medium">✏️ 编辑</button>
                     </div>
                 </div>
 
@@ -3157,7 +3152,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                             <div v-for="(rule, ri) in keywordEditRules" :key="ri" class="border rounded p-3 bg-gray-50 space-y-2">
                                 <div class="flex items-center justify-between">
                                     <span class="text-xs font-bold">规则 #{{ ri+1 }}</span>
-                                    <button @click="keywordEditRules.splice(ri, 1)" class="text-red-400 text-xs underline">删除</button>
+                                    <button @click="keywordEditRules.splice(ri, 1)" class="bg-red-50 hover:bg-red-100 text-red-500 px-2 py-0.5 rounded text-xs font-medium">删除</button>
                                 </div>
                                 <label class="text-xs text-gray-500">触发关键词（逗号分隔）
                                     <input type="text" v-model="rule.keywordsStr" class="border p-1 rounded w-full text-sm mt-1" placeholder="价格,多少钱">
@@ -3187,7 +3182,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                     </label>
                                 </div>
                             </div>
-                            <button @click="keywordEditRules.push({keywordsStr: '', reply: '', match_mode: 'contains', allowedUidsStr: '', time_start: 0, time_end: 23, allDay: true})" class="text-blue-500 text-xs underline">➕ 添加规则</button>
+                            <button @click="keywordEditRules.push({keywordsStr: '', reply: '', match_mode: 'contains', allowedUidsStr: '', time_start: 0, time_end: 23, allDay: true})" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-3 py-1 rounded text-xs font-medium">➕ 添加规则</button>
                         </div>
                         <div class="p-4 border-t flex items-center gap-2 justify-end">
                             <button @click="closeKeywordModal" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
@@ -3208,7 +3203,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                             <div v-for="(t, ti) in welcomeTplEntries" :key="ti" class="border rounded p-3 bg-gray-50 space-y-2">
                                 <div class="flex items-center justify-between">
                                     <span class="text-xs font-bold">模板 #{{ ti+1 }}</span>
-                                    <button @click="welcomeTplEntries.splice(ti, 1)" class="text-red-400 text-xs underline">删除</button>
+                                    <button @click="welcomeTplEntries.splice(ti, 1)" class="bg-red-50 hover:bg-red-100 text-red-500 px-2 py-0.5 rounded text-xs font-medium">删除</button>
                                 </div>
                                 <label class="text-xs text-gray-500">内容（支持 {uname}）
                                     <input type="text" v-model="t.text" class="border p-1 rounded w-full text-sm mt-1" placeholder="欢迎 {uname} 来到直播间喵~">
@@ -3227,7 +3222,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                 </div>
                                 <p class="text-[10px] text-gray-400">起始≤结束=当天时段，起始>结束=跨天（如 22~6 是深夜到凌晨）</p>
                             </div>
-                            <button @click="welcomeTplEntries.push({text: '', time_start: 0, time_end: 23})" class="text-blue-500 text-xs underline">➕ 添加模板</button>
+                            <button @click="welcomeTplEntries.push({text: '', time_start: 0, time_end: 23})" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-3 py-1 rounded text-xs font-medium">➕ 添加模板</button>
                         </div>
                         <div class="p-4 border-t flex items-center gap-2 justify-end">
                             <button @click="showWelcomeTplModal = false" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
@@ -3268,7 +3263,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                         </label>
                                     </div>
                                 </div>
-                                <button @click="addGuardTpl(lk)" class="text-blue-500 text-[10px] underline mt-1">➕ 添加{{ level }}模板</button>
+                                <button @click="addGuardTpl(lk)" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-2.5 py-1 rounded text-[11px] font-medium mt-1">➕ 添加{{ level }}模板</button>
                             </div>
                         </div>
                         <div class="p-4 border-t flex items-center gap-2 justify-end">
@@ -3290,7 +3285,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                             <div v-for="(t, ti) in periodicTplEntries" :key="ti" class="border rounded p-3 bg-gray-50 space-y-2">
                                 <div class="flex items-center justify-between">
                                     <span class="text-xs font-bold">消息 #{{ ti+1 }}</span>
-                                    <button @click="periodicTplEntries.splice(ti, 1)" class="text-red-400 text-xs underline">删除</button>
+                                    <button @click="periodicTplEntries.splice(ti, 1)" class="bg-red-50 hover:bg-red-100 text-red-500 px-2 py-0.5 rounded text-xs font-medium">删除</button>
                                 </div>
                                 <label class="text-xs text-gray-500">内容
                                     <input type="text" v-model="t.text" class="border p-1 rounded w-full text-sm mt-1" placeholder="点个关注不迷路喵~">
@@ -3309,7 +3304,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                 </div>
                                 <p class="text-[10px] text-gray-400">起始≤结束=当天，起始>结束=跨天（如 22~6）</p>
                             </div>
-                            <button @click="periodicTplEntries.push({text: '', time_start: 0, time_end: 23})" class="text-blue-500 text-xs underline">➕ 添加消息</button>
+                            <button @click="periodicTplEntries.push({text: '', time_start: 0, time_end: 23})" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-3 py-1 rounded text-xs font-medium">➕ 添加消息</button>
                         </div>
                         <div class="p-4 border-t flex items-center gap-2 justify-end">
                             <button @click="showPeriodicTplModal = false" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded text-sm">取消</button>
@@ -3331,7 +3326,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                 <h4 class="text-xs font-bold mb-1">{{ ft.label }}</h4>
                                 <div v-for="(txt, txi) in (fortuneTplEntries[ft.key]||[])" :key="txi" class="flex items-center gap-2 mb-1">
                                     <input type="text" v-model="fortuneTplEntries[ft.key][txi]" class="border p-1 rounded w-full text-sm" :placeholder="ft.placeholder">
-                                    <button @click="fortuneTplEntries[ft.key].splice(txi, 1)" class="text-red-400 text-xs underline shrink-0">删</button>
+                                    <button @click="fortuneTplEntries[ft.key].splice(txi, 1)" class="bg-red-50 hover:bg-red-100 text-red-500 px-2 py-0.5 rounded text-xs font-medium shrink-0">删</button>
                                 </div>
                                 <button @click="addFortuneText(ft.key)" class="text-blue-500 text-[10px] underline mt-1">➕ 添加{{ ft.label }}签文</button>
                             </div>
@@ -3348,7 +3343,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <p class="text-xs text-gray-500">修改 #抽签 命令的签文内容。每个类型可填多条，随机选。留空用默认。</p>
                 <div class="border rounded p-3 bg-gray-50 flex items-center justify-between">
                     <span class="text-xs text-gray-500">📋 全部签文共 {{ fortuneTotalEntries }} 条</span>
-                    <button @click="openFortuneTplModal" class="text-blue-500 text-xs underline">✏️ 编辑</button>
+                    <button @click="openFortuneTplModal" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-2.5 py-1 rounded text-xs font-medium">✏️ 编辑</button>
                 </div>
 
                 <div class="flex items-center gap-4 mt-4 flex-wrap">
@@ -3530,7 +3525,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <span class="font-bold text-sm">{{ t.name }}</span>
                     <span class="text-xs text-gray-400 ml-2">{{ t.config.model || t.config.provider || '' }}</span>
                 </div>
-                <button @click="deleteTemplate('llm', t.name)" class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
+                <button @click="deleteTemplate('llm', t.name)" class="bg-red-50 hover:bg-red-100 text-red-500 px-3 py-1 rounded text-xs font-medium">删除</button>
             </div>
         </div>
 
@@ -3543,7 +3538,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <span class="font-bold text-sm">{{ t.name }}</span>
                     <span class="text-xs text-gray-400 ml-2">{{ Object.keys(t.config).length }} 项配置</span>
                 </div>
-                <button @click="deleteTemplate('bot', t.name)" class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
+                <button @click="deleteTemplate('bot', t.name)" class="bg-red-50 hover:bg-red-100 text-red-500 px-3 py-1 rounded text-xs font-medium">删除</button>
             </div>
         </div>
 
@@ -3696,7 +3691,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
         <div v-if="!accounts || accounts.length === 0" class="text-sm text-gray-400 text-center py-8">暂无已登录的 B站 账号。</div>
         <div v-if="accounts && accounts.length > 1" class="flex justify-end">
-            <button @click="verifyAllAccounts" :disabled="verifyingAll" class="text-blue-500 hover:text-blue-700 text-xs underline">
+            <button @click="verifyAllAccounts" :disabled="verifyingAll" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-3 py-1.5 rounded text-xs font-medium">
                 {{ verifyingAll ? (`验证中 ${verifyQueue.length + 1}/${accounts.length}...`) : '🔍 一键检测所有' }}
             </button>
         </div>
@@ -3993,7 +3988,7 @@ createApp({
         // 配置区折叠状态（默认全部收起，accordion 模式：开一个关其他）
         const configSections = ref({
             rateLimit: false,
-            features: false,
+            features: true,
             pk: false,
             templates: false,
             periodic: false,
