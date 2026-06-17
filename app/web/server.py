@@ -2096,8 +2096,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://unpkg.com/modern-screenshot@4.7.0/dist/index.js"></script>
 <style>
-/* ── 礼物卡片（毛玻璃 + 主题色渐变，html2canvas 兼容）── */
+/* ── 礼物卡片（毛玻璃 + 主题色渐变）── */
 .bili-card {
     border-radius: 12px;
     padding: 10px 14px;
@@ -2215,13 +2216,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <input v-model="loginPass" type="password" placeholder="密码" class="border p-2 rounded w-full text-sm" @keyup.enter="doLogin">
             <div v-if="loginErr" class="text-red-500 text-sm">{{ loginErr }}</div>
             <button @click="doLogin" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded w-full">登录</button>
+            <div class="mt-3 text-xs text-center text-amber-700 bg-amber-50 rounded p-2 border border-amber-200 leading-relaxed">
+                初始账号: <strong>ayabot</strong>&nbsp;&nbsp;密码: <strong>123456</strong><br>
+                <span class="text-gray-500">（首次登录请修改密码）</span>
+            </div>
         </div>
         <div class="mt-5 pt-4 border-t border-gray-100 text-center">
             <p class="text-xs text-gray-400">
                 Ayabot v0.1.1 —
                 <a href="https://github.com/yujianke100/ayabot" target="_blank" class="text-blue-500 hover:underline">⭐ GitHub</a>
                 <span class="mx-1">·</span>
-                完全免费 · 开源
+                <span class="text-red-500 font-bold">完全免费</span> · 开源
             </p>
         </div>
     </div>
@@ -2378,7 +2383,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <!-- ── 房间详情 ── -->
     <div v-else>
         <div class="mb-4">
-            <button @click="selectedRoom = null; roomSubTab = 'ranking'"
+            <button @click="goBackRoomList()"
                     class="text-blue-500 hover:text-blue-700 text-sm">&larr; 返回房间列表</button>
         </div>
 
@@ -2523,6 +2528,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
             </div>
             <div v-if="errExport" class="text-red-500 text-sm mb-2">{{ errExport }}</div>
+
+            <div v-if="exportList.length" class="text-center mb-4">
+                <button @click="captureExport" class="bg-purple-600 hover:bg-purple-700 text-white px-6 py-2.5 rounded-lg text-sm font-semibold shadow-md transition">
+                    📷 导出 PNG
+                </button>
+                <p class="text-xs text-gray-400 mt-2">所见即所得，完整捕获全部内容（不受滚动/遮挡影响）</p>
+            </div>
 
             <!-- 精美数据展示区（水平可滚动，居中） -->
             <div id="capture" v-if="exportList.length" class="w-full overflow-x-auto">
@@ -3498,6 +3510,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <div v-if="tab==='help'" class="max-w-3xl mx-auto">
     <div class="bg-white p-6 rounded-xl shadow-sm space-y-6 text-sm leading-relaxed">
         <h2 class="text-lg font-bold">📖 使用指南</h2>
+        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-3">
+            <h3 class="font-bold text-blue-700">🚀 快速开始</h3>
+            <ol class="list-decimal pl-4 space-y-2 text-xs">
+                <li><strong class="text-blue-600">登录 B站 账号</strong> — 进入「用户管理」→「B站账号」→「扫码登录」，用 B站 App 扫描二维码完成登录。机器人需要通过你的账号发送弹幕。</li>
+                <li><strong class="text-blue-600">新建直播间</strong> — 进入「房间管理」→「新建房间」，填写主播 UID 和直播间号，关联上一步登录的 B站 账号。</li>
+                <li><strong class="text-blue-600">配置并启动</strong> — 创建后在房间详情中按需配置功能开关、回复模板、AI 回复等，然后点击「启动」按钮。</li>
+                <li><strong class="text-blue-600">创建主播账号（可选）</strong> — 如果是帮别人部署，可在「用户管理」中新建「普通用户」账号并授权指定房间，对方登录后仅可查看/导出自己房间的数据。</li>
+            </ol>
+        </div>
         <div>
             <h3 class="font-bold text-blue-600 mb-1">🎯 弹幕命令</h3>
             <table class="w-full text-xs border-collapse">
@@ -3532,10 +3553,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 Ayabot v0.1.1 —
                 <a href="https://github.com/yujianke100/ayabot" target="_blank" class="text-blue-500 hover:underline">⭐ 去 GitHub 给个 Star</a>
                 <span class="mx-1">·</span>
-                本软件完全免费，以 GPLv3 协议开源
+                本软件<span class="text-red-500 font-bold">完全免费</span>，以 GPLv3 协议开源
             </p>
             <div class="mt-4 pt-4 border-t border-gray-100 text-center">
                 <p class="text-xs text-gray-500 mb-3">☕ 觉得好用？请作者喝杯咖啡吧 ❤️</p>
+                <p class="text-xs text-gray-400 mt-2">Ayabot v0.2.0</p>
                 <div class="flex justify-center gap-6">
                     <div class="text-center">
                         <img src="/alipay.jpg" width="150" height="150" alt="支付宝" class="rounded-xl border inline-block">
@@ -3883,6 +3905,29 @@ createApp({
             selectedRoom.value = r;
             roomSubTab.value = 'ranking';
             selectedRoomAccount.value = r.account_uid || '';
+            // 清除上一个房间的查询状态
+            _clearRoomState();
+        }
+        function goBackRoomList() {
+            selectedRoom.value = null;
+            roomSubTab.value = 'ranking';
+            _clearRoomState();
+        }
+        function _clearRoomState() {
+            ranking.value = [];
+            errRanking.value = '';
+            exportList.value = [];
+            exportDates.value = [];
+            exportDatesSet.value = new Set();
+            errExport.value = '';
+            eUid.value = 0;
+            eName.value = '';
+            eDate.value = new Date().toISOString().slice(0,10);
+            eType.value = 'all';
+            ePerCol.value = 6;
+            eColWidth.value = 340;
+            showCalendar.value = false;
+            roomConfig.value = null;
         }
         function startEditRoomName() {
             roomNameEdit.value = selectedRoom.value?.room_name || '';
@@ -4244,6 +4289,67 @@ createApp({
                     errExport.value = '该用户当天无送礼记录';
                 }
             } catch(e) { errExport.value = '加载失败: ' + e.message; }
+        }
+        async function captureExport() {
+            const el = document.getElementById('capture');
+            if (!el) return;
+            if (typeof window.modernScreenshot === 'undefined') { alert('截图库加载中，请稍后重试'); return; }
+            // 1. 【精准测量】在克隆前拿到原 DOM 真实内容尺寸
+            //    以 capture-grid（多列网格）为基准，避免离屏后 Flex 无限拉伸
+            const innerGrid = el.querySelector('.capture-grid') || el.querySelector('.capture-inner') || el;
+            const targetWidth = innerGrid.scrollWidth;
+            const targetHeight = el.scrollHeight;
+            // 2. 离屏克隆
+            const clone = el.cloneNode(true);
+            // 3. 在挂载前给所有 img 补上 crossorigin
+            clone.querySelectorAll('img').forEach(img => {
+                img.setAttribute('crossorigin', 'anonymous');
+            });
+            // 4. 锁定克隆节点宽高，防止离屏 fixed 容器中无限拉伸/坍塌导致黑边
+            clone.style.width = targetWidth + 'px';
+            clone.style.minWidth = targetWidth + 'px';
+            clone.style.maxWidth = targetWidth + 'px';
+            clone.style.overflow = 'visible';
+            clone.style.overflowX = 'visible';
+            clone.style.maxHeight = 'none';
+            // 5. 挂载到离屏容器 + 复制 body className 保留 Tailwind 字体上下文
+            const container = document.createElement('div');
+            container.style.position = 'fixed';
+            container.style.left = '-9999px';
+            container.style.top = '0';
+            container.style.zIndex = '-1000';
+            container.style.pointerEvents = 'none';
+            container.className = document.body.className;
+            container.appendChild(clone);
+            document.body.appendChild(container);
+            // 6. 等待所有图片加载
+            await Promise.all(Array.from(clone.querySelectorAll('img')).map(img => {
+                if (img.complete && img.naturalWidth > 0) return Promise.resolve();
+                return new Promise(resolve => { img.onload = resolve; img.onerror = resolve; });
+            }));
+            // 7. 等一帧完成布局重排与字体渲染
+            await new Promise(r => requestAnimationFrame(r));
+            try {
+                // 8. modern-screenshot：基于 SVG foreignObject 原生渲染
+                //    完美继承 CSS truncate/Flex/毛玻璃，100% 像素级还原
+                const dataUrl = await window.modernScreenshot.domToPng(clone, {
+                    scale: 2,
+                    backgroundColor: null,
+                    width: targetWidth,
+                    height: targetHeight,
+                    features: {
+                        router: false,  // 关闭路由防错，提升速度
+                    },
+                });
+                const link = document.createElement('a');
+                link.download = `${eName.value || eUid.value}_${eDate.value}_礼物明细.png`;
+                link.href = dataUrl;
+                link.click();
+            } catch(e) {
+                alert('导出失败: ' + e.message);
+            } finally {
+                if (container.parentNode) container.parentNode.removeChild(container);
+            }
         }
         function gotoExport(uid, uname) {
             eUid.value = uid;
@@ -5502,7 +5608,7 @@ createApp({
                 openAddUser, editUser, saveUserForm, deleteUser, toggleUserRoom,
                 rStart, rEnd, rType, ranking, errRanking, loadRanking,
                 eUid, eName, eDate, eType, ePerCol, eColWidth, exportList, exportDates, exportCols, errExport,
-                loadExport, gotoExport, loadUserDates, onUidInput, pickDate,
+                loadExport, gotoExport, loadUserDates, onUidInput, pickDate, captureExport,
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
@@ -5522,7 +5628,7 @@ createApp({
                 cfgSaveMsg, cfgSaveOk, loadGeneralConfig,
                 restartMsg, restartOk, restartService,
                 selectedRoom, roomSubTab, roomSubTabs, newRoomAccount, selectedRoomAccount,
-                selectRoom, assignAccountToRoom, toggleCreateRoom, toggleNewAccount,
+                selectRoom, goBackRoomList, assignAccountToRoom, toggleCreateRoom, toggleNewAccount,
                 selectRoomSubTab, accountAssignMsg, accountAssignOk, accountRestarting, assignAccountAndRestart,
                 startEditRoomName, saveRoomName, editingRoomName, roomNameEdit,
                 rooms, showCreateRoom, newRoomUid, newRoomName, newRoomPort, newRoomDisplayId,
