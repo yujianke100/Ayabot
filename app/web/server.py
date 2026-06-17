@@ -1430,7 +1430,20 @@ async def api_create_room(request: Request):
 
     # 写入房间配置
     port = body.get("port", 8000)
-    room_name = body.get("room_name", "") or str(anchor_uid)
+    room_name = body.get("room_name", "")
+    if not room_name:
+        # 尝试从 B站 API 获取主播用户名
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as s:
+                async with s.get(f"https://api.bilibili.com/x/space/wbi/acc/info?mid={anchor_uid}") as r:
+                    if r.status == 200:
+                        j = await r.json()
+                        if j.get("code") == 0:
+                            room_name = j.get("data", {}).get("name", "")
+        except Exception:
+            pass
+        if not room_name:
+            room_name = str(anchor_uid)
     bot_name = f"ayabot{room_id[:4]}"
     from app.config import update_config_from_dict
     cfg_update = {
@@ -2530,7 +2543,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                             class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-xs"
                             v-show="userRole === 'admin'">停止</button>
                     <button @click="deleteRoom(r.room_id, r.room_id)"
-                            class="text-red-400 hover:text-red-600 text-xs underline"
+                            class="bg-red-100 hover:bg-red-200 text-red-600 px-2.5 py-1.5 rounded text-xs font-medium"
                             v-show="userRole === 'admin'">删除</button>
                 </div>
             </div>
@@ -3642,8 +3655,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
             </div>
             <div class="flex gap-2">
-                <button @click="editUser(u)" class="text-blue-500 hover:text-blue-700 text-xs underline">编辑</button>
-                <button v-if="u.username !== loginUser" @click="deleteUser(u.username)" class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
+                <button @click="editUser(u)" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-3 py-1.5 rounded text-xs font-medium">编辑</button>
+                <button v-if="u.username !== loginUser" @click="deleteUser(u.username)" class="bg-red-50 hover:bg-red-100 text-red-500 px-3 py-1.5 rounded text-xs font-medium">删除</button>
             </div>
         </div>
     </div>
@@ -3707,10 +3720,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <div v-else class="text-xs text-gray-400 mt-1">未关联房间（可在房间详情设置中绑定）</div>
             </div>
             <div class="flex gap-2 items-center">
-                <button @click="verifyAccount(a.uid)" :disabled="a.verifying" class="text-green-500 hover:text-green-700 text-xs underline">
+                <button @click="verifyAccount(a.uid)" :disabled="a.verifying" class="bg-gray-100 hover:bg-gray-200 px-2.5 py-1.5 rounded text-xs font-medium" :class="{'text-green-600':a.credential_ok===true,'text-red-500':a.credential_ok===false,'text-gray-600':!a.credential_ok}">
                     {{ a.verifying ? '验证中...' : (a.credential_ok === true ? '✅ 有效' : (a.credential_ok === false ? '❌ 失效' : '验证')) }}
                 </button>
-                <button @click="deleteAccount(a.uid, a.nickname)" class="text-red-400 hover:text-red-600 text-xs underline">删除</button>
+                <button @click="deleteAccount(a.uid, a.nickname)" class="bg-red-50 hover:bg-red-100 text-red-500 px-2.5 py-1.5 rounded text-xs font-medium">删除</button>
             </div>
         </div>
     </div>
