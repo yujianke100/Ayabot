@@ -389,22 +389,56 @@ class StatsStore:
             )
         self._conn.commit()
 
-    def get_danmaku_log(self, limit: int = 50, offset: int = 0) -> list[dict[str, int | str]]:
+    def get_danmaku_dates(self) -> list[str]:
         rows = self._conn.execute(
-            "SELECT id, ts, uid, uname, content FROM danmaku_log ORDER BY id DESC LIMIT ? OFFSET ?",
-            (limit, offset),
+            "SELECT DISTINCT date(ts, 'unixepoch', 'localtime') AS d FROM danmaku_log ORDER BY d"
         ).fetchall()
+        return [r[0] for r in rows if r[0]]
+
+    def get_danmaku_log(self, limit: int = 50, offset: int = 0, date_from: str = "", date_to: str = "") -> list[dict[str, int | str]]:
+        where = ""
+        params: list = [limit, offset]
+        if date_from:
+            where = " WHERE date(ts, 'unixepoch', 'localtime') >= ?"
+            params.insert(0, date_from)
+        if date_to:
+            where += " AND date(ts, 'unixepoch', 'localtime') <= ?" if where else " WHERE date(ts, 'unixepoch', 'localtime') <= ?"
+            if date_to:
+                params.insert(0 if not date_from else 1, date_to)
+        # rebuild params: limit/offset are last
+        params = params[:-2] + [limit, offset] if len(params) > 2 else [limit, offset]
+        sql = f"SELECT id, ts, uid, uname, content FROM danmaku_log{where} ORDER BY id ASC LIMIT ? OFFSET ?"
+        rows = self._conn.execute(sql, params).fetchall()
         return [
             {"id": int(r[0]), "ts": int(r[1]), "uid": int(r[2]), "uname": str(r[3]), "content": str(r[4])}
             for r in rows
         ]
 
-    def get_danmaku_log_count(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM danmaku_log").fetchone()
+    def get_danmaku_log_count(self, date_from: str = "", date_to: str = "") -> int:
+        where = ""
+        params: list = []
+        if date_from:
+            where = " WHERE date(ts, 'unixepoch', 'localtime') >= ?"
+            params.append(date_from)
+        if date_to:
+            where += " AND date(ts, 'unixepoch', 'localtime') <= ?"
+            params.append(date_to)
+        row = self._conn.execute(f"SELECT COUNT(*) FROM danmaku_log{where}", params).fetchone()
         return int(row[0]) if row else 0
 
-    def clear_danmaku_log(self) -> int:
-        count = self._conn.execute("DELETE FROM danmaku_log").rowcount
+    def clear_danmaku_log(self, date_from: str = "", date_to: str = "") -> int:
+        if date_from or date_to:
+            where = ""
+            params: list = []
+            if date_from:
+                where = " WHERE date(ts, 'unixepoch', 'localtime') >= ?"
+                params.append(date_from)
+            if date_to:
+                where += " AND date(ts, 'unixepoch', 'localtime') <= ?"
+                params.append(date_to)
+            count = self._conn.execute(f"DELETE FROM danmaku_log{where}", params).rowcount
+        else:
+            count = self._conn.execute("DELETE FROM danmaku_log").rowcount
         self._conn.commit()
         return count
 

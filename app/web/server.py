@@ -1938,33 +1938,6 @@ async def api_room_log_export(room_id: str):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
-@app.get("/api/rooms/{room_id}/danmaku/export")
-async def api_room_danmaku_export(room_id: str):
-    """导出弹幕记录为 CSV 文件。"""
-    import csv, io
-    db_path = _room_db_path(room_id)
-    if not db_path.exists():
-        return JSONResponse({"error": "no data"}, status_code=404)
-    try:
-        from app.storage import StatsStore
-        store = StatsStore(str(db_path))
-        rows = store.get_danmaku_log(limit=100000, offset=0)
-        store.close()
-        buf = io.StringIO()
-        w = csv.writer(buf)
-        w.writerow(["时间", "用户", "UID", "内容"])
-        for r in rows:
-            ts = datetime.datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d %H:%M:%S") if r.get("ts") else ""
-            w.writerow([ts, r.get("uname",""), r.get("uid",""), r.get("content","")])
-        return Response(
-            content=buf.getvalue(),
-            media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="danmaku_{room_id}.csv"'},
-        )
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
-
-
 @app.post("/api/rooms/{room_id}/log/clear")
 async def api_room_log_clear(room_id: str):
     """清空房间 Bot 日志文件。"""
@@ -2188,15 +2161,15 @@ async def api_room_delete_old(room_id: str, request: Request):
 
 
 @app.get("/api/danmaku_log")
-async def api_get_danmaku_log(room_id: str = "", limit: int = 50, offset: int = 0):
+async def api_get_danmaku_log(room_id: str = "", limit: int = 50, offset: int = 0, date_from: str = "", date_to: str = ""):
     try:
         db_path = _room_db_path(room_id) if room_id else Path(_DB_PATH)
         if not db_path.exists():
             return {"rows": [], "total": 0}
         from app.storage import StatsStore
         store = StatsStore(str(db_path))
-        rows = store.get_danmaku_log(limit=limit, offset=offset)
-        total = store.get_danmaku_log_count()
+        rows = store.get_danmaku_log(limit=limit, offset=offset, date_from=date_from, date_to=date_to)
+        total = store.get_danmaku_log_count(date_from=date_from, date_to=date_to)
         store.close()
         return {"rows": rows, "total": total}
     except Exception as exc:
@@ -2204,19 +2177,66 @@ async def api_get_danmaku_log(room_id: str = "", limit: int = 50, offset: int = 
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
-@app.delete("/api/danmaku_log")
-async def api_clear_danmaku_log(room_id: str = ""):
+@app.get("/api/rooms/{room_id}/danmaku/dates")
+async def api_room_danmaku_dates(room_id: str):
+    """返回有弹幕记录的日期列表。"""
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return []
     try:
-        db_path = _room_db_path(room_id) if room_id else Path(_DB_PATH)
-        if not db_path.exists():
-            return {"deleted": 0}
         from app.storage import StatsStore
         store = StatsStore(str(db_path))
-        count = store.clear_danmaku_log()
+        dates = store.get_danmaku_dates()
+        store.close()
+        return dates
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/rooms/{room_id}/danmaku/export")
+async def api_room_danmaku_export_dates(room_id: str, date_from: str = "", date_to: str = ""):
+    """按日期范围导出弹幕为 CSV。"""
+    import csv, io
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return JSONResponse({"error": "no data"}, status_code=404)
+    try:
+        from app.storage import StatsStore
+        store = StatsStore(str(db_path))
+        rows = store.get_danmaku_log(limit=100000, offset=0, date_from=date_from, date_to=date_to)
+        store.close()
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["时间", "用户", "UID", "内容"])
+        for r in rows:
+            ts = datetime.datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d %H:%M:%S") if r.get("ts") else ""
+            w.writerow([ts, r.get("uname",""), r.get("uid",""), r.get("content","")])
+        fname = f"danmaku_{room_id}"
+        if date_from or date_to:
+            fname += f"_{date_from or ''}_{date_to or ''}"
+        fname += ".csv"
+        return Response(
+            content=buf.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.delete("/api/rooms/{room_id}/danmaku/clear")
+async def api_room_danmaku_clear_dates(room_id: str, date_from: str = "", date_to: str = ""):
+    """按日期范围删除弹幕记录。"""
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return {"deleted": 0}
+    try:
+        from app.storage import StatsStore
+        store = StatsStore(str(db_path))
+        count = store.clear_danmaku_log(date_from=date_from, date_to=date_to)
         store.close()
         return {"deleted": count}
     except Exception as exc:
-        logger.exception("danmaku_log clear failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
@@ -2897,7 +2917,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="text-xs text-gray-500">弹幕记录最大条数
                         <input type="number" v-model.number="roomConfig.features.danmaku_log_max_entries" min="100" max="100000" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
+                    <label class="text-xs text-gray-500">
+                        保留天数
+                        <input type="number" v-model.number="roomConfig.features.danmaku_retention_days" min="1" max="365" class="border p-2 rounded w-full text-sm mt-1">
+                        <span class="text-gray-400 text-[10px]">关闭弹幕记录时此配置不生效，且不会主动删除旧数据</span>
+                    </label>
                 </div>
+                <div v-else class="text-xs text-gray-400 ml-1">弹幕记录关闭时，保留天数不生效，已有数据保留不删除。</div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <label class="text-xs text-gray-500">日志级别
                         <select v-model="roomConfig.runtime.log_level" class="border p-2 rounded w-full text-sm mt-1">
@@ -3370,14 +3396,49 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <div class="flex items-center justify-between">
                     <h2 class="text-lg font-bold">💬 弹幕记录</h2>
                     <div class="flex items-center gap-2">
-                        <button @click="loadDanmakuLog"
-                                class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">刷新</button>
-                        <button @click="clearDanmakuLog"
-                                class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded text-sm">清空</button>
-                        <button @click="downloadUrl('/api/rooms/'+selectedRoom.room_id+'/danmaku/export', 'danmaku_'+selectedRoom.room_id+'.csv')" class="bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded text-sm">📤 导出CSV</button>
+                        <button @click="dmExportSelected" class="bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded text-sm">📤 导出CSV</button>
+                        <button @click="clearDanmakuLog" class="bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded text-sm">清空</button>
+                        <button @click="loadDanmakuLog" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">刷新</button>
                     </div>
                 </div>
+
+                <!-- 日期选择 -->
+                <div class="relative">
+                    <button @click="dmShowCal = !dmShowCal" class="border p-2 rounded text-sm bg-white">
+                        {{ dmSelectedDates.size ? '已选 '+dmSelectedDates.size+' 天' : '点击选择日期' }}
+                        <span v-if="dmDateFrom && dmDateTo && dmDateFrom !== dmDateTo" class="text-gray-400 ml-1">({{ dmDateFrom }} ~ {{ dmDateTo }})</span>
+                        <span v-else-if="dmDateFrom" class="text-gray-400 ml-1">({{ dmDateFrom }})</span>
+                    </button>
+                    <span class="text-xs text-gray-400 ml-2">{{ dmDates.length }} 天有数据，点击日期可多选</span>
+                    <div v-if="dmShowCal" @click.stop class="absolute top-full left-0 mt-1 bg-white border rounded-xl shadow-lg z-50 p-3 w-[300px]">
+                        <div class="flex justify-between items-center mb-2">
+                            <button @click="dmCalMonth--" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&lt;</button>
+                            <span class="text-sm font-bold">{{ dmCalYear }}年{{ dmCalMonth+1 }}月</span>
+                            <button @click="dmCalMonth++" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&gt;</button>
+                        </div>
+                        <div class="grid grid-cols-7 gap-1 text-center text-xs mb-1">
+                            <div class="text-gray-400 font-medium">日</div><div class="text-gray-400 font-medium">一</div><div class="text-gray-400 font-medium">二</div><div class="text-gray-400 font-medium">三</div><div class="text-gray-400 font-medium">四</div><div class="text-gray-400 font-medium">五</div><div class="text-gray-400 font-medium">六</div>
+                        </div>
+                        <div class="grid grid-cols-7 gap-1">
+                            <template v-for="(day,i) in dmCalDays" :key="i">
+                                <div v-if="!day" class="h-8"></div>
+                                <button v-else :disabled="!day.hasData" @click="dmToggleDate(day.ymd)"
+                                        class="h-8 rounded text-xs transition"
+                                        :class="day.selected ? 'bg-blue-600 text-white font-bold ring-2 ring-blue-300' : (day.hasData ? 'bg-blue-100 text-blue-700 hover:bg-blue-200 cursor-pointer' : 'text-gray-300 cursor-not-allowed')">
+                                    {{ day.d }}
+                                </button>
+                            </template>
+                        </div>
+                        <div class="flex justify-between mt-2">
+                            <span class="text-[10px] text-gray-400">蓝色=有数据，选中=深蓝高亮</span>
+                            <button @click="dmSelectedDates = new Set(); dmShowCal = false" class="text-xs text-blue-500">取消选择</button>
+                        </div>
+                    </div>
+                </div>
+
                 <div v-if="danmakuErr" class="text-red-500 text-sm">{{ danmakuErr }}</div>
+
+                <!-- 弹幕表格 -->
                 <div v-if="danmakuRows.length" class="overflow-x-auto">
                     <table class="w-full text-sm">
                         <thead><tr class="bg-gray-50 sticky top-0"><th class="p-2 text-left">时间</th><th class="p-2 text-left">用户</th><th class="p-2 text-left">UID</th><th class="p-2 text-left">内容</th></tr></thead>
@@ -3854,6 +3915,27 @@ createApp({
         const danmakuLimit = ref(50);
         const danmakuTotal = ref(0);
         const danmakuPage = Vue.computed(() => Math.floor(danmakuOffset.value / danmakuLimit.value) + 1);
+        // Danmaku date calendar
+        const dmDates = ref([]);
+        const dmDatesSet = ref(new Set());
+        const dmCalYear = ref(new Date().getFullYear());
+        const dmCalMonth = ref(new Date().getMonth());
+        const dmSelectedDates = ref(new Set());
+        const dmShowCal = ref(false);
+        const dmDateFrom = ref('');
+        const dmDateTo = ref('');
+        const dmCalDays = Vue.computed(() => {
+            const y = dmCalYear.value, m = dmCalMonth.value;
+            const fd = new Date(y, m, 1).getDay();
+            const dim = new Date(y, m + 1, 0).getDate();
+            const cells = [];
+            for (let i = 0; i < fd; i++) cells.push(null);
+            for (let d = 1; d <= dim; d++) {
+                const ymd = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+                cells.push({ d, ymd, hasData: dmDatesSet.value.has(ymd), selected: dmSelectedDates.value.has(ymd) });
+            }
+            return cells;
+        });
 
         // Room Management
         const rooms = ref([]);
@@ -4129,6 +4211,8 @@ createApp({
             }
             if (key === 'danmaku') {
                 danmakuOffset.value = 0;
+                dmSelectedDates.value = new Set();
+                loadDmDates();
                 loadDanmakuLog();
             }
         }
@@ -4581,12 +4665,33 @@ createApp({
         }
 
         // ── Danmaku Log ──
+        async function loadDmDates() {
+            const rid = selectedRoom.value?.room_id;
+            if (!rid) return;
+            try {
+                const r = await fetch(`/api/rooms/${rid}/danmaku/dates`, {credentials:'include'});
+                if (!r.ok) return;
+                dmDates.value = await r.json();
+                dmDatesSet.value = new Set(dmDates.value);
+            } catch(e) { /* ignore */ }
+        }
+        function dmToggleDate(ymd) {
+            const s = new Set(dmSelectedDates.value);
+            if (s.has(ymd)) s.delete(ymd); else s.add(ymd);
+            dmSelectedDates.value = s;
+        }
         async function loadDanmakuLog() {
             danmakuErr.value = '';
             const roomId = selectedRoom.value?.room_id;
             if (!roomId) return;
+            // build date params
+            const sel = Array.from(dmSelectedDates.value).sort();
+            let df = '', dt = '';
+            if (sel.length) { df = sel[0]; dt = sel[sel.length-1]; }
+            dmDateFrom.value = df; dmDateTo.value = dt;
+            const url = `/api/danmaku_log?room_id=${roomId}&limit=${danmakuLimit.value}&offset=${danmakuOffset.value}&date_from=${df}&date_to=${dt}`;
             try {
-                const res = await fetch(`/api/danmaku_log?room_id=${roomId}&limit=${danmakuLimit.value}&offset=${danmakuOffset.value}`, {credentials: 'include'});
+                const res = await fetch(url, {credentials: 'include'});
                 if (res.status === 401) { loggedIn.value = false; return; }
                 if (!res.ok) throw new Error((await res.text()).slice(0,80));
                 const data = await res.json();
@@ -4594,20 +4699,31 @@ createApp({
                 danmakuTotal.value = data.total || 0;
             } catch(e) { danmakuErr.value = '加载失败: ' + e.message; }
         }
+        async function dmExportSelected() {
+            const rid = selectedRoom.value?.room_id;
+            if (!rid || !dmSelectedDates.value.size) { alert('请先选择日期'); return; }
+            const sel = Array.from(dmSelectedDates.value).sort();
+            await downloadUrl(`/api/rooms/${rid}/danmaku/export?date_from=${sel[0]}&date_to=${sel[sel.length-1]}`, `danmaku_${rid}_${sel[0]}_${sel[sel.length-1]}.csv`);
+        }
         async function clearDanmakuLog() {
-            if (!confirm('确定清空所有弹幕记录？此操作不可恢复！')) return;
-            const roomId = selectedRoom.value?.room_id;
-            if (!roomId) return;
+            const rid = selectedRoom.value?.room_id;
+            if (!rid) return;
+            const sel = Array.from(dmSelectedDates.value).sort();
+            const label = sel.length ? `所选 ${sel.length} 天的弹幕记录` : '所有弹幕记录';
+            if (!confirm(`确定清空${label}？此操作不可恢复！`)) return;
             danmakuErr.value = '';
             try {
-                const res = await fetch(`/api/danmaku_log?room_id=${roomId}`, {method: 'DELETE', credentials: 'include'});
+                let url = `/api/rooms/${rid}/danmaku/clear`;
+                if (sel.length) url += `?date_from=${sel[0]}&date_to=${sel[sel.length-1]}`;
+                const res = await fetch(url, {method: 'DELETE', credentials: 'include'});
                 if (res.status === 401) { loggedIn.value = false; return; }
                 if (!res.ok) throw new Error((await res.text()).slice(0,80));
                 const data = await res.json();
                 danmakuRows.value = [];
                 danmakuOffset.value = 0;
                 danmakuTotal.value = 0;
-                // 重新加载弹幕记录列表
+                dmSelectedDates.value = new Set();
+                await loadDmDates();
                 loadDanmakuLog();
             } catch(e) { danmakuErr.value = '清空失败: ' + e.message; }
         }
@@ -5831,7 +5947,7 @@ createApp({
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
                 danmakuRows, danmakuErr, danmakuOffset, danmakuLimit, danmakuTotal, danmakuPage,
-                loadDanmakuLog, clearDanmakuLog, fmtDanmakuTime,
+                loadDanmakuLog, clearDanmakuLog, fmtDanmakuTime, loadDmDates, dmToggleDate, dmExportSelected, dmCalDays, dmCalYear, dmCalMonth, dmShowCal, dmSelectedDates, dmDates, dmDatesSet,
                 llmEnabled, llmProvider, llmApiKey, llmBaseUrl, llmModel, llmPrompt,
                 llmWakeWord, llmTemp, llmTopP, llmMaxTokens,
                 llmSaveMsg, llmSaveOk, llmTestText, llmTestResp,
