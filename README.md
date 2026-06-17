@@ -14,9 +14,9 @@
 **完全免费**的超轻量 B 站直播间弹幕机器人。签到抽签、盲盒统计、AI 对话、自动欢迎/感谢、定时消息、Web 后台管理，一应俱全。
 开箱即用，小白友好。纯 Python 跨平台，无需 systemd / sudo。
 
-**v0.1.2 新增**：精美送礼卡片导出（PNG 所见即所得）、用户权限管理（主播账号+授权房间）、弹幕记录查看、预设模板、多房间管理大重构。
+**v0.1.2 新增**：精美送礼卡片导出（PNG 所见即所得）。
 
-**v0.1.1**：Windows 单文件 .exe 发布版（含托盘图标、日志查看器、自动恢复房间），AI 回复设置持久化、点赞/转发/关注感谢、PK 汇报、Docker 多架构镜像（AMD64 + ARM64）。
+**v0.1.1**：Windows 单文件 .exe 发布版（含托盘图标、日志查看器、自动恢复房间），AI 回复设置持久化、点赞/转发/关注感谢、PK 汇报、Docker 多架构镜像（AMD64 + ARM64））、用户权限管理（主播账号+授权房间）、弹幕记录查看、预设模板、多房间管理大重构。
 
 ---
 
@@ -62,7 +62,7 @@ Ayabot.exe 单独一个文件，双击即运行
 
 > 首次启动自动从 exe 中释放默认配置。浏览器打开 `http://localhost:19810`。
 
-### � 用 Docker 跑（小白首选，无需 Python）
+### 🐳 用 Docker 跑（小白首选，无需 Python）
 镜像支持 **AMD64（普通 PC / 云服务器）和 ARM64（树莓派、苹果 M 系列、Oracle ARM 云）**：
 
 ```bash
@@ -295,13 +295,13 @@ exe 包含以下内容，启动时自动释放到 `%LOCALAPPDATA%\Ayabot\`：
 
 ---
 
-## � 致谢
+## 💖 致谢
 
 - [bilibili-api-python](https://github.com/Nemo2011/bilibili-api) — B 站 API 的 Python 封装，本项目的弹幕监听、礼物解析等功能基于此库实现
 
 ---
 
-## �📄 License
+## 📄 License
 
 GNU General Public License v3.0 — 详见 [LICENSE](LICENSE)。
 
