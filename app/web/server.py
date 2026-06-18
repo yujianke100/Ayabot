@@ -2543,18 +2543,28 @@ async def api_external_user_stats(
             (uid, start_ts, end_ts),
         ).fetchone()
 
-        # 按礼物名称分组统计（普通礼物从 raw_json 提取 total_coin 作为价值）
+        # 按礼物名称分组统计（普通礼物从 raw_json 提取 total_coin 作为价值，gift_info.img_basic 作为图标）
         gift_detail_rows = conn.execute(
             """
-            SELECT gift_name,
-                   COALESCE(SUM(gift_num), 0) as total_num,
-                   COALESCE(SUM(CAST(json_extract(raw_json, '$.total_coin') AS INTEGER)), 0) / 100 as total_value
-            FROM gift_events
-            WHERE uid = ? AND ts >= ? AND ts <= ? AND is_blind_box = 0
-            GROUP BY gift_name
+            SELECT g.gift_name,
+                   COALESCE(SUM(g.gift_num), 0) as total_num,
+                   COALESCE(SUM(CAST(json_extract(g.raw_json, '$.total_coin') AS INTEGER)), 0) / 100 as total_value,
+                   COALESCE(
+                       (SELECT json_extract(sub.raw_json, '$.gift_info.img_basic')
+                        FROM gift_events sub
+                        WHERE sub.uid = g.uid AND sub.gift_name = g.gift_name
+                          AND sub.is_blind_box = 0 AND sub.ts >= ? AND sub.ts <= ?
+                          AND json_extract(sub.raw_json, '$.gift_info.img_basic') IS NOT NULL
+                          AND json_extract(sub.raw_json, '$.gift_info.img_basic') != ''
+                        ORDER BY sub.ts DESC LIMIT 1),
+                   ''
+                   ) as gift_icon
+            FROM gift_events g
+            WHERE g.uid = ? AND g.ts >= ? AND g.ts <= ? AND g.is_blind_box = 0
+            GROUP BY g.gift_name
             ORDER BY total_num DESC
             """,
-            (uid, start_ts, end_ts),
+            (uid, start_ts, end_ts, uid, start_ts, end_ts),
         ).fetchall()
 
         # 盲盒明细（从 raw_json 提取盲盒名称）
@@ -2562,16 +2572,27 @@ async def api_external_user_stats(
             """
             SELECT
                 json_extract(raw_json, '$.blind_gift.original_gift_name') as box_name,
+                json_extract(raw_json, '$.blind_gift.gift_name') as box_gift_name,
                 gift_name as item_name,
                 COALESCE(SUM(gift_num), 0) as total_num,
                 COALESCE(SUM(blind_box_cost), 0) as total_cost,
-                COALESCE(SUM(profit_value), 0) as total_profit
-            FROM gift_events
-            WHERE uid = ? AND ts >= ? AND ts <= ? AND is_blind_box = 1
+                COALESCE(SUM(profit_value), 0) as total_profit,
+                COALESCE(
+                    (SELECT json_extract(sub2.raw_json, '$.gift_info.img_basic')
+                     FROM gift_events sub2
+                     WHERE sub2.uid = g.uid AND sub2.gift_name = g.gift_name
+                       AND sub2.is_blind_box = 1 AND sub2.ts >= ? AND sub2.ts <= ?
+                       AND json_extract(sub2.raw_json, '$.gift_info.img_basic') IS NOT NULL
+                       AND json_extract(sub2.raw_json, '$.gift_info.img_basic') != ''
+                     ORDER BY sub2.ts DESC LIMIT 1),
+                    ''
+                ) as item_icon
+            FROM gift_events g
+            WHERE g.uid = ? AND g.ts >= ? AND g.ts <= ? AND g.is_blind_box = 1
             GROUP BY box_name, item_name
             ORDER BY box_name, total_num DESC
             """,
-            (uid, start_ts, end_ts),
+            (start_ts, end_ts, uid, start_ts, end_ts),
         ).fetchall()
 
         # 弹幕数统计
@@ -2607,6 +2628,7 @@ async def api_external_user_stats(
                 "name": r["gift_name"],
                 "count": int(r["total_num"]),
                 "value": _to_battery(r["total_value"]),
+                "icon": r["gift_icon"] or "",
             })
 
         blind_details = []
@@ -2621,6 +2643,7 @@ async def api_external_user_stats(
                 "count": int(r["total_num"]),
                 "cost": _to_battery(r["total_cost"]),
                 "profit": _to_battery(r["total_profit"]),
+                "icon": r["item_icon"] or "",
             })
             g["total_count"] += int(r["total_num"])
             g["total_cost"] += int(r["total_cost"])
