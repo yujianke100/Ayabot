@@ -3987,9 +3987,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <!-- 密钥 -->
                     <label class="text-xs text-gray-500 mt-3 block">API 密钥
                         <div class="flex items-center mt-1">
-                            <input type="text" :value="roomApiKeyMasked || '(无密钥)'" readonly class="border p-2 rounded-l w-full text-sm bg-gray-50 font-mono text-xs">
-                            <button v-if="roomApiHasKey" @click="copyText(roomApiFullKey, 'apiMsg')" class="bg-gray-200 hover:bg-gray-300 px-3 py-2 rounded-r text-sm border-l-0" title="复制">📋</button>
+                            <input type="text" :value="roomApiDisplayKey" readonly class="border p-2 rounded-l w-full text-sm bg-gray-50 font-mono text-xs select-all">
+                            <button @click="copyText(roomApiFullKey || roomApiDisplayKey, 'apiMsg')" class="bg-gray-200 hover:bg-gray-300 px-3 py-2 rounded-r text-sm border-l-0" title="复制">📋</button>
+                            <button v-if="roomApiFullKey && !showFullKey" @click="showFullKey = true" class="bg-blue-100 hover:bg-blue-200 text-blue-600 px-2 py-2 rounded-r text-sm ml-1 whitespace-nowrap" title="显示完整密钥">👁️</button>
+                            <button v-if="showFullKey" @click="showFullKey = false" class="bg-gray-100 hover:bg-gray-200 text-gray-500 px-2 py-2 rounded-r text-sm ml-1 whitespace-nowrap">🙈 隐藏</button>
                         </div>
+                        <span class="text-xs text-gray-400">点击 📋 复制密钥到剪贴板</span>
                     </label>
 
                     <!-- 操作按钮 -->
@@ -3997,15 +4000,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
                         <button @click="regenerateRoomApiKey" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm" :disabled="roomApiBusy">
                             {{ roomApiBusy ? '处理中...' : '🔄 重新生成密钥' }}
                         </button>
-                    </div>
-
-                    <!-- 新密钥提示 -->
-                    <div v-if="roomApiNewKey" class="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-                        <div class="text-xs text-yellow-700 font-bold mb-1">⚠️ 新密钥已生成，请立即复制保存（关闭后将不再显示完整密钥）</div>
-                        <div class="flex items-center gap-1">
-                            <input type="text" :value="roomApiNewKey" readonly class="border p-2 rounded-l w-full text-sm bg-white font-mono text-xs" @click="copyText(roomApiNewKey, 'apiMsg')">
-                            <button @click="copyText(roomApiNewKey, 'apiMsg')" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-2 rounded-r text-sm">📋 复制</button>
-                        </div>
                     </div>
                 </template>
 
@@ -4594,7 +4588,8 @@ createApp({
         const roomApiKeyMasked = ref('');
         const roomApiHasKey = ref(false);
         const roomApiFullKey = ref('');
-        const roomApiNewKey = ref('');
+        const roomApiDisplayKey = ref('');
+        const showFullKey = ref(false);
         const roomApiBusy = ref(false);
         const apiMsg = ref('');
         const apiMsgOk = ref(false);
@@ -5388,8 +5383,10 @@ createApp({
                 roomApiUrl.value = data.api_url || '';
                 roomApiKeyMasked.value = data.key_masked || '';
                 roomApiHasKey.value = data.has_key;
-                roomApiNewKey.value = '';
-                roomApiFullKey.value = '';
+                // 没有完整密钥时显示脱敏版
+                if (!roomApiFullKey.value) {
+                    roomApiDisplayKey.value = data.key_masked || '(无密钥)';
+                }
             } catch(e) {}
         }
 
@@ -5399,7 +5396,6 @@ createApp({
             roomApiBusy.value = true;
             apiMsg.value = '';
             apiMsgOk.value = false;
-            roomApiNewKey.value = '';
             try {
                 const res = await fetch(`/api/rooms/${rid}/api_toggle`, { method: 'POST' });
                 const data = await res.json();
@@ -5409,12 +5405,10 @@ createApp({
                     roomApiHasKey.value = data.has_key;
                     apiMsg.value = data.message;
                     apiMsgOk.value = true;
-                    // 如果开启了且有新 key，显示完整 key
-                    if (data.api_enabled && data.has_key) {
-                        // 获取 full_key（regenerate 时返回）
+                    // 如果开启但没有完整密钥，刷新配置
+                    if (!data.has_key || !roomApiFullKey.value) {
+                        await loadRoomApiConfig();
                     }
-                    // 刷新 api url
-                    await loadRoomApiConfig();
                 } else {
                     apiMsg.value = data.error || '操作失败';
                     apiMsgOk.value = false;
@@ -5432,7 +5426,6 @@ createApp({
             roomApiBusy.value = true;
             apiMsg.value = '';
             apiMsgOk.value = false;
-            roomApiNewKey.value = '';
             try {
                 const res = await fetch(`/api/rooms/${rid}/api_regenerate`, { method: 'POST' });
                 const data = await res.json();
@@ -5440,7 +5433,9 @@ createApp({
                     roomApiKeyMasked.value = data.key_masked;
                     roomApiHasKey.value = true;
                     roomApiEnabled.value = true;
-                    roomApiNewKey.value = data.full_key;
+                    roomApiFullKey.value = data.full_key;
+                    roomApiDisplayKey.value = data.full_key;
+                    showFullKey.value = true;
                     apiMsg.value = data.message;
                     apiMsgOk.value = true;
                 } else {
@@ -6848,7 +6843,7 @@ createApp({
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
-                roomApiEnabled, roomApiUrl, roomApiKeyMasked, roomApiHasKey, roomApiFullKey, roomApiNewKey, roomApiBusy,
+                roomApiEnabled, roomApiUrl, roomApiKeyMasked, roomApiHasKey, roomApiFullKey, roomApiDisplayKey, showFullKey, roomApiBusy,
                 apiMsg, apiMsgOk, loadRoomApiConfig, toggleRoomApi, regenerateRoomApiKey, copyText,
                 danmakuRows, danmakuErr, danmakuOffset, danmakuLimit, danmakuTotal, danmakuPage,
                 loadDanmakuLog, clearDanmakuLog, fmtDanmakuTime, loadDmDates, dmToggleDate, dmExportSelected, dmCalDays, dmCalYear, dmCalMonth, dmShowCal, dmSelectedDates, dmDates, dmDatesSet, dmAsc,
