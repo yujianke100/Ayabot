@@ -2557,17 +2557,19 @@ async def api_external_user_stats(
             (uid, start_ts, end_ts),
         ).fetchall()
 
-        # 按盲盒名称分组统计
+        # 盲盒明细（从 raw_json 提取盲盒名称）
         blind_detail_rows = conn.execute(
             """
-            SELECT gift_name,
-                   COALESCE(SUM(gift_num), 0) as total_num,
-                   COALESCE(SUM(blind_box_cost), 0) as total_cost,
-                   COALESCE(SUM(profit_value), 0) as total_profit
+            SELECT
+                json_extract(raw_json, '$.blind_gift.original_gift_name') as box_name,
+                gift_name as item_name,
+                COALESCE(SUM(gift_num), 0) as total_num,
+                COALESCE(SUM(blind_box_cost), 0) as total_cost,
+                COALESCE(SUM(profit_value), 0) as total_profit
             FROM gift_events
             WHERE uid = ? AND ts >= ? AND ts <= ? AND is_blind_box = 1
-            GROUP BY gift_name
-            ORDER BY total_num DESC
+            GROUP BY box_name, item_name
+            ORDER BY box_name, total_num DESC
             """,
             (uid, start_ts, end_ts),
         ).fetchall()
@@ -2592,12 +2594,29 @@ async def api_external_user_stats(
             })
 
         blind_details = []
+        # 按盲盒名称分组聚合
+        box_groups: dict[str, dict] = {}
         for r in blind_detail_rows:
-            blind_details.append({
-                "name": r["gift_name"],
+            box_name = r["box_name"] or "未知盲盒"
+            if box_name not in box_groups:
+                box_groups[box_name] = {"items": [], "total_count": 0, "total_cost": 0, "total_profit": 0}
+            g = box_groups[box_name]
+            g["items"].append({
+                "name": r["item_name"],
                 "count": int(r["total_num"]),
                 "cost_yuan": round(int(r["total_cost"]) / 10.0, 2),
                 "profit_yuan": round(int(r["total_profit"]) / 10.0, 2),
+            })
+            g["total_count"] += int(r["total_num"])
+            g["total_cost"] += int(r["total_cost"])
+            g["total_profit"] += int(r["total_profit"])
+        for box_name, g in box_groups.items():
+            blind_details.append({
+                "box_name": box_name,
+                "count": g["total_count"],
+                "cost_yuan": round(g["total_cost"] / 10.0, 2),
+                "profit_yuan": round(g["total_profit"] / 10.0, 2),
+                "items": g["items"],
             })
 
         # actual_value 单位是角，转换为元
