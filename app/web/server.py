@@ -3518,34 +3518,35 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div v-if="roomSubTab==='export'" class="flex flex-col items-center w-full">
             <!-- 模式切换 -->
             <div class="bg-white p-4 rounded-xl shadow-sm w-full max-w-3xl mb-4 space-y-3">
-                <div class="flex flex-wrap gap-2 items-center">
-                    <label class="text-xs text-gray-500 flex items-center gap-2">
-                        <span>导出模式</span>
-                        <select v-model="eMode" class="border p-2 rounded text-sm" @change="onModeChange">
-                            <option value="single">单个用户</option>
-                            <option value="all">所有人</option>
-                        </select>
+                <div class="flex flex-wrap gap-3 items-end">
+                    <label class="text-xs text-gray-500 flex items-center gap-1.5 h-[38px]">
+                        <input type="checkbox" v-model="eModeAll" @change="onModeChange" class="w-4 h-4">
+                        <span>所有人</span>
                     </label>
-                    <label v-if="eMode==='single'" class="text-xs text-gray-500 flex-[2]">
-                        UID<input type="number" v-model.number="eUid" class="border p-2 rounded w-full text-sm mt-1" @input="onUidInput">
+                    <label class="text-xs text-gray-500 flex-[2] min-w-[100px]">
+                        <span :class="eModeAll ? 'text-gray-300' : ''">UID</span>
+                        <input type="number" v-model.number="eUid" :disabled="eModeAll"
+                               class="border p-2 rounded w-full text-sm mt-0.5"
+                               :class="eModeAll ? 'bg-gray-100 text-gray-300' : ''"
+                               @input="onUidInput">
                     </label>
-                    <label class="text-xs text-gray-500 flex-[2]">
+                    <label class="text-xs text-gray-500 flex-[2] min-w-[140px]">
                         日期
                         <div class="relative">
                             <input type="text" readonly :value="eDateLabel" placeholder="点击选择日期"
-                                   class="border p-2 rounded w-full text-sm mt-1 cursor-pointer bg-white"
+                                   class="border p-2 rounded w-full text-sm mt-0.5 cursor-pointer bg-white"
                                    @click="showCalendar = !showCalendar">
                             <div v-if="showCalendar" @click.stop class="absolute top-full left-0 mt-1 bg-white border rounded-xl shadow-lg z-50 p-3 w-[320px]">
                                 <div class="flex justify-between items-center mb-2">
-                                    <button @click="calMonth--" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&lt;</button>
+                                    <button @click="calMonth--" type="button" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&lt;</button>
                                     <span class="text-sm font-bold">{{ calYear }}年{{ calMonth+1 }}月</span>
-                                    <button @click="calMonth++" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&gt;</button>
+                                    <button @click="calMonth++" type="button" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&gt;</button>
                                 </div>
-                                <div class="flex gap-1 mb-2">
-                                    <button @click="selectAllDatesInRange" class="text-[10px] px-2 py-1 bg-blue-50 text-blue-600 rounded hover:bg-blue-100">全选当月</button>
-                                    <button @click="clearSelectedDates" class="text-[10px] px-2 py-1 bg-gray-50 text-gray-500 rounded hover:bg-gray-100">清除</button>
-                                    <button v-if="eSelectedDates.size>1" @click="applyMultiDateExport" class="text-[10px] px-2 py-1 bg-green-50 text-green-600 rounded hover:bg-green-100 font-semibold ml-auto">
-                                        确定（{{ eSelectedDates.size }}天）
+                                <div v-if="eModeAll" class="flex gap-1 mb-2">
+                                    <button @click="selectAllDatesInRange" type="button" class="text-[10px] px-2 py-1 bg-blue-50 text-blue-600 rounded hover:bg-blue-100">全选当月</button>
+                                    <button @click="clearSelectedDates" type="button" class="text-[10px] px-2 py-1 bg-gray-50 text-gray-500 rounded hover:bg-gray-100">清除</button>
+                                    <button v-if="eSelectedDates.length>1" @click="applyMultiDateExport" type="button" class="text-[10px] px-2 py-1 bg-green-50 text-green-600 rounded hover:bg-green-100 font-semibold ml-auto">
+                                        确定（{{ eSelectedDates.length }}天）
                                     </button>
                                 </div>
                                 <div class="grid grid-cols-7 gap-1 text-center text-xs mb-1">
@@ -3560,12 +3561,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                 <div class="grid grid-cols-7 gap-1">
                                     <template v-for="(day,i) in calDays" :key="i">
                                         <div v-if="!day" class="h-8"></div>
-                                        <button v-else
+                                        <button v-else type="button"
                                                 :disabled="!day.hasData"
                                                 @click="toggleDate(day.ymd)"
                                                 class="h-8 rounded text-xs transition relative"
                                                 :class="day.hasData
-                                                    ? (day.ymd === eDate ? 'bg-blue-600 text-white' : (eSelectedDates.has(day.ymd) ? 'bg-blue-500 text-white' : 'bg-blue-100 text-blue-700 hover:bg-blue-200 cursor-pointer'))
+                                                    ? (eSelectedSet.has(day.ymd) ? 'bg-blue-500 text-white' : 'bg-blue-100 text-blue-700 hover:bg-blue-200 cursor-pointer')
                                                     : 'text-gray-300 cursor-not-allowed'">
                                             {{ day.d }}
                                         </button>
@@ -3580,9 +3581,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
                         <option value="gift">仅一般礼物</option>
                         <option value="blindbox">仅盲盒</option>
                     </select>
-                    <label v-if="eMode==='all'" class="text-xs text-gray-500">
+                    <label v-if="eModeAll" class="text-xs text-gray-500">
                         排序
-                        <select v-model="eSort" class="border p-2 rounded text-sm">
+                        <select v-model="eSort" class="border p-2 rounded text-sm h-[34px] mt-0.5">
                             <option value="ts">按时间</option>
                             <option value="uname">按用户</option>
                             <option value="value">按价值</option>
@@ -3613,7 +3614,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <div id="capture" v-if="exportList.length" class="w-full overflow-x-auto">
                 <div class="capture-inner">
                 <div class="text-center text-gray-400 text-xs mb-3">
-                    <span class="font-semibold">{{ eMode==='all' ? '所有人' : eName }}</span> ·
+                    <span class="font-semibold">{{ eModeAll ? '所有人' : eName }}</span> ·
                     {{ eDateLabel }} · 礼物投喂明细
                     <span v-if="eType==='gift'">（一般礼物）</span>
                     <span v-else-if="eType==='blindbox'">（盲盒）</span>
@@ -5000,18 +5001,19 @@ createApp({
         const errRanking = ref('');
 
         // Export
-        const eMode = ref('single');
+        const eModeAll = ref(false);  // true=所有人模式
         const eUid = ref(0);
         const eName = ref('');
         const eDate = ref(new Date().toISOString().slice(0,10));
+        const eSelectedDates = ref([new Date().toISOString().slice(0,10)]);  // 数组保证响应式
+        const eSelectedSet = Vue.computed(() => new Set(eSelectedDates.value));
         const eDateLabel = Vue.computed(() => {
-            if (eSelectedDates.value.size > 1) {
-                const arr = [...eSelectedDates.value].sort();
+            const arr = eSelectedDates.value.slice().sort();
+            if (arr.length > 1) {
                 return arr[0] + ' ~ ' + arr[arr.length-1] + ` (${arr.length}天)`;
             }
-            return eDate.value;
+            return arr[0] || eDate.value;
         });
-        const eSelectedDates = ref(new Set());
         const eAllUserDates = ref([]);
         const eType = ref('all');
         const eSort = ref('ts');
@@ -5406,11 +5408,11 @@ createApp({
             exportDates.value = [];
             exportDatesSet.value = new Set();
             errExport.value = '';
-            eMode.value = 'single';
+            eModeAll.value = false;
             eUid.value = 0;
             eName.value = '';
             eDate.value = new Date().toISOString().slice(0,10);
-            eSelectedDates.value = new Set();
+            eSelectedDates.value = [new Date().toISOString().slice(0,10)];
             eAllUserDates.value = [];
             eType.value = 'all';
             eSort.value = 'ts';
@@ -5757,7 +5759,7 @@ createApp({
             const roomId = selectedRoom.value?.room_id;
             if (!roomId) return;
 
-            if (eMode.value === 'all') {
+            if (eModeAll.value) {
                 // 加载所有人有数据的日期
                 try {
                     const res = await fetch(`/api/rooms/${roomId}/all_dates`);
@@ -5782,7 +5784,7 @@ createApp({
             showCalendar.value = false;
             exportList.value = [];
             errExport.value = '';
-            eSelectedDates.value = new Set([new Date().toISOString().slice(0,10)]);
+            eSelectedDates.value = [new Date().toISOString().slice(0,10)];
             eDate.value = new Date().toISOString().slice(0,10);
             loadUserDates();
         }
@@ -5793,41 +5795,41 @@ createApp({
             loadUserDates();
         }
         function toggleDate(ymd) {
-            if (eMode.value === 'single') {
-                // 单用户模式：单选的原有行为
+            if (!eModeAll.value) {
+                // 单用户模式：单选
                 eDate.value = ymd;
+                eSelectedDates.value = [ymd];
                 showCalendar.value = false;
                 loadExport();
                 return;
             }
             // 多选模式
-            const s = new Set(eSelectedDates.value);
-            if (s.has(ymd)) {
-                s.delete(ymd);
+            const arr = eSelectedDates.value.slice();
+            const idx = arr.indexOf(ymd);
+            if (idx >= 0) {
+                arr.splice(idx, 1);
             } else {
-                s.add(ymd);
+                arr.push(ymd);
             }
-            eSelectedDates.value = s;
-            if (s.size === 1) {
-                eDate.value = [...s][0];
-            }
+            eSelectedDates.value = arr;
         }
         function selectAllDatesInRange() {
-            const s = new Set(eSelectedDates.value);
+            const arr = eSelectedDates.value.slice();
             calDays.value.forEach(day => {
-                if (day && day.hasData) s.add(day.ymd);
+                if (day && day.hasData && arr.indexOf(day.ymd) === -1) arr.push(day.ymd);
             });
-            eSelectedDates.value = s;
+            eSelectedDates.value = arr;
         }
         function clearSelectedDates() {
-            eSelectedDates.value = new Set();
+            eSelectedDates.value = [];
         }
-        function applyMultiDateExport() {
+        async function applyMultiDateExport() {
             showCalendar.value = false;
-            loadExport();
+            await loadExport();
         }
         function pickDate(ymd) {
             eDate.value = ymd;
+            eSelectedDates.value = [ymd];
             showCalendar.value = false;
             loadExport();
         }
@@ -5837,10 +5839,10 @@ createApp({
             const roomId = selectedRoom.value?.room_id;
             if (!roomId) return;
 
-            if (eMode.value === 'all') {
+            if (eModeAll.value) {
                 // 所有人模式
+                const sel = eSelectedDates.value.slice().sort();
                 let dateFrom = '', dateTo = '';
-                const sel = [...eSelectedDates.value].sort();
                 if (sel.length === 1) {
                     dateFrom = sel[0];
                     dateTo = sel[0];
@@ -5856,7 +5858,7 @@ createApp({
                     if (dateFrom) params.set('date_from', dateFrom);
                     if (dateTo) params.set('date_to', dateTo);
                     const res = await fetch(`/api/rooms/${roomId}/export_all?${params}`);
-                    if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
+                    if (!res.ok) { const txt = await res.text(); errExport.value = '请求失败: ' + txt.slice(0,80); return; }
                     const data = await res.json();
                     exportList.value = (data || []).map((item, idx) => ({
                         ...item,
@@ -5879,7 +5881,7 @@ createApp({
             if (!eUid.value || !eDate.value) { errExport.value = '请填写 UID 和日期'; return; }
             try {
                 const res = await fetch(`/api/rooms/${roomId}/user_gifts?uid=${eUid.value}&date=${eDate.value}&gift_type=${eType.value}`);
-                if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
+                if (!res.ok) { const txt = await res.text(); errExport.value = '请求失败: ' + txt.slice(0,80); return; }
                 const data = await res.json();
                 exportList.value = (data || []).map((item, idx) => ({
                     ...item,
@@ -5960,12 +5962,14 @@ createApp({
             }
         }
         function gotoExport(uid, uname) {
-            eMode.value = 'single';
+            eModeAll.value = false;
             eUid.value = uid;
             eName.value = uname || '';
             roomSubTab.value = 'export';
             showCalendar.value = false;
-            eSelectedDates.value = new Set([new Date().toISOString().slice(0,10)]);
+            const today = new Date().toISOString().slice(0,10);
+            eSelectedDates.value = [today];
+            eDate.value = today;
             exportDates.value = [];
             exportList.value = [];
             errExport.value = '';
@@ -7453,7 +7457,7 @@ createApp({
                 eUid, eName, eDate, eType, ePerCol, eColWidth, exportList, exportDates, exportCols, errExport,
                 loadExport, gotoExport, loadUserDates, onUidInput, onModeChange,
                 toggleDate, selectAllDatesInRange, clearSelectedDates, applyMultiDateExport,
-                pickDate, captureExport,
+                pickDate, captureExport, eModeAll, eSelectedDates, eSelectedSet,
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
