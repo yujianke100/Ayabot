@@ -3267,6 +3267,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script src="https://unpkg.com/modern-screenshot@4.7.0/dist/index.js"></script>
 <style>
+#app { background: #fff; min-height: 100vh; }
 /* ── 礼物卡片（毛玻璃 + 主题色渐变）── */
 .bili-card {
     border-radius: 12px;
@@ -3374,7 +3375,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </style>
 </head>
 <body class="bg-gray-100 p-2 sm:p-4">
-<div id="app" class="max-w-6xl mx-auto">
+<div id="app" class="max-w-6xl mx-auto" style="min-height:80vh;"><!-- 初始白屏防止闪烁 -->
 
 <!-- ══════ 登录页 ══════ -->
 <div v-if="!loggedIn" class="flex items-center justify-center min-h-[80vh] px-4">
@@ -3707,13 +3708,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     </select>
                     <label class="text-xs text-gray-500">
                         排序
-                        <select v-model="eSort" class="border p-2 rounded text-sm h-[34px] mt-0.5">
-                            <option value="ts">按时间</option>
+                        <select @change="onSortChange($event)" class="border p-2 rounded text-sm h-[34px] mt-0.5">
                             <option value="uname">按用户</option>
                             <option value="value">按价值</option>
+                            <option value="ts" :disabled="eMergeGifts">按时间</option>
                         </select>
                     </label>
-                    <button @click="loadExport" :disabled="loadingExport"
+                    <button @click="loadExport()" :disabled="loadingExport"
                             class="bg-green-500 hover:bg-green-600 disabled:bg-green-300 text-white px-5 py-2 rounded text-sm h-[38px] transition">
                         {{ loadingExport ? '⏳ 加载中...' : '生成' }}</button>
                 </div>
@@ -5142,7 +5143,7 @@ createApp({
         });
         const eAllUserDates = ref([]);
         const eType = ref('all');
-        const eSort = ref('ts');
+        const eSort = ref('uname');
         const eMergeGifts = ref(false);
         const ePerCol = ref(6);
         const eColWidth = ref(340);
@@ -5181,16 +5182,17 @@ createApp({
 
             // 排序（按当前选中的排序规则）
             const s = eSort.value;
+            const merge = eMergeGifts.value;
+            // 非合并 或 按用户/按时间：先排序再合并
             if (s === 'uname') {
                 items = [...items].sort((a, b) => {
-                    // 大航海优先
                     const g = (b.guard_level || 0) - (a.guard_level || 0);
                     if (g) return g;
                     const n = (a.uname || '').localeCompare(b.uname || '');
                     if (n) return n;
                     return (b.actual_value || 0) - (a.actual_value || 0);
                 });
-            } else if (s === 'value') {
+            } else if (s === 'value' && !merge) {
                 items = [...items].sort((a, b) => {
                     const v = (b.actual_value || 0) - (a.actual_value || 0);
                     if (v) return v;
@@ -5198,12 +5200,12 @@ createApp({
                     if (g) return g;
                     return (a.uname || '').localeCompare(b.uname || '');
                 });
-            } else {
+            } else if (s === 'ts' && !merge) {
                 items = [...items].sort((a, b) => (a.ts || 0) - (b.ts || 0));
             }
 
             // 合并相同礼物模式
-            if (eMergeGifts.value) {
+            if (merge) {
                 const merged = new Map();
                 for (const item of items) {
                     const key = item.uid + '|' + item.gift_name;
@@ -5217,6 +5219,16 @@ createApp({
                     }
                 }
                 items = [...merged.values()];
+                // 合并后按价值排序（按合并总价）
+                if (s === 'value') {
+                    items.sort((a, b) => {
+                        const v = (b.actual_value || 0) - (a.actual_value || 0);
+                        if (v) return v;
+                        const g = (b.guard_level || 0) - (a.guard_level || 0);
+                        if (g) return g;
+                        return (a.uname || '').localeCompare(b.uname || '');
+                    });
+                }
             }
 
             const cols = [];
@@ -5586,7 +5598,7 @@ createApp({
             eSelectedDates.value = [new Date().toISOString().slice(0,10)];
             eAllUserDates.value = [];
             eType.value = 'all';
-            eSort.value = 'ts';
+            eSort.value = 'uname';
             eMergeGifts.value = false;
             ePerCol.value = 6;
             eColWidth.value = 340;
@@ -5969,8 +5981,9 @@ createApp({
         }
         // 排序辅助函数（已迁移到 exportCols computed 中）
         // 保留空函数供 watch 调用时安全
-        function applySort(items, s) { return items; }
-
+        function onSortChange($event) {
+            eSort.value = $event.target.value;
+        }
         function toggleDate(ymd) {
             // 多选模式（单用户和所有人模式都可以多选）
             const arr = eSelectedDates.value.slice();
@@ -6051,14 +6064,14 @@ createApp({
 
             // 单用户模式（同样支持多选日期）
             if (!eUid.value) { errExport.value = '请填写 UID'; loadingExport.value = false; return; }
-            const sel = eSelectedDates.value.slice().sort();
-            let dateFrom = '', dateTo = '';
-            if (sel.length === 1) {
-                dateFrom = sel[0];
-                dateTo = sel[0];
-            } else if (sel.length > 1) {
-                dateFrom = sel[0];
-                dateTo = sel[sel.length-1];
+            const sel2 = eSelectedDates.value.slice().sort();
+            let dateFrom2 = '', dateTo2 = '';
+            if (sel2.length === 1) {
+                dateFrom2 = sel2[0];
+                dateTo2 = sel2[0];
+            } else if (sel2.length > 1) {
+                dateFrom2 = sel2[0];
+                dateTo2 = sel2[sel2.length-1];
             } else {
                 errExport.value = '请至少选择一个日期';
                 loadingExport.value = false;
@@ -6066,8 +6079,8 @@ createApp({
             }
             try {
                 const params = new URLSearchParams({ gift_type: eType.value, sort: eSort.value, uid: eUid.value });
-                if (dateFrom) params.set('date_from', dateFrom);
-                if (dateTo) params.set('date_to', dateTo);
+                if (dateFrom2) params.set('date_from', dateFrom2);
+                if (dateTo2) params.set('date_to', dateTo2);
                 const res = await fetch(`/api/rooms/${roomId}/export_all?${params}`);
                 if (!res.ok) { const txt = await res.text(); errExport.value = '请求失败: ' + txt.slice(0,80); loadingExport.value = false; return; }
                 const data = await res.json();
@@ -7721,6 +7734,7 @@ createApp({
                 selectedRoom, roomSubTab, roomSubTabs, newRoomAccount, selectedRoomAccount,
                 selectRoom, goBackRoomList, assignAccountToRoom, toggleCreateRoom, toggleNewAccount, downloadUrl, downloadJson, importJsonFile, exportRoomConfig, importRoomConfig, afterImportLlm,
                 selectRoomSubTab, accountAssignMsg, accountAssignOk, accountRestarting, assignAccountAndRestart,
+                onSortChange,
                 startEditRoomName, saveRoomName, editingRoomName, roomNameEdit,
                 rooms, showCreateRoom, newRoomUid, newRoomName, newRoomAnchorName, newRoomPort, newRoomDisplayId,
                 creatingRoom, createRoomMsg, createRoomOk, createRoom,
