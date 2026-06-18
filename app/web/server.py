@@ -56,6 +56,8 @@ _CONFIG_YAML_PATH: str = "config.yaml"
 _ROOM_STATES_PATH: str = "data/room_states.json"
 # 外部 API Token（用于 astrbot 插件等第三方查询）
 _API_TOKEN: str = ""
+# 外部 API 域名（留空则自动检测）
+_API_DOMAIN: str = ""
 
 
 def _save_room_states() -> None:
@@ -97,7 +99,7 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
         config: AppConfig 对象
         config_path: 配置文件的实际路径（用于解析相对路径）
     """
-    global AUTH_USER, AUTH_PASS, _SESSION_TIMEOUT, _HTTP_HOST, _HTTP_PORT, _DB_PATH, _LLM_CONFIG_DICT, _CONFIG_YAML_PATH, _ROOMS_BASE_DIR, _API_TOKEN
+    global AUTH_USER, AUTH_PASS, _SESSION_TIMEOUT, _HTTP_HOST, _HTTP_PORT, _DB_PATH, _LLM_CONFIG_DICT, _CONFIG_YAML_PATH, _ROOMS_BASE_DIR, _API_TOKEN, _API_DOMAIN
     if config is None:
         _fallback_read_config()
         return
@@ -110,6 +112,7 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
     if not os.path.isabs(_DB_PATH):
         _DB_PATH = str(Path(config_path).parent / _DB_PATH)
     _API_TOKEN = config.web_ui.api_token
+    _API_DOMAIN = config.web_ui.api_domain
     _LLM_CONFIG_DICT.update({
         "enabled": config.llm.enabled,
         "provider": config.llm.provider,
@@ -144,7 +147,7 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
 
 
 def _fallback_read_config() -> None:
-    global _DB_PATH, AUTH_USER, AUTH_PASS, _CONFIG_YAML_PATH, _LLM_CONFIG_DICT, _ROOMS_BASE_DIR, _API_TOKEN
+    global _DB_PATH, AUTH_USER, AUTH_PASS, _CONFIG_YAML_PATH, _LLM_CONFIG_DICT, _ROOMS_BASE_DIR, _API_TOKEN, _API_DOMAIN
     _cfg_path = Path("config.yaml")
     if _cfg_path.exists():
         _raw = yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
@@ -157,6 +160,7 @@ def _fallback_read_config() -> None:
         if web_ui.get("password"):
             AUTH_PASS = web_ui["password"]
         _API_TOKEN = str(web_ui.get("api_token", ""))
+        _API_DOMAIN = str(web_ui.get("api_domain", ""))
     _CONFIG_YAML_PATH = str(_cfg_path.resolve())
     _ROOMS_BASE_DIR = str(Path(_CONFIG_YAML_PATH).parent.resolve())
     set_rooms_base_dir(_ROOMS_BASE_DIR)
@@ -2437,10 +2441,16 @@ async def api_external_user_stats(
 @app.get("/api/external/api_token")
 async def api_external_get_token(request: Request):
     """获取当前 API Key 配置状态和接口地址。"""
-    # 构建 API 地址
-    host = request.headers.get("host", f"{_HTTP_HOST}:{_HTTP_PORT}")
-    scheme = request.headers.get("x-forwarded-proto", "http")
-    api_url = f"{scheme}://{host}/api/external/user_stats"
+    global _API_DOMAIN
+
+    # 优先使用配置的域名，否则自动检测
+    if _API_DOMAIN:
+        base = _API_DOMAIN.rstrip("/")
+    else:
+        host = request.headers.get("host", f"{_HTTP_HOST}:{_HTTP_PORT}")
+        scheme = request.headers.get("x-forwarded-proto", "http")
+        base = f"{scheme}://{host}"
+    api_url = f"{base}/api/external/user_stats"
 
     if _API_TOKEN:
         masked = _API_TOKEN[:4] + "*" * min(len(_API_TOKEN) - 4, 8) + _API_TOKEN[-2:] if len(_API_TOKEN) > 8 else "****"
@@ -2451,6 +2461,7 @@ async def api_external_get_token(request: Request):
         "has_key": bool(_API_TOKEN),
         "key_masked": masked,
         "api_url": api_url,
+        "api_domain": _API_DOMAIN,
     }
 
 
@@ -2511,6 +2522,35 @@ async def api_external_clear_key():
         return JSONResponse({"error": f"清空失败: {exc}"}, status_code=500)
 
     return {"ok": True, "message": "API Key 已清空，外部查询已禁用"}
+
+
+@app.post("/api/external/api_domain")
+async def api_external_save_domain(request: Request):
+    """保存 API 外部域名到配置文件并更新内存。"""
+    global _API_DOMAIN
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    domain = str(body.get("domain", "")).strip().rstrip("/")
+    _API_DOMAIN = domain
+
+    try:
+        cfg_path = Path(_CONFIG_YAML_PATH)
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        web_ui = raw.setdefault("web_ui", {})
+        web_ui["api_domain"] = domain
+        cfg_path.write_text(
+            yaml.dump(raw, default_flow_style=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        logger.info("api_domain saved: %s", domain or "(empty, auto-detect)")
+    except Exception as exc:
+        logger.warning("failed to save api_domain: %s", exc)
+        return JSONResponse({"error": f"保存失败: {exc}"}, status_code=500)
+
+    return {"ok": True, "message": "外部域名已保存，即时生效", "api_domain": domain}
 
 
 @app.post("/api/external/restart")
@@ -3783,8 +3823,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <a href="https://github.com/yujianke100/Ayabot-astrbot-plugin" target="_blank" class="text-blue-500 hover:underline">查看插件</a>
                 </p>
 
+                <!-- 外部域名（可选） -->
+                <label class="text-xs text-gray-500">外部域名（可选）
+                    <input type="text" v-model="apiDomainInput" placeholder="留空则自动检测，例如 https://example.com" class="border p-2 rounded w-full text-sm mt-1 font-mono">
+                    <span class="text-xs text-gray-400">设置后 API 地址将以该域名生成。留空则使用当前请求地址。</span>
+                </label>
+                <button @click="saveApiDomain" class="bg-gray-100 hover:bg-gray-200 text-gray-600 px-3 py-1.5 rounded text-xs mt-2" :disabled="apiDomainSaving">
+                    {{ apiDomainSaving ? '保存中...' : '保存域名设置' }}
+                </button>
+
                 <!-- API 地址（只读） -->
-                <label class="text-xs text-gray-500">API 地址
+                <label class="text-xs text-gray-500 mt-3 block">API 地址
                     <div class="flex items-center mt-1">
                         <input type="text" :value="apiUrl" readonly class="border p-2 rounded-l w-full text-sm bg-gray-50 font-mono text-xs" @click="copyText(apiUrl)">
                         <button @click="copyText(apiUrl)" class="bg-gray-200 hover:bg-gray-300 px-3 py-2 rounded-r text-sm border-l-0">📋</button>
@@ -4407,6 +4456,8 @@ createApp({
         const apiKeyNewFull = ref('');
         const apiKeyMsg = ref('');
         const apiKeyOk = ref(false);
+        const apiDomainInput = ref('');
+        const apiDomainSaving = ref(false);
 
         // Danmaku Log
         const danmakuRows = ref([]);
@@ -5195,6 +5246,7 @@ createApp({
                 apiKeyMasked.value = data.key_masked || '';
                 apiKeyStatus.value = data.has_key;
                 apiKeyNewFull.value = '';
+                apiDomainInput.value = data.api_domain || '';
             } catch(e) {}
         }
 
@@ -5243,6 +5295,32 @@ createApp({
                 apiKeyMsg.value = '清空失败: ' + e.message;
             } finally {
                 apiKeyGenerating.value = false;
+            }
+        }
+
+        async function saveApiDomain() {
+            apiDomainSaving.value = true;
+            apiKeyMsg.value = '';
+            apiKeyOk.value = false;
+            try {
+                const res = await fetch('/api/external/api_domain', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({domain: apiDomainInput.value})
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    apiKeyOk.value = true;
+                    apiKeyMsg.value = data.message;
+                    // 刷新 API 地址
+                    await loadApiKey();
+                } else {
+                    apiKeyMsg.value = data.error || '保存失败';
+                }
+            } catch(e) {
+                apiKeyMsg.value = '保存失败: ' + e.message;
+            } finally {
+                apiDomainSaving.value = false;
             }
         }
 

@@ -148,6 +148,7 @@ class WebUIConfig:
     title: str
     bot_name: str = "ayabot"
     api_token: str = ""
+    api_domain: str = ""
 
 
 @dataclass(slots=True)
@@ -358,6 +359,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             title=str(web_ui.get("title", "Ayabot")),
             bot_name=str(web_ui.get("bot_name", "bot")),
             api_token=str(web_ui.get("api_token", "")),
+            api_domain=str(web_ui.get("api_domain", "")),
         ),
         llm=LLMConfig(
             enabled=bool(llm.get("enabled", False)),
@@ -562,6 +564,7 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
         "web_ui": {
             "host": config.web_ui.host,
             "port": config.web_ui.port,
+            "api_domain": config.web_ui.api_domain,
         },
         "llm": {
             "enabled": config.llm.enabled,

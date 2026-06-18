@@ -73,7 +73,8 @@ web_ui:
   # password: "123456"                  # 默认管理员密码（首次登录强制修改）
   session_timeout: 3600
   bot_name: "ayabot"
-  api_token: ""                         # 外部 API Token（留空则拒绝外部查询请求）
+  api_token: ""                         # 外部 API Key（用于 AstrBot 插件查询）
+  api_domain: ""                        # 外部 API 域名（留空则自动检测，如 https://example.com）
 
 llm:
   enabled: false
