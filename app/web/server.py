@@ -5173,21 +5173,11 @@ createApp({
             return cells;
         });
 
-        // 手动分列计算
+        // 手动分列计算（仅分列，不排序）
         const exportCols = Vue.computed(() => {
             let items = exportList.value;
             const perCol = Math.max(1, ePerCol.value);
             if (!items.length) return [];
-
-            // 排序（客户端 fallback，确保与下拉框一致）
-            const s = eSort.value;
-            if (s === 'uname') {
-                items = [...items].sort((a, b) => (a.uname || '').localeCompare(b.uname || '') || (a.ts || 0) - (b.ts || 0));
-            } else if (s === 'value') {
-                items = [...items].sort((a, b) => (b.actual_value || 0) - (a.actual_value || 0));
-            } else {
-                items = [...items].sort((a, b) => (a.ts || 0) - (b.ts || 0));
-            }
 
             // 合并相同礼物模式
             if (eMergeGifts.value) {
@@ -5954,6 +5944,25 @@ createApp({
             errExport.value = '';
             loadUserDates();
         }
+        // 排序辅助函数
+        function applySort(items, s) {
+            if (!items || !items.length) return items;
+            if (s === 'uname') {
+                return [...items].sort((a, b) => (a.uname || '').localeCompare(b.uname || '') || (a.ts || 0) - (b.ts || 0));
+            } else if (s === 'value') {
+                return [...items].sort((a, b) => (b.actual_value || 0) - (a.actual_value || 0));
+            } else {
+                return [...items].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+            }
+        }
+
+        // 排序切换时重新排序
+        Vue.watch(eSort, () => {
+            const items = exportList.value;
+            if (!items.length) return;
+            exportList.value = applySort(items, eSort.value);
+        });
+
         function toggleDate(ymd) {
             // 多选模式（单用户和所有人模式都可以多选）
             const arr = eSelectedDates.value.slice();
@@ -6024,6 +6033,7 @@ createApp({
                         guard_level: item.guard_level || 0,
                         gift_icon: item.gift_icon || '',
                     }));
+                    exportList.value = applySort(exportList.value, eSort.value);
                     if (!exportList.value.length) {
                         errExport.value = '所选日期范围内无送礼记录';
                     }
@@ -6064,6 +6074,7 @@ createApp({
                     guard_level: item.guard_level || 0,
                     gift_icon: item.gift_icon || '',
                 }));
+                exportList.value = applySort(exportList.value, eSort.value);
                 if (exportList.value.length) {
                     eName.value = exportList.value[0].uname || '';
                 } else {
