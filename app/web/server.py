@@ -5945,12 +5945,25 @@ createApp({
             loadUserDates();
         }
         // 排序辅助函数
+        //   按时间: ts 升序
+        //   按用户: uname 字典序，同用户按价值降序
+        //   按价值: 价值降序，同价值大航海优先（guard_level 降序），再按 uname
         function applySort(items, s) {
             if (!items || !items.length) return items;
             if (s === 'uname') {
-                return [...items].sort((a, b) => (a.uname || '').localeCompare(b.uname || '') || (a.ts || 0) - (b.ts || 0));
+                return [...items].sort((a, b) => {
+                    const n = (a.uname || '').localeCompare(b.uname || '');
+                    if (n) return n;
+                    return (b.actual_value || 0) - (a.actual_value || 0);
+                });
             } else if (s === 'value') {
-                return [...items].sort((a, b) => (b.actual_value || 0) - (a.actual_value || 0));
+                return [...items].sort((a, b) => {
+                    const v = (b.actual_value || 0) - (a.actual_value || 0);
+                    if (v) return v;
+                    const g = (b.guard_level || 0) - (a.guard_level || 0);
+                    if (g) return g;
+                    return (a.uname || '').localeCompare(b.uname || '');
+                });
             } else {
                 return [...items].sort((a, b) => (a.ts || 0) - (b.ts || 0));
             }
