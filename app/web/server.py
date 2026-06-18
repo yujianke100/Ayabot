@@ -2543,6 +2543,35 @@ async def api_external_user_stats(
             (uid, start_ts, end_ts),
         ).fetchone()
 
+        # 按礼物名称分组统计（所有礼物）
+        gift_detail_rows = conn.execute(
+            """
+            SELECT gift_name,
+                   COALESCE(SUM(gift_num), 0) as total_num,
+                   COALESCE(SUM(actual_value), 0) as total_value
+            FROM gift_events
+            WHERE uid = ? AND ts >= ? AND ts <= ? AND is_blind_box = 0
+            GROUP BY gift_name
+            ORDER BY total_num DESC
+            """,
+            (uid, start_ts, end_ts),
+        ).fetchall()
+
+        # 按盲盒名称分组统计
+        blind_detail_rows = conn.execute(
+            """
+            SELECT gift_name,
+                   COALESCE(SUM(gift_num), 0) as total_num,
+                   COALESCE(SUM(blind_box_cost), 0) as total_cost,
+                   COALESCE(SUM(profit_value), 0) as total_profit
+            FROM gift_events
+            WHERE uid = ? AND ts >= ? AND ts <= ? AND is_blind_box = 1
+            GROUP BY gift_name
+            ORDER BY total_num DESC
+            """,
+            (uid, start_ts, end_ts),
+        ).fetchall()
+
         # 获取用户信息
         user_row = conn.execute(
             "SELECT uname FROM gift_events WHERE uid = ? LIMIT 1",
@@ -2552,6 +2581,24 @@ async def api_external_user_stats(
         conn.close()
 
         uname = user_row["uname"] if user_row else f"UID:{uid}"
+
+        # 构建礼物名称明细
+        gift_details = []
+        for r in gift_detail_rows:
+            gift_details.append({
+                "name": r["gift_name"],
+                "count": int(r["total_num"]),
+                "value_yuan": round(int(r["total_value"]) / 10.0, 2),
+            })
+
+        blind_details = []
+        for r in blind_detail_rows:
+            blind_details.append({
+                "name": r["gift_name"],
+                "count": int(r["total_num"]),
+                "cost_yuan": round(int(r["total_cost"]) / 10.0, 2),
+                "profit_yuan": round(int(r["total_profit"]) / 10.0, 2),
+            })
 
         # actual_value 单位是角，转换为元
         return {
@@ -2563,12 +2610,14 @@ async def api_external_user_stats(
                 "total_events": int(gift_rows["total_events"]),
                 "total_gift_count": int(gift_rows["total_gift_count"]),
                 "total_value_yuan": round(int(gift_rows["total_value"]) / 10.0, 2),
+                "details": gift_details,
             },
             "blindbox": {
                 "count": int(blind_rows["blind_count"]),
                 "cost_yuan": round(int(blind_rows["blind_cost"]) / 10.0, 2),
                 "actual_yuan": round(int(blind_rows["blind_actual"]) / 10.0, 2),
                 "profit_yuan": round(int(blind_rows["blind_profit"]) / 10.0, 2),
+                "details": blind_details,
             },
         }
     except Exception as exc:
