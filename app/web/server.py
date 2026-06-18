@@ -2436,39 +2436,42 @@ async def api_external_user_stats(
 
 @app.get("/api/external/api_token")
 async def api_external_get_token(request: Request):
-    """获取当前 API Token 配置状态（不返回完整 token）。"""
+    """获取当前 API Key 配置状态和接口地址。"""
+    # 构建 API 地址
+    host = request.headers.get("host", f"{_HTTP_HOST}:{_HTTP_PORT}")
+    scheme = request.headers.get("x-forwarded-proto", "http")
+    api_url = f"{scheme}://{host}/api/external/user_stats"
+
     if _API_TOKEN:
         masked = _API_TOKEN[:4] + "*" * min(len(_API_TOKEN) - 4, 8) + _API_TOKEN[-2:] if len(_API_TOKEN) > 8 else "****"
     else:
         masked = ""
     return {
         "ok": True,
-        "has_token": bool(_API_TOKEN),
-        "token_masked": masked,
-        "token_set": bool(_API_TOKEN),
+        "has_key": bool(_API_TOKEN),
+        "key_masked": masked,
+        "api_url": api_url,
     }
 
 
 @app.post("/api/external/api_token")
-async def api_external_save_token(request: Request):
-    """保存 API Token 到配置文件并更新内存。"""
+async def api_external_generate_key(request: Request):
+    """随机生成一个强 API Key 并保存到配置文件。"""
     global _API_TOKEN
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "bad request"}, status_code=400)
+    import secrets as _secrets
 
-    new_token = str(body.get("token", "")).strip()
+    # 生成 32 字节随机 hex 密钥（64 位强随机串）
+    new_key = _secrets.token_hex(32)
 
     # 更新内存
-    _API_TOKEN = new_token
+    _API_TOKEN = new_key
 
     # 保存到 config.yaml
     try:
         cfg_path = Path(_CONFIG_YAML_PATH)
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
         web_ui = raw.setdefault("web_ui", {})
-        web_ui["api_token"] = new_token
+        web_ui["api_token"] = new_key
         cfg_path.write_text(
             yaml.dump(raw, default_flow_style=False, allow_unicode=True),
             encoding="utf-8",
@@ -2478,16 +2481,36 @@ async def api_external_save_token(request: Request):
         logger.warning("failed to save api_token: %s", exc)
         return JSONResponse({"error": f"保存失败: {exc}"}, status_code=500)
 
-    if new_token:
-        masked = new_token[:4] + "*" * min(len(new_token) - 4, 8) + new_token[-2:] if len(new_token) > 8 else "****"
-    else:
-        masked = ""
+    masked = new_key[:6] + "*" * (len(new_key) - 10) + new_key[-4:] if len(new_key) > 12 else "****"
     return {
         "ok": True,
-        "message": "API Token 已保存，即时生效" if new_token else "API Token 已清空",
-        "token_masked": masked,
-        "token_set": bool(new_token),
+        "message": "新 API Key 已生成并生效",
+        "key_masked": masked,
+        "full_key": new_key,
     }
+
+
+@app.post("/api/external/clear_key")
+async def api_external_clear_key():
+    """清空 API Key（禁用外部查询）。"""
+    global _API_TOKEN
+
+    _API_TOKEN = ""
+    try:
+        cfg_path = Path(_CONFIG_YAML_PATH)
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        web_ui = raw.setdefault("web_ui", {})
+        web_ui["api_token"] = ""
+        cfg_path.write_text(
+            yaml.dump(raw, default_flow_style=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        logger.info("api_token cleared")
+    except Exception as exc:
+        logger.warning("failed to clear api_token: %s", exc)
+        return JSONResponse({"error": f"清空失败: {exc}"}, status_code=500)
+
+    return {"ok": True, "message": "API Key 已清空，外部查询已禁用"}
 
 
 @app.post("/api/external/restart")
@@ -3752,28 +3775,56 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
         <!-- 数据管理 -->
         <div v-if="roomSubTab==='manage'" class="max-w-full sm:max-w-lg mx-auto space-y-4">
-            <!-- API Token 配置 -->
+            <!-- API 外部接口配置 -->
             <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm">
-                <h2 class="text-lg font-bold mb-3">🔑 外部 API Token</h2>
+                <h2 class="text-lg font-bold mb-3">🔑 API 外部接口</h2>
                 <p class="text-xs text-gray-500 mb-3">
-                    用于 AstrBot 插件等第三方服务查询礼物/盲盒数据。
+                    供 AstrBot 插件等第三方服务查询礼物/盲盒数据。生成密钥后配置到插件中即可使用。
                     <a href="https://github.com/yujianke100/Ayabot-astrbot-plugin" target="_blank" class="text-blue-500 hover:underline">查看插件</a>
                 </p>
-                <label class="text-xs text-gray-500">API Token
-                    <input type="text" v-model="apiTokenInput" placeholder="留空则禁用外部查询" class="border p-2 rounded w-full text-sm mt-1 font-mono">
+
+                <!-- API 地址（只读） -->
+                <label class="text-xs text-gray-500">API 地址
+                    <div class="flex items-center mt-1">
+                        <input type="text" :value="apiUrl" readonly class="border p-2 rounded-l w-full text-sm bg-gray-50 font-mono text-xs" @click="copyText(apiUrl)">
+                        <button @click="copyText(apiUrl)" class="bg-gray-200 hover:bg-gray-300 px-3 py-2 rounded-r text-sm border-l-0">📋</button>
+                    </div>
+                    <span class="text-xs text-gray-400">点击地址或 📋 按钮复制</span>
                 </label>
-                <div v-if="apiTokenCurrent" class="mt-1 text-xs text-gray-400">
-                    当前: {{ apiTokenCurrent }}
-                    <span v-if="apiTokenStatus" class="text-green-600 ml-2">● 已启用</span>
-                    <span v-else class="text-gray-400 ml-2">○ 未设置</span>
+
+                <!-- API Key 状态 -->
+                <div class="mt-3 flex items-center justify-between bg-gray-50 p-3 rounded-lg">
+                    <div>
+                        <div class="text-xs text-gray-500">当前密钥</div>
+                        <div class="text-sm font-mono mt-1">{{ apiKeyMasked || '(未设置)' }}</div>
+                    </div>
+                    <div>
+                        <span v-if="apiKeyStatus" class="text-xs text-green-600 bg-green-50 px-2 py-1 rounded">● 已启用</span>
+                        <span v-else class="text-xs text-gray-400 bg-gray-100 px-2 py-1 rounded">○ 未设置</span>
+                    </div>
                 </div>
+
+                <!-- 操作按钮 -->
                 <div class="flex items-center gap-2 mt-3">
-                    <button @click="saveApiToken" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm" :disabled="apiTokenSaving">
-                        {{ apiTokenSaving ? '保存中...' : '保存' }}
+                    <button @click="generateApiKey" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm" :disabled="apiKeyGenerating">
+                        {{ apiKeyGenerating ? '生成中...' : '🔄 刷新密钥' }}
                     </button>
-                    <span v-if="apiTokenMsg" class="text-sm" :class="apiTokenOk ? 'text-green-600' : 'text-red-500'">{{ apiTokenMsg }}</span>
-                    <span v-if="apiTokenOk" class="text-xs text-green-600">✅ 即时生效，无需重启</span>
+                    <button v-if="apiKeyStatus" @click="clearApiKey" class="bg-red-100 hover:bg-red-200 text-red-600 px-3 py-2 rounded text-sm" :disabled="apiKeyGenerating">
+                        清空密钥
+                    </button>
                 </div>
+
+                <!-- 新密钥提示 -->
+                <div v-if="apiKeyNewFull" class="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                    <div class="text-xs text-yellow-700 font-bold mb-1">⚠️ 新密钥已生成，请立即复制保存（关闭后将不再显示）</div>
+                    <div class="flex items-center gap-1">
+                        <input type="text" :value="apiKeyNewFull" readonly class="border p-2 rounded-l w-full text-sm bg-white font-mono text-xs" @click="copyText(apiKeyNewFull)">
+                        <button @click="copyText(apiKeyNewFull)" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-2 rounded-r text-sm">📋 复制</button>
+                    </div>
+                </div>
+
+                <!-- 消息提示 -->
+                <div v-if="apiKeyMsg" class="mt-2 text-sm" :class="apiKeyOk ? 'text-green-600' : 'text-red-500'">{{ apiKeyMsg }}</div>
             </div>
 
             <!-- 数据删除 -->
@@ -4348,13 +4399,14 @@ createApp({
         const delDate = ref('');
         const delResult = ref('');
 
-        // API Token
-        const apiTokenInput = ref('');
-        const apiTokenCurrent = ref('');
-        const apiTokenStatus = ref(false);
-        const apiTokenSaving = ref(false);
-        const apiTokenMsg = ref('');
-        const apiTokenOk = ref(false);
+        // API Key
+        const apiUrl = ref('');
+        const apiKeyMasked = ref('');
+        const apiKeyStatus = ref(false);
+        const apiKeyGenerating = ref(false);
+        const apiKeyNewFull = ref('');
+        const apiKeyMsg = ref('');
+        const apiKeyOk = ref(false);
 
         // Danmaku Log
         const danmakuRows = ref([]);
@@ -4627,8 +4679,8 @@ createApp({
             selectedRoomAccount.value = r.account_uid || '';
             // 清除上一个房间的查询状态
             _clearRoomState();
-            // 加载 API Token 状态
-            loadApiToken();
+            // 加载 API Key 状态
+            loadApiKey();
         }
         function goBackRoomList() {
             selectedRoom.value = null;
@@ -5133,43 +5185,85 @@ createApp({
             } catch(e) { delResult.value = '删除失败: ' + e.message; }
         }
 
-        // ── API Token ──
-        async function loadApiToken() {
+        // ── API Key ──
+        async function loadApiKey() {
             try {
                 const res = await fetch('/api/external/api_token');
                 if (!res.ok) return;
                 const data = await res.json();
-                apiTokenCurrent.value = data.token_masked || '(未设置)';
-                apiTokenStatus.value = data.token_set;
-                apiTokenInput.value = '';
+                apiUrl.value = data.api_url || '';
+                apiKeyMasked.value = data.key_masked || '';
+                apiKeyStatus.value = data.has_key;
+                apiKeyNewFull.value = '';
             } catch(e) {}
         }
 
-        async function saveApiToken() {
-            apiTokenSaving.value = true;
-            apiTokenMsg.value = '';
-            apiTokenOk.value = false;
+        async function generateApiKey() {
+            apiKeyGenerating.value = true;
+            apiKeyMsg.value = '';
+            apiKeyOk.value = false;
+            apiKeyNewFull.value = '';
             try {
-                const res = await fetch('/api/external/api_token', {
-                    method: 'POST',
-                    headers: {'Content-Type':'application/json'},
-                    body: JSON.stringify({token: apiTokenInput.value})
-                });
+                const res = await fetch('/api/external/api_token', { method: 'POST' });
                 const data = await res.json();
                 if (data.ok) {
-                    apiTokenOk.value = true;
-                    apiTokenMsg.value = data.message;
-                    apiTokenCurrent.value = data.token_masked || '(未设置)';
-                    apiTokenStatus.value = data.token_set;
-                    apiTokenInput.value = '';
+                    apiKeyOk.value = true;
+                    apiKeyMsg.value = data.message;
+                    apiKeyMasked.value = data.key_masked;
+                    apiKeyStatus.value = true;
+                    apiKeyNewFull.value = data.full_key;
                 } else {
-                    apiTokenMsg.value = data.error || '保存失败';
+                    apiKeyMsg.value = data.error || '生成失败';
                 }
             } catch(e) {
-                apiTokenMsg.value = '保存失败: ' + e.message;
+                apiKeyMsg.value = '生成失败: ' + e.message;
             } finally {
-                apiTokenSaving.value = false;
+                apiKeyGenerating.value = false;
             }
+        }
+
+        async function clearApiKey() {
+            if (!confirm('确定清空 API Key？清空后外部插件将无法查询数据。')) return;
+            apiKeyGenerating.value = true;
+            apiKeyMsg.value = '';
+            apiKeyOk.value = false;
+            apiKeyNewFull.value = '';
+            try {
+                const res = await fetch('/api/external/clear_key', { method: 'POST' });
+                const data = await res.json();
+                if (data.ok) {
+                    apiKeyOk.value = true;
+                    apiKeyMsg.value = data.message;
+                    apiKeyMasked.value = '';
+                    apiKeyStatus.value = false;
+                } else {
+                    apiKeyMsg.value = data.error || '清空失败';
+                }
+            } catch(e) {
+                apiKeyMsg.value = '清空失败: ' + e.message;
+            } finally {
+                apiKeyGenerating.value = false;
+            }
+        }
+
+        function copyText(text) {
+            if (!text) return;
+            navigator.clipboard.writeText(text).then(() => {
+                apiKeyMsg.value = '✅ 已复制到剪贴板';
+                apiKeyOk.value = true;
+                setTimeout(() => { apiKeyMsg.value = ''; }, 2000);
+            }).catch(() => {
+                // fallback
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                apiKeyMsg.value = '✅ 已复制到剪贴板';
+                apiKeyOk.value = true;
+                setTimeout(() => { apiKeyMsg.value = ''; }, 2000);
+            });
         }
 
         // ── Bot Log ──
