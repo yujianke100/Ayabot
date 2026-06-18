@@ -1602,6 +1602,136 @@ async def api_room_config_import(room_id: str, request: Request):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+# ══════════════════════════════════════════════════════════════
+#  房间级 API 外部接口配置
+# ══════════════════════════════════════════════════════════════
+
+
+def _load_room_raw_config(room_id: str) -> dict:
+    """加载房间的原始 config.yaml 内容。"""
+    from app.config import get_room_path
+    cfg_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "config.yaml"
+    if not cfg_path.exists():
+        return {}
+    try:
+        return yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _save_room_raw_config(room_id: str, raw: dict) -> bool:
+    """保存 dict 到房间的 config.yaml。"""
+    from app.config import get_room_path
+    cfg_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "config.yaml"
+    if not cfg_path.exists():
+        return False
+    try:
+        cfg_path.write_text(
+            yaml.dump(raw, default_flow_style=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        return True
+    except Exception:
+        return False
+
+
+@app.get("/api/rooms/{room_id}/api_config")
+async def api_room_api_config(room_id: str, request: Request):
+    """获取房间的 API 外部接口配置。"""
+    raw = _load_room_raw_config(room_id)
+    web_ui = raw.get("web_ui", {}) or {}
+    api_enabled = bool(web_ui.get("api_enabled", False))
+    api_token = str(web_ui.get("api_token", "") or "")
+
+    # 构建 API 地址
+    if _API_DOMAIN:
+        base = _API_DOMAIN.rstrip("/")
+    else:
+        host = request.headers.get("host", f"{_HTTP_HOST}:{_HTTP_PORT}")
+        scheme = request.headers.get("x-forwarded-proto", "http")
+        base = f"{scheme}://{host}"
+    api_url = f"{base}/api/external/user_stats?room_id={room_id}"
+
+    masked = ""
+    if api_token:
+        t = api_token
+        masked = t[:6] + "*" * (len(t) - 10) + t[-4:] if len(t) > 12 else "****"
+
+    return {
+        "ok": True,
+        "api_enabled": api_enabled,
+        "has_key": bool(api_token),
+        "key_masked": masked,
+        "api_url": api_url,
+    }
+
+
+@app.post("/api/rooms/{room_id}/api_toggle")
+async def api_room_api_toggle(room_id: str):
+    """切换房间的 API 开关。开启时自动生成密钥（如无已有密钥）。"""
+    import secrets as _secrets
+
+    raw = _load_room_raw_config(room_id)
+    if not raw:
+        return JSONResponse({"error": "room not found"}, status_code=404)
+
+    web_ui = raw.setdefault("web_ui", {})
+    was_enabled = bool(web_ui.get("api_enabled", False))
+    new_enabled = not was_enabled
+    web_ui["api_enabled"] = new_enabled
+
+    new_key = ""
+    masked = ""
+    if new_enabled:
+        # 开启时：如果有旧 key 则保留，否则自动生成
+        existing = str(web_ui.get("api_token", "") or "")
+        if existing:
+            new_key = existing
+        else:
+            new_key = _secrets.token_hex(32)
+            web_ui["api_token"] = new_key
+        t = new_key
+        masked = t[:6] + "*" * (len(t) - 10) + t[-4:] if len(t) > 12 else "****"
+
+    _save_room_raw_config(room_id, raw)
+    logger.info("room %s API %s (token=%s)", room_id, "enabled" if new_enabled else "disabled", masked or "none")
+
+    return {
+        "ok": True,
+        "api_enabled": new_enabled,
+        "has_key": bool(new_key),
+        "key_masked": masked,
+        "message": "API 已开启" if new_enabled else "API 已关闭",
+    }
+
+
+@app.post("/api/rooms/{room_id}/api_regenerate")
+async def api_room_api_regenerate(room_id: str):
+    """重新生成房间的 API 密钥。"""
+    import secrets as _secrets
+
+    raw = _load_room_raw_config(room_id)
+    if not raw:
+        return JSONResponse({"error": "room not found"}, status_code=404)
+
+    new_key = _secrets.token_hex(32)
+    web_ui = raw.setdefault("web_ui", {})
+    web_ui["api_token"] = new_key
+    web_ui["api_enabled"] = True
+
+    _save_room_raw_config(room_id, raw)
+    t = new_key
+    masked = t[:6] + "*" * (len(t) - 10) + t[-4:] if len(t) > 12 else "****"
+    logger.info("room %s API key regenerated", room_id)
+
+    return {
+        "ok": True,
+        "key_masked": masked,
+        "full_key": new_key,
+        "message": "新密钥已生成",
+    }
+
+
 @app.get("/api/llm_config/export")
 async def api_llm_config_export():
     """导出 LLM 配置为 JSON 下载。"""
@@ -2318,9 +2448,22 @@ async def api_room_danmaku_clear_dates(room_id: str, date_from: str = "", date_t
 
 
 def _verify_api_token(request: Request) -> bool:
-    """验证外部 API Token（查询参数或 Authorization header 均可）。"""
+    """验证外部 API Token（支持全局和按房间两种模式）。"""
     token = request.query_params.get("token", "") or request.headers.get("Authorization", "").replace("Bearer ", "")
-    return bool(_API_TOKEN and token == _API_TOKEN)
+
+    # 1. 先检查全局 token
+    if _API_TOKEN and token == _API_TOKEN:
+        return True
+
+    # 2. 如果传了 room_id，检查该房间的 token
+    room_id = request.query_params.get("room_id", "")
+    if room_id:
+        raw = _load_room_raw_config(room_id)
+        web_ui = raw.get("web_ui", {}) or {}
+        if web_ui.get("api_enabled") and web_ui.get("api_token") == token:
+            return True
+
+    return False
 
 
 @app.get("/api/external/user_stats")
@@ -3816,64 +3959,61 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <!-- 数据管理 -->
         <div v-if="roomSubTab==='manage'" class="max-w-full sm:max-w-lg mx-auto space-y-4">
             <!-- API 外部接口配置 -->
-            <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm">
-                <h2 class="text-lg font-bold mb-3">🔑 API 外部接口</h2>
+            <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm" :class="{'opacity-60': !roomApiEnabled}">
+                <div class="flex items-center justify-between mb-3">
+                    <h2 class="text-lg font-bold">🔌 API 外部接口</h2>
+                    <!-- 开关 -->
+                    <label class="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" class="sr-only peer" :checked="roomApiEnabled" @change="toggleRoomApi">
+                        <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                        <span class="ms-3 text-sm font-medium" :class="roomApiEnabled ? 'text-green-600' : 'text-gray-400'">{{ roomApiEnabled ? '已开启' : '已关闭' }}</span>
+                    </label>
+                </div>
                 <p class="text-xs text-gray-500 mb-3">
-                    供 AstrBot 插件等第三方服务查询礼物/盲盒数据。生成密钥后配置到插件中即可使用。
+                    供 AstrBot 插件等第三方服务按房间查询礼物/盲盒数据。
                     <a href="https://github.com/yujianke100/Ayabot-astrbot-plugin" target="_blank" class="text-blue-500 hover:underline">查看插件</a>
                 </p>
 
-                <!-- 外部域名（可选） -->
-                <label class="text-xs text-gray-500">外部域名（可选）
-                    <input type="text" v-model="apiDomainInput" placeholder="留空则自动检测，例如 https://example.com" class="border p-2 rounded w-full text-sm mt-1 font-mono">
-                    <span class="text-xs text-gray-400">设置后 API 地址将以该域名生成。留空则使用当前请求地址。</span>
-                </label>
-                <button @click="saveApiDomain" class="bg-gray-100 hover:bg-gray-200 text-gray-600 px-3 py-1.5 rounded text-xs mt-2" :disabled="apiDomainSaving">
-                    {{ apiDomainSaving ? '保存中...' : '保存域名设置' }}
-                </button>
+                <template v-if="roomApiEnabled">
+                    <!-- API 地址 -->
+                    <label class="text-xs text-gray-500 mt-3 block">API 地址
+                        <div class="flex items-center mt-1">
+                            <input type="text" :value="roomApiUrl" readonly class="border p-2 rounded-l w-full text-sm bg-gray-50 font-mono text-xs" @click="copyText(roomApiUrl, 'apiMsg')">
+                            <button @click="copyText(roomApiUrl, 'apiMsg')" class="bg-gray-200 hover:bg-gray-300 px-3 py-2 rounded-r text-sm border-l-0" title="复制">📋</button>
+                        </div>
+                        <span class="text-xs text-gray-400">将以上地址和下方密钥填入插件配置</span>
+                    </label>
 
-                <!-- API 地址（只读） -->
-                <label class="text-xs text-gray-500 mt-3 block">API 地址
-                    <div class="flex items-center mt-1">
-                        <input type="text" :value="apiUrl" readonly class="border p-2 rounded-l w-full text-sm bg-gray-50 font-mono text-xs" @click="copyText(apiUrl)">
-                        <button @click="copyText(apiUrl)" class="bg-gray-200 hover:bg-gray-300 px-3 py-2 rounded-r text-sm border-l-0">📋</button>
+                    <!-- 密钥 -->
+                    <label class="text-xs text-gray-500 mt-3 block">API 密钥
+                        <div class="flex items-center mt-1">
+                            <input type="text" :value="roomApiKeyMasked || '(无密钥)'" readonly class="border p-2 rounded-l w-full text-sm bg-gray-50 font-mono text-xs">
+                            <button v-if="roomApiHasKey" @click="copyText(roomApiFullKey, 'apiMsg')" class="bg-gray-200 hover:bg-gray-300 px-3 py-2 rounded-r text-sm border-l-0" title="复制">📋</button>
+                        </div>
+                    </label>
+
+                    <!-- 操作按钮 -->
+                    <div class="flex items-center gap-2 mt-3">
+                        <button @click="regenerateRoomApiKey" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm" :disabled="roomApiBusy">
+                            {{ roomApiBusy ? '处理中...' : '🔄 重新生成密钥' }}
+                        </button>
                     </div>
-                    <span class="text-xs text-gray-400">点击地址或 📋 按钮复制</span>
-                </label>
 
-                <!-- API Key 状态 -->
-                <div class="mt-3 flex items-center justify-between bg-gray-50 p-3 rounded-lg">
-                    <div>
-                        <div class="text-xs text-gray-500">当前密钥</div>
-                        <div class="text-sm font-mono mt-1">{{ apiKeyMasked || '(未设置)' }}</div>
+                    <!-- 新密钥提示 -->
+                    <div v-if="roomApiNewKey" class="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                        <div class="text-xs text-yellow-700 font-bold mb-1">⚠️ 新密钥已生成，请立即复制保存（关闭后将不再显示完整密钥）</div>
+                        <div class="flex items-center gap-1">
+                            <input type="text" :value="roomApiNewKey" readonly class="border p-2 rounded-l w-full text-sm bg-white font-mono text-xs" @click="copyText(roomApiNewKey, 'apiMsg')">
+                            <button @click="copyText(roomApiNewKey, 'apiMsg')" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-2 rounded-r text-sm">📋 复制</button>
+                        </div>
                     </div>
-                    <div>
-                        <span v-if="apiKeyStatus" class="text-xs text-green-600 bg-green-50 px-2 py-1 rounded">● 已启用</span>
-                        <span v-else class="text-xs text-gray-400 bg-gray-100 px-2 py-1 rounded">○ 未设置</span>
-                    </div>
-                </div>
+                </template>
 
-                <!-- 操作按钮 -->
-                <div class="flex items-center gap-2 mt-3">
-                    <button @click="generateApiKey" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm" :disabled="apiKeyGenerating">
-                        {{ apiKeyGenerating ? '生成中...' : '🔄 刷新密钥' }}
-                    </button>
-                    <button v-if="apiKeyStatus" @click="clearApiKey" class="bg-red-100 hover:bg-red-200 text-red-600 px-3 py-2 rounded text-sm" :disabled="apiKeyGenerating">
-                        清空密钥
-                    </button>
-                </div>
+                <template v-else>
+                    <div class="py-6 text-center text-gray-400 text-sm">API 接口已关闭，开启后即可查看地址和密钥</div>
+                </template>
 
-                <!-- 新密钥提示 -->
-                <div v-if="apiKeyNewFull" class="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-                    <div class="text-xs text-yellow-700 font-bold mb-1">⚠️ 新密钥已生成，请立即复制保存（关闭后将不再显示）</div>
-                    <div class="flex items-center gap-1">
-                        <input type="text" :value="apiKeyNewFull" readonly class="border p-2 rounded-l w-full text-sm bg-white font-mono text-xs" @click="copyText(apiKeyNewFull)">
-                        <button @click="copyText(apiKeyNewFull)" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-2 rounded-r text-sm">📋 复制</button>
-                    </div>
-                </div>
-
-                <!-- 消息提示 -->
-                <div v-if="apiKeyMsg" class="mt-2 text-sm" :class="apiKeyOk ? 'text-green-600' : 'text-red-500'">{{ apiKeyMsg }}</div>
+                <div v-if="apiMsg" class="mt-2 text-sm" :class="apiMsgOk ? 'text-green-600' : 'text-red-500'">{{ apiMsg }}</div>
             </div>
 
             <!-- 数据删除 -->
@@ -4448,16 +4588,16 @@ createApp({
         const delDate = ref('');
         const delResult = ref('');
 
-        // API Key
-        const apiUrl = ref('');
-        const apiKeyMasked = ref('');
-        const apiKeyStatus = ref(false);
-        const apiKeyGenerating = ref(false);
-        const apiKeyNewFull = ref('');
-        const apiKeyMsg = ref('');
-        const apiKeyOk = ref(false);
-        const apiDomainInput = ref('');
-        const apiDomainSaving = ref(false);
+        // Room API config
+        const roomApiEnabled = ref(false);
+        const roomApiUrl = ref('');
+        const roomApiKeyMasked = ref('');
+        const roomApiHasKey = ref(false);
+        const roomApiFullKey = ref('');
+        const roomApiNewKey = ref('');
+        const roomApiBusy = ref(false);
+        const apiMsg = ref('');
+        const apiMsgOk = ref(false);
 
         // Danmaku Log
         const danmakuRows = ref([]);
@@ -4730,8 +4870,8 @@ createApp({
             selectedRoomAccount.value = r.account_uid || '';
             // 清除上一个房间的查询状态
             _clearRoomState();
-            // 加载 API Key 状态
-            loadApiKey();
+            // 加载房间 API 配置
+            loadRoomApiConfig();
         }
         function goBackRoomList() {
             selectedRoom.value = null;
@@ -5236,111 +5376,98 @@ createApp({
             } catch(e) { delResult.value = '删除失败: ' + e.message; }
         }
 
-        // ── API Key ──
-        async function loadApiKey() {
+        // ── 房间 API 配置 ──
+        async function loadRoomApiConfig() {
+            const rid = selectedRoom.value?.room_id;
+            if (!rid) return;
             try {
-                const res = await fetch('/api/external/api_token');
+                const res = await fetch(`/api/rooms/${rid}/api_config`);
                 if (!res.ok) return;
                 const data = await res.json();
-                apiUrl.value = data.api_url || '';
-                apiKeyMasked.value = data.key_masked || '';
-                apiKeyStatus.value = data.has_key;
-                apiKeyNewFull.value = '';
-                apiDomainInput.value = data.api_domain || '';
+                roomApiEnabled.value = data.api_enabled;
+                roomApiUrl.value = data.api_url || '';
+                roomApiKeyMasked.value = data.key_masked || '';
+                roomApiHasKey.value = data.has_key;
+                roomApiNewKey.value = '';
+                roomApiFullKey.value = '';
             } catch(e) {}
         }
 
-        async function generateApiKey() {
-            apiKeyGenerating.value = true;
-            apiKeyMsg.value = '';
-            apiKeyOk.value = false;
-            apiKeyNewFull.value = '';
+        async function toggleRoomApi() {
+            const rid = selectedRoom.value?.room_id;
+            if (!rid) return;
+            roomApiBusy.value = true;
+            apiMsg.value = '';
+            apiMsgOk.value = false;
+            roomApiNewKey.value = '';
             try {
-                const res = await fetch('/api/external/api_token', { method: 'POST' });
+                const res = await fetch(`/api/rooms/${rid}/api_toggle`, { method: 'POST' });
                 const data = await res.json();
                 if (data.ok) {
-                    apiKeyOk.value = true;
-                    apiKeyMsg.value = data.message;
-                    apiKeyMasked.value = data.key_masked;
-                    apiKeyStatus.value = true;
-                    apiKeyNewFull.value = data.full_key;
+                    roomApiEnabled.value = data.api_enabled;
+                    roomApiKeyMasked.value = data.key_masked || '';
+                    roomApiHasKey.value = data.has_key;
+                    apiMsg.value = data.message;
+                    apiMsgOk.value = true;
+                    // 如果开启了且有新 key，显示完整 key
+                    if (data.api_enabled && data.has_key) {
+                        // 获取 full_key（regenerate 时返回）
+                    }
+                    // 刷新 api url
+                    await loadRoomApiConfig();
                 } else {
-                    apiKeyMsg.value = data.error || '生成失败';
+                    apiMsg.value = data.error || '操作失败';
+                    apiMsgOk.value = false;
                 }
             } catch(e) {
-                apiKeyMsg.value = '生成失败: ' + e.message;
+                apiMsg.value = '操作失败: ' + e.message;
             } finally {
-                apiKeyGenerating.value = false;
+                roomApiBusy.value = false;
             }
         }
 
-        async function clearApiKey() {
-            if (!confirm('确定清空 API Key？清空后外部插件将无法查询数据。')) return;
-            apiKeyGenerating.value = true;
-            apiKeyMsg.value = '';
-            apiKeyOk.value = false;
-            apiKeyNewFull.value = '';
+        async function regenerateRoomApiKey() {
+            const rid = selectedRoom.value?.room_id;
+            if (!rid) return;
+            roomApiBusy.value = true;
+            apiMsg.value = '';
+            apiMsgOk.value = false;
+            roomApiNewKey.value = '';
             try {
-                const res = await fetch('/api/external/clear_key', { method: 'POST' });
+                const res = await fetch(`/api/rooms/${rid}/api_regenerate`, { method: 'POST' });
                 const data = await res.json();
                 if (data.ok) {
-                    apiKeyOk.value = true;
-                    apiKeyMsg.value = data.message;
-                    apiKeyMasked.value = '';
-                    apiKeyStatus.value = false;
+                    roomApiKeyMasked.value = data.key_masked;
+                    roomApiHasKey.value = true;
+                    roomApiEnabled.value = true;
+                    roomApiNewKey.value = data.full_key;
+                    apiMsg.value = data.message;
+                    apiMsgOk.value = true;
                 } else {
-                    apiKeyMsg.value = data.error || '清空失败';
+                    apiMsg.value = data.error || '生成失败';
                 }
             } catch(e) {
-                apiKeyMsg.value = '清空失败: ' + e.message;
+                apiMsg.value = '生成失败: ' + e.message;
             } finally {
-                apiKeyGenerating.value = false;
+                roomApiBusy.value = false;
             }
         }
 
-        async function saveApiDomain() {
-            apiDomainSaving.value = true;
-            apiKeyMsg.value = '';
-            apiKeyOk.value = false;
-            try {
-                const res = await fetch('/api/external/api_domain', {
-                    method: 'POST',
-                    headers: {'Content-Type':'application/json'},
-                    body: JSON.stringify({domain: apiDomainInput.value})
-                });
-                const data = await res.json();
-                if (data.ok) {
-                    apiKeyOk.value = true;
-                    apiKeyMsg.value = data.message;
-                    // 刷新 API 地址
-                    await loadApiKey();
-                } else {
-                    apiKeyMsg.value = data.error || '保存失败';
-                }
-            } catch(e) {
-                apiKeyMsg.value = '保存失败: ' + e.message;
-            } finally {
-                apiDomainSaving.value = false;
-            }
-        }
-
-        function copyText(text) {
+        function copyText(text, msgRef) {
             if (!text) return;
+            const target = msgRef || 'apiMsg';
             navigator.clipboard.writeText(text).then(() => {
-                apiKeyMsg.value = '✅ 已复制到剪贴板';
-                apiKeyOk.value = true;
-                setTimeout(() => { apiKeyMsg.value = ''; }, 2000);
+                if (target === 'apiMsg') { apiMsg.value = '✅ 已复制到剪贴板'; apiMsgOk.value = true; }
+                setTimeout(() => { if (target === 'apiMsg') apiMsg.value = ''; }, 2000);
             }).catch(() => {
-                // fallback
                 const ta = document.createElement('textarea');
                 ta.value = text;
                 document.body.appendChild(ta);
                 ta.select();
                 document.execCommand('copy');
                 document.body.removeChild(ta);
-                apiKeyMsg.value = '✅ 已复制到剪贴板';
-                apiKeyOk.value = true;
-                setTimeout(() => { apiKeyMsg.value = ''; }, 2000);
+                if (target === 'apiMsg') { apiMsg.value = '✅ 已复制到剪贴板'; apiMsgOk.value = true; }
+                setTimeout(() => { if (target === 'apiMsg') apiMsg.value = ''; }, 2000);
             });
         }
 
@@ -5450,10 +5577,10 @@ createApp({
             if (selectedRoom.value?.room_id) loadDanmakuLog();
         });
 
-        // 切换到数据管理标签时刷新 API Key 信息
+        // 切换到数据管理标签时刷新房间 API 配置
         Vue.watch(roomSubTab, (val) => {
             if (val === 'manage' && selectedRoom.value) {
-                loadApiKey();
+                loadRoomApiConfig();
             }
         });
 
@@ -6721,6 +6848,8 @@ createApp({
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
+                roomApiEnabled, roomApiUrl, roomApiKeyMasked, roomApiHasKey, roomApiFullKey, roomApiNewKey, roomApiBusy,
+                apiMsg, apiMsgOk, loadRoomApiConfig, toggleRoomApi, regenerateRoomApiKey, copyText,
                 danmakuRows, danmakuErr, danmakuOffset, danmakuLimit, danmakuTotal, danmakuPage,
                 loadDanmakuLog, clearDanmakuLog, fmtDanmakuTime, loadDmDates, dmToggleDate, dmExportSelected, dmCalDays, dmCalYear, dmCalMonth, dmShowCal, dmSelectedDates, dmDates, dmDatesSet, dmAsc,
                 llmEnabled, llmProvider, llmApiKey, llmBaseUrl, llmModel, llmPrompt,

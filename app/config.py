@@ -149,6 +149,7 @@ class WebUIConfig:
     bot_name: str = "ayabot"
     api_token: str = ""
     api_domain: str = ""
+    api_enabled: bool = False
 
 
 @dataclass(slots=True)
@@ -360,6 +361,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             bot_name=str(web_ui.get("bot_name", "bot")),
             api_token=str(web_ui.get("api_token", "")),
             api_domain=str(web_ui.get("api_domain", "")),
+            api_enabled=bool(web_ui.get("api_enabled", False)),
         ),
         llm=LLMConfig(
             enabled=bool(llm.get("enabled", False)),
