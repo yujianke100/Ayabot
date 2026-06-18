@@ -2743,14 +2743,25 @@ async def api_external_user_stats(
             pass  # danmaku_log 表可能不存在
 
         # 获取用户信息
+        # 获取用户信息（uname + avatar）
         user_row = conn.execute(
-            "SELECT uname FROM gift_events WHERE uid = ? LIMIT 1",
+            """
+            SELECT uname,
+                   COALESCE(
+                       json_extract(raw_json, '$.sender_uinfo.base.face'),
+                       json_extract(raw_json, '$.face'),
+                       ''
+                   ) as avatar
+            FROM gift_events WHERE uid = ? AND raw_json IS NOT NULL AND raw_json != ''
+            ORDER BY ts DESC LIMIT 1
+            """,
             (uid,),
         ).fetchone()
 
         conn.close()
 
         uname = user_row["uname"] if user_row else f"UID:{uid}"
+        avatar = user_row["avatar"] if user_row and user_row["avatar"] else ""
 
         # DB 存储单位是 电池（金瓜子÷100），直接使用
         def _to_battery(v: int) -> int:
@@ -2796,6 +2807,7 @@ async def api_external_user_stats(
             "ok": True,
             "uid": uid,
             "uname": uname,
+            "avatar": avatar,
             "period": period,
             "danmaku_count": danmaku_count,
             "gift": {
