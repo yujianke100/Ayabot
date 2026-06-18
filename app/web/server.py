@@ -2302,6 +2302,141 @@ async def api_room_user_dates(room_id: str, uid: int = 0):
         return []
 
 
+@app.get("/api/rooms/{room_id}/all_dates")
+async def api_room_all_dates(room_id: str):
+    """获取指定房间内所有用户有送礼记录的日期（去重）."""
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return []
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT date(ts, 'unixepoch', 'localtime') FROM gift_events ORDER BY date(ts, 'unixepoch', 'localtime')"
+        )
+        dates = [r[0] for r in cur.fetchall()]
+        conn.close()
+        return dates
+    except Exception:
+        return []
+
+
+@app.get("/api/rooms/{room_id}/export_all")
+async def api_room_export_all(
+    room_id: str,
+    date_from: str = "",
+    date_to: str = "",
+    gift_type: str = "all",
+    sort: str = "ts",
+):
+    """
+    导出指定房间内所有用户在日期范围内的送礼明细（聚合排序版）。
+    
+    Args:
+        date_from: 起始日期 YYYY-MM-DD（留空不限）
+        date_to: 结束日期 YYYY-MM-DD（留空不限）
+        gift_type: all|gift|blindbox
+        sort: ts|uname|value — 按时间/用户名/价值排序
+    """
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return []
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+
+        conditions = ["event_type = 'SEND_GIFT'"]
+        params: list = []
+
+        if date_from:
+            conditions.append("date(ts, 'unixepoch', 'localtime') >= date(?)")
+            params.append(date_from)
+        if date_to:
+            conditions.append("date(ts, 'unixepoch', 'localtime') <= date(?)")
+            params.append(date_to)
+        if gift_type == "gift":
+            conditions.append("is_blind_box = 0")
+        elif gift_type == "blindbox":
+            conditions.append("is_blind_box = 1")
+
+        where = " AND ".join(conditions)
+
+        cur.execute(f"""
+            SELECT uid, uname, gift_name, gift_num, actual_value, ts, is_blind_box, id, raw_json
+            FROM gift_events
+            WHERE {where}
+            ORDER BY ts ASC
+        """, params)
+        rows = cur.fetchall()
+        conn.close()
+
+        import json as _json
+        merged: dict[tuple, dict] = {}
+        for r in rows:
+            raw = {}
+            if r[8]:
+                try:
+                    raw = _json.loads(r[8])
+                except Exception:
+                    raw = {}
+            
+            is_blind = bool(r[6])
+            guard_level = 0
+            avatar = ""
+            gift_icon = ""
+            actual_value = r[4]
+
+            if not is_blind and raw:
+                actual_value = round(int(raw.get("total_coin", 0) or 0) / 1000.0, 2)
+            else:
+                actual_value = round(actual_value / 10.0, 2)
+
+            if raw:
+                sender_info = raw.get("sender_uinfo", {}) or {}
+                base = sender_info.get("base", {}) or {}
+                avatar = base.get("face", "") or ""
+                guard_info = sender_info.get("guard", {}) or None
+                if guard_info:
+                    guard_level = guard_info.get("level", 0) or 0
+                medal = sender_info.get("medal", {}) or None
+                if medal and not guard_level:
+                    guard_level = medal.get("guard_level", 0) or 0
+                gift_info = raw.get("gift_info", {}) or {}
+                gift_icon = gift_info.get("img_basic", "") or gift_info.get("webp", "") or ""
+
+            batch_key = r[8] and _json.loads(r[8]).get("batch_combo_id", "") or ""
+            merge_key = (r[0], batch_key, r[2])  # (uid, batch_combo_id, gift_name)
+
+            if merge_key in merged:
+                merged[merge_key]["gift_num"] += r[3]
+                merged[merge_key]["actual_value"] += actual_value
+            else:
+                merged[merge_key] = {
+                    "uid": r[0], "uname": r[1], "gift_name": r[2],
+                    "gift_num": r[3], "actual_value": actual_value,
+                    "ts": r[5], "is_blind_box": is_blind,
+                    "id": r[7],
+                    "guard_level": guard_level,
+                    "avatar": avatar,
+                    "gift_icon": gift_icon,
+                }
+
+        results = list(merged.values())
+
+        # 排序
+        if sort == "uname":
+            results.sort(key=lambda x: (x["uname"] or "", x["ts"] or 0))
+        elif sort == "value":
+            results.sort(key=lambda x: -(x["actual_value"] or 0))
+        else:  # ts
+            results.sort(key=lambda x: x["ts"] or 0)
+
+        return results
+    except Exception:
+        return []
+
+
 @app.post("/api/rooms/{room_id}/delete_old")
 async def api_room_delete_old(room_id: str, request: Request):
     """删除指定房间的旧数据. data_type: 'gift' | 'danmaku' | 'all'."""
@@ -3369,20 +3504,37 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
         <!-- 精美导出 -->
         <div v-if="roomSubTab==='export'" class="flex flex-col items-center w-full">
+            <!-- 模式切换 -->
             <div class="bg-white p-4 rounded-xl shadow-sm w-full max-w-3xl mb-4 space-y-3">
-                <div class="flex flex-wrap gap-2 items-end">
-                    <label class="text-xs text-gray-500 flex-[2]">UID<input type="number" v-model.number="eUid" class="border p-2 rounded w-full text-sm mt-1" @input="onUidInput"></label>
+                <div class="flex flex-wrap gap-2 items-center">
+                    <label class="text-xs text-gray-500 flex items-center gap-2">
+                        <span>导出模式</span>
+                        <select v-model="eMode" class="border p-2 rounded text-sm" @change="onModeChange">
+                            <option value="single">单个用户</option>
+                            <option value="all">所有人</option>
+                        </select>
+                    </label>
+                    <label v-if="eMode==='single'" class="text-xs text-gray-500 flex-[2]">
+                        UID<input type="number" v-model.number="eUid" class="border p-2 rounded w-full text-sm mt-1" @input="onUidInput">
+                    </label>
                     <label class="text-xs text-gray-500 flex-[2]">
                         日期
                         <div class="relative">
-                            <input type="text" readonly :value="eDate" placeholder="点击选择日期"
+                            <input type="text" readonly :value="eDateLabel" placeholder="点击选择日期"
                                    class="border p-2 rounded w-full text-sm mt-1 cursor-pointer bg-white"
                                    @click="showCalendar = !showCalendar">
-                            <div v-if="showCalendar" @click.stop class="absolute top-full left-0 mt-1 bg-white border rounded-xl shadow-lg z-50 p-3 w-[300px]">
+                            <div v-if="showCalendar" @click.stop class="absolute top-full left-0 mt-1 bg-white border rounded-xl shadow-lg z-50 p-3 w-[320px]">
                                 <div class="flex justify-between items-center mb-2">
                                     <button @click="calMonth--" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&lt;</button>
                                     <span class="text-sm font-bold">{{ calYear }}年{{ calMonth+1 }}月</span>
                                     <button @click="calMonth++" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&gt;</button>
+                                </div>
+                                <div class="flex gap-1 mb-2">
+                                    <button @click="selectAllDatesInRange" class="text-[10px] px-2 py-1 bg-blue-50 text-blue-600 rounded hover:bg-blue-100">全选当月</button>
+                                    <button @click="clearSelectedDates" class="text-[10px] px-2 py-1 bg-gray-50 text-gray-500 rounded hover:bg-gray-100">清除</button>
+                                    <button v-if="eSelectedDates.size>1" @click="applyMultiDateExport" class="text-[10px] px-2 py-1 bg-green-50 text-green-600 rounded hover:bg-green-100 font-semibold ml-auto">
+                                        确定（{{ eSelectedDates.size }}天）
+                                    </button>
                                 </div>
                                 <div class="grid grid-cols-7 gap-1 text-center text-xs mb-1">
                                     <div class="text-gray-400 font-medium">日</div>
@@ -3398,16 +3550,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                         <div v-if="!day" class="h-8"></div>
                                         <button v-else
                                                 :disabled="!day.hasData"
-                                                @click="pickDate(day.ymd)"
-                                                class="h-8 rounded text-xs transition"
+                                                @click="toggleDate(day.ymd)"
+                                                class="h-8 rounded text-xs transition relative"
                                                 :class="day.hasData
-                                                    ? (day.ymd === eDate ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-700 hover:bg-blue-200 cursor-pointer')
+                                                    ? (day.ymd === eDate ? 'bg-blue-600 text-white' : (eSelectedDates.has(day.ymd) ? 'bg-blue-500 text-white' : 'bg-blue-100 text-blue-700 hover:bg-blue-200 cursor-pointer'))
                                                     : 'text-gray-300 cursor-not-allowed'">
                                             {{ day.d }}
                                         </button>
                                     </template>
                                 </div>
-                                <div class="text-[10px] text-gray-400 mt-2 text-center">蓝色 = 有数据，灰色 = 无数据</div>
+                                <div class="text-[10px] text-gray-400 mt-2 text-center">蓝色 = 有数据，深蓝 = 已选中</div>
                             </div>
                         </div>
                     </label>
@@ -3416,6 +3568,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
                         <option value="gift">仅一般礼物</option>
                         <option value="blindbox">仅盲盒</option>
                     </select>
+                    <label v-if="eMode==='all'" class="text-xs text-gray-500">
+                        排序
+                        <select v-model="eSort" class="border p-2 rounded text-sm">
+                            <option value="ts">按时间</option>
+                            <option value="uname">按用户</option>
+                            <option value="value">按价值</option>
+                        </select>
+                    </label>
                     <button @click="loadExport" class="bg-green-500 hover:bg-green-600 text-white px-5 py-2 rounded text-sm h-[38px]">生成</button>
                 </div>
                 <div class="flex flex-wrap gap-4 items-end">
@@ -3441,8 +3601,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <div id="capture" v-if="exportList.length" class="w-full overflow-x-auto">
                 <div class="capture-inner">
                 <div class="text-center text-gray-400 text-xs mb-3">
-                    <span class="font-semibold">{{ eName }}</span> ·
-                    {{ eDate }} · 礼物投喂明细
+                    <span class="font-semibold">{{ eMode==='all' ? '所有人' : eName }}</span> ·
+                    {{ eDateLabel }} · 礼物投喂明细
                     <span v-if="eType==='gift'">（一般礼物）</span>
                     <span v-else-if="eType==='blindbox'">（盲盒）</span>
                 </div>
@@ -4828,10 +4988,21 @@ createApp({
         const errRanking = ref('');
 
         // Export
+        const eMode = ref('single');
         const eUid = ref(0);
         const eName = ref('');
         const eDate = ref(new Date().toISOString().slice(0,10));
+        const eDateLabel = Vue.computed(() => {
+            if (eSelectedDates.value.size > 1) {
+                const arr = [...eSelectedDates.value].sort();
+                return arr[0] + ' ~ ' + arr[arr.length-1] + ` (${arr.length}天)`;
+            }
+            return eDate.value;
+        });
+        const eSelectedDates = ref(new Set());
+        const eAllUserDates = ref([]);
         const eType = ref('all');
+        const eSort = ref('ts');
         const ePerCol = ref(6);
         const eColWidth = ref(340);
         const exportList = ref([]);
@@ -5223,10 +5394,14 @@ createApp({
             exportDates.value = [];
             exportDatesSet.value = new Set();
             errExport.value = '';
+            eMode.value = 'single';
             eUid.value = 0;
             eName.value = '';
             eDate.value = new Date().toISOString().slice(0,10);
+            eSelectedDates.value = new Set();
+            eAllUserDates.value = [];
             eType.value = 'all';
+            eSort.value = 'ts';
             ePerCol.value = 6;
             eColWidth.value = 340;
             showCalendar.value = false;
@@ -5567,26 +5742,77 @@ createApp({
 
         // ── Export ──
         async function loadUserDates() {
-            if (!eUid.value) return;
             const roomId = selectedRoom.value?.room_id;
             if (!roomId) return;
+
+            if (eMode.value === 'all') {
+                // 加载所有人有数据的日期
+                try {
+                    const res = await fetch(`/api/rooms/${roomId}/all_dates`);
+                    if (!res.ok) return;
+                    const arr = await res.json();
+                    eAllUserDates.value = arr;
+                    exportDatesSet.value = new Set(arr);
+                } catch(e) { /* ignore */ }
+                return;
+            }
+
+            if (!eUid.value) return;
             try {
                 const res = await fetch(`/api/rooms/${roomId}/user_dates?uid=${eUid.value}`);
                 if (!res.ok) return;
                 const arr = await res.json();
                 exportDates.value = arr;
                 exportDatesSet.value = new Set(arr);
-                // 如果有数据日期，默认选第一个
-                if (arr.length && !exportList.value.length) {
-                    // 不自动切换，让用户自己选
-                }
             } catch(e) { /* ignore */ }
+        }
+        function onModeChange() {
+            showCalendar.value = false;
+            exportList.value = [];
+            errExport.value = '';
+            eSelectedDates.value = new Set([new Date().toISOString().slice(0,10)]);
+            eDate.value = new Date().toISOString().slice(0,10);
+            loadUserDates();
         }
         function onUidInput() {
             showCalendar.value = false;
             exportList.value = [];
             errExport.value = '';
             loadUserDates();
+        }
+        function toggleDate(ymd) {
+            if (eMode.value === 'single') {
+                // 单用户模式：单选的原有行为
+                eDate.value = ymd;
+                showCalendar.value = false;
+                loadExport();
+                return;
+            }
+            // 多选模式
+            const s = new Set(eSelectedDates.value);
+            if (s.has(ymd)) {
+                s.delete(ymd);
+            } else {
+                s.add(ymd);
+            }
+            eSelectedDates.value = s;
+            if (s.size === 1) {
+                eDate.value = [...s][0];
+            }
+        }
+        function selectAllDatesInRange() {
+            const s = new Set(eSelectedDates.value);
+            calDays.value.forEach(day => {
+                if (day && day.hasData) s.add(day.ymd);
+            });
+            eSelectedDates.value = s;
+        }
+        function clearSelectedDates() {
+            eSelectedDates.value = new Set();
+        }
+        function applyMultiDateExport() {
+            showCalendar.value = false;
+            loadExport();
         }
         function pickDate(ymd) {
             eDate.value = ymd;
@@ -5596,9 +5822,49 @@ createApp({
         async function loadExport() {
             errExport.value = '';
             exportList.value = [];
-            if (!eUid.value || !eDate.value) { errExport.value = '请填写 UID 和日期'; return; }
             const roomId = selectedRoom.value?.room_id;
             if (!roomId) return;
+
+            if (eMode.value === 'all') {
+                // 所有人模式
+                let dateFrom = '', dateTo = '';
+                const sel = [...eSelectedDates.value].sort();
+                if (sel.length === 1) {
+                    dateFrom = sel[0];
+                    dateTo = sel[0];
+                } else if (sel.length > 1) {
+                    dateFrom = sel[0];
+                    dateTo = sel[sel.length-1];
+                } else {
+                    errExport.value = '请至少选择一个日期';
+                    return;
+                }
+                try {
+                    const params = new URLSearchParams({ gift_type: eType.value, sort: eSort.value });
+                    if (dateFrom) params.set('date_from', dateFrom);
+                    if (dateTo) params.set('date_to', dateTo);
+                    const res = await fetch(`/api/rooms/${roomId}/export_all?${params}`);
+                    if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
+                    const data = await res.json();
+                    exportList.value = (data || []).map((item, idx) => ({
+                        ...item,
+                        id: item.id || idx,
+                        gift_num: item.gift_num || 0,
+                        price: item.actual_value || 0,
+                        ts: typeof item.ts === 'number' ? item.ts : 0,
+                        avatar: item.avatar || '',
+                        guard_level: item.guard_level || 0,
+                        gift_icon: item.gift_icon || '',
+                    }));
+                    if (!exportList.value.length) {
+                        errExport.value = '所选日期范围内无送礼记录';
+                    }
+                } catch(e) { errExport.value = '加载失败: ' + e.message; }
+                return;
+            }
+
+            // 单用户模式
+            if (!eUid.value || !eDate.value) { errExport.value = '请填写 UID 和日期'; return; }
             try {
                 const res = await fetch(`/api/rooms/${roomId}/user_gifts?uid=${eUid.value}&date=${eDate.value}&gift_type=${eType.value}`);
                 if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
@@ -5682,10 +5948,12 @@ createApp({
             }
         }
         function gotoExport(uid, uname) {
+            eMode.value = 'single';
             eUid.value = uid;
             eName.value = uname || '';
             roomSubTab.value = 'export';
             showCalendar.value = false;
+            eSelectedDates.value = new Set([new Date().toISOString().slice(0,10)]);
             exportDates.value = [];
             exportList.value = [];
             errExport.value = '';
@@ -7171,7 +7439,9 @@ createApp({
                 openAddUser, editUser, saveUserForm, deleteUser, toggleUserRoom,
                 rStart, rEnd, rType, ranking, errRanking, loadRanking,
                 eUid, eName, eDate, eType, ePerCol, eColWidth, exportList, exportDates, exportCols, errExport,
-                loadExport, gotoExport, loadUserDates, onUidInput, pickDate, captureExport,
+                loadExport, gotoExport, loadUserDates, onUidInput, onModeChange,
+                toggleDate, selectAllDatesInRange, clearSelectedDates, applyMultiDateExport,
+                pickDate, captureExport,
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
