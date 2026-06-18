@@ -5012,7 +5012,8 @@ createApp({
             if (arr.length > 1) {
                 return arr[0] + ' ~ ' + arr[arr.length-1] + ` (${arr.length}天)`;
             }
-            return arr[0] || eDate.value;
+            if (arr.length === 1) return arr[0];
+            return '请选择日期';
         });
         const eAllUserDates = ref([]);
         const eType = ref('all');
@@ -5784,7 +5785,7 @@ createApp({
             showCalendar.value = false;
             exportList.value = [];
             errExport.value = '';
-            eSelectedDates.value = [new Date().toISOString().slice(0,10)];
+            eSelectedDates.value = eModeAll.value ? [] : [new Date().toISOString().slice(0,10)];
             eDate.value = new Date().toISOString().slice(0,10);
             loadUserDates();
         }
@@ -5904,25 +5905,43 @@ createApp({
             const el = document.getElementById('capture');
             if (!el) return;
             if (typeof window.modernScreenshot === 'undefined') { alert('截图库加载中，请稍后重试'); return; }
+            // 0. 先确保原 DOM 所有图片已加载完成
+            const origImgs = Array.from(el.querySelectorAll('img'));
+            await Promise.all(origImgs.map(img => {
+                if (img.complete && img.naturalWidth > 0) return Promise.resolve();
+                return new Promise(resolve => { img.onload = resolve; img.onerror = resolve; });
+            }));
+            // 多等一帧让浏览器完成布局
+            await new Promise(r => requestAnimationFrame(r));
+
             // 1. 【精准测量】在克隆前拿到原 DOM 真实内容尺寸
-            //    以 capture-grid（多列网格）为基准，避免离屏后 Flex 无限拉伸
             const innerGrid = el.querySelector('.capture-grid') || el.querySelector('.capture-inner') || el;
             const targetWidth = innerGrid.scrollWidth;
             const targetHeight = el.scrollHeight;
+
             // 2. 离屏克隆
             const clone = el.cloneNode(true);
-            // 3. 在挂载前给所有 img 补上 crossorigin
+
+            // 3. 在挂载前给所有 img 补上 crossorigin，确保 Canvas 可读
             clone.querySelectorAll('img').forEach(img => {
-                img.setAttribute('crossorigin', 'anonymous');
+                // 如果是已通过 proxy 加载的本地图片，不需要 crossorigin
+                const src = img.getAttribute('src') || '';
+                if (src.startsWith('/api/proxy_image')) {
+                    // 跳过已缓存的本地代理图片
+                } else {
+                    img.setAttribute('crossorigin', 'anonymous');
+                }
             });
-            // 4. 锁定克隆节点宽高，防止离屏 fixed 容器中无限拉伸/坍塌导致黑边
+
+            // 4. 锁定克隆节点宽高
             clone.style.width = targetWidth + 'px';
             clone.style.minWidth = targetWidth + 'px';
             clone.style.maxWidth = targetWidth + 'px';
             clone.style.overflow = 'visible';
             clone.style.overflowX = 'visible';
             clone.style.maxHeight = 'none';
-            // 5. 挂载到离屏容器 + 复制 body className 保留 Tailwind 字体上下文
+
+            // 5. 挂载到离屏容器
             const container = document.createElement('div');
             container.style.position = 'fixed';
             container.style.left = '-9999px';
@@ -5932,27 +5951,39 @@ createApp({
             container.className = document.body.className;
             container.appendChild(clone);
             document.body.appendChild(container);
-            // 6. 等待所有图片加载
+
+            // 6. 等待克隆中的所有图片完全加载
             await Promise.all(Array.from(clone.querySelectorAll('img')).map(img => {
+                // 强制重新加载（克隆后浏览器可能用缓存，但 crossorigin 变化需要重载）
                 if (img.complete && img.naturalWidth > 0) return Promise.resolve();
-                return new Promise(resolve => { img.onload = resolve; img.onerror = resolve; });
+                return new Promise(resolve => {
+                    let done = false;
+                    img.onload = () => { if (!done) { done = true; resolve(); } };
+                    img.onerror = () => { if (!done) { done = true; resolve(); } };
+                    // 超时保护：5秒后无论如何继续
+                    setTimeout(() => { if (!done) { done = true; resolve(); } }, 5000);
+                });
             }));
-            // 7. 等一帧完成布局重排与字体渲染
+
+            // 7. 等两帧完成布局重排与字体/图片渲染
             await new Promise(r => requestAnimationFrame(r));
+            await new Promise(r => requestAnimationFrame(r));
+            // 额外加 200ms 确保 modernScreenshot 内部也完成
+            await new Promise(r => setTimeout(r, 200));
+
             try {
-                // 8. modern-screenshot：基于 SVG foreignObject 原生渲染
-                //    完美继承 CSS truncate/Flex/毛玻璃，100% 像素级还原
                 const dataUrl = await window.modernScreenshot.domToPng(clone, {
                     scale: 2,
                     backgroundColor: null,
                     width: targetWidth,
                     height: targetHeight,
                     features: {
-                        router: false,  // 关闭路由防错，提升速度
+                        router: false,
                     },
                 });
                 const link = document.createElement('a');
-                link.download = `${eName.value || eUid.value}_${eDate.value}_礼物明细.png`;
+                const dateStr = eDateLabel.value || eDate.value;
+                link.download = `${eName.value || (eModeAll.value ? '所有人' : eUid.value)}_${dateStr}_礼物明细.png`;
                 link.href = dataUrl;
                 link.click();
             } catch(e) {
