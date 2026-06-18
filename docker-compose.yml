@@ -22,3 +22,19 @@ services:
       - TZ=Asia/Shanghai
       # 容器内部监听端口，与 ports 右侧值保持一致
       - AYABOT_PORT=19810
+
+  # ──────────────────────────────────────────────
+  #  本地 T2I 服务（可选）
+  #  提供 HTML→图片渲染，替代 soulter.top 外部服务
+  #  启动前先执行: docker compose build t2i-local
+  #  然后在 AstrBot 插件中将 t2i_mode 设为 local
+  # ──────────────────────────────────────────────
+  t2i-local:
+    build: ./t2i-local
+    container_name: t2i-local
+    restart: unless-stopped
+    ports:
+      - "6199:6199"
+    # 如果和 AstrBot 在同一个 Docker 网络，可用容器名访问
+    # networks:
+    #   - astrbot_network
