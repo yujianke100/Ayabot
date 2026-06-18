@@ -147,6 +147,7 @@ class WebUIConfig:
     session_timeout: int
     title: str
     bot_name: str = "ayabot"
+    api_token: str = ""
 
 
 @dataclass(slots=True)
@@ -356,6 +357,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             session_timeout=int(web_ui.get("session_timeout", 3600)),
             title=str(web_ui.get("title", "Ayabot")),
             bot_name=str(web_ui.get("bot_name", "bot")),
+            api_token=str(web_ui.get("api_token", "")),
         ),
         llm=LLMConfig(
             enabled=bool(llm.get("enabled", False)),

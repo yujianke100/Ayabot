@@ -54,6 +54,8 @@ _LLM_CONFIG_DICT: dict[str, Any] = {}
 _CONFIG_YAML_PATH: str = "config.yaml"
 # 房间状态持久化文件（记录哪些房间在重启前是启动的）
 _ROOM_STATES_PATH: str = "data/room_states.json"
+# 外部 API Token（用于 astrbot 插件等第三方查询）
+_API_TOKEN: str = ""
 
 
 def _save_room_states() -> None:
@@ -95,7 +97,7 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
         config: AppConfig 对象
         config_path: 配置文件的实际路径（用于解析相对路径）
     """
-    global AUTH_USER, AUTH_PASS, _SESSION_TIMEOUT, _HTTP_HOST, _HTTP_PORT, _DB_PATH, _LLM_CONFIG_DICT, _CONFIG_YAML_PATH, _ROOMS_BASE_DIR
+    global AUTH_USER, AUTH_PASS, _SESSION_TIMEOUT, _HTTP_HOST, _HTTP_PORT, _DB_PATH, _LLM_CONFIG_DICT, _CONFIG_YAML_PATH, _ROOMS_BASE_DIR, _API_TOKEN
     if config is None:
         _fallback_read_config()
         return
@@ -107,6 +109,7 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
     _DB_PATH = config.storage.sqlite_path
     if not os.path.isabs(_DB_PATH):
         _DB_PATH = str(Path(config_path).parent / _DB_PATH)
+    _API_TOKEN = config.web_ui.api_token
     _LLM_CONFIG_DICT.update({
         "enabled": config.llm.enabled,
         "provider": config.llm.provider,
@@ -141,7 +144,7 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
 
 
 def _fallback_read_config() -> None:
-    global _DB_PATH, AUTH_USER, AUTH_PASS, _CONFIG_YAML_PATH, _LLM_CONFIG_DICT, _ROOMS_BASE_DIR
+    global _DB_PATH, AUTH_USER, AUTH_PASS, _CONFIG_YAML_PATH, _LLM_CONFIG_DICT, _ROOMS_BASE_DIR, _API_TOKEN
     _cfg_path = Path("config.yaml")
     if _cfg_path.exists():
         _raw = yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
@@ -153,6 +156,7 @@ def _fallback_read_config() -> None:
             AUTH_USER = web_ui["username"]
         if web_ui.get("password"):
             AUTH_PASS = web_ui["password"]
+        _API_TOKEN = str(web_ui.get("api_token", ""))
     _CONFIG_YAML_PATH = str(_cfg_path.resolve())
     _ROOMS_BASE_DIR = str(Path(_CONFIG_YAML_PATH).parent.resolve())
     set_rooms_base_dir(_ROOMS_BASE_DIR)
@@ -451,7 +455,7 @@ async def _auth_middleware(request: Request, call_next):
 
     # Allow login page and auth endpoint without session
     path = request.url.path
-    if path in ("/", "/api/login", "/favicon.ico"):
+    if path in ("/", "/api/login", "/favicon.ico") or path.startswith("/api/external/"):
         return await call_next(request)
 
     # API paths need auth
@@ -2301,6 +2305,132 @@ async def api_room_danmaku_clear_dates(room_id: str, date_from: str = "", date_t
         store.close()
         return {"deleted": count}
     except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+# ══════════════════════════════════════════════════════════════
+#  外部 API — 供 AstrBot 插件等第三方查询（Token 认证）
+# ══════════════════════════════════════════════════════════════
+
+
+def _verify_api_token(request: Request) -> bool:
+    """验证外部 API Token（查询参数或 Authorization header 均可）。"""
+    token = request.query_params.get("token", "") or request.headers.get("Authorization", "").replace("Bearer ", "")
+    return bool(_API_TOKEN and token == _API_TOKEN)
+
+
+@app.get("/api/external/user_stats")
+async def api_external_user_stats(
+    request: Request,
+    room_id: str = "",
+    uid: int = 0,
+    period: str = "all",
+):
+    """
+    外部查询接口：获取用户指定时间范围的礼物/盲盒统计。
+    
+    Args:
+        room_id: 房间号（多房间模式必填）
+        uid: B站 UID
+        period: 时间范围 today|week|month|all
+    
+    需要 Token 认证：?token=xxx 或 Authorization: Bearer xxx
+    """
+    if not _verify_api_token(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    if not uid:
+        return JSONResponse({"error": "uid is required"}, status_code=400)
+
+    # 确定数据库路径
+    if room_id:
+        db_path = _room_db_path(room_id)
+    else:
+        db_path = Path(_DB_PATH)
+
+    if not db_path.exists():
+        return JSONResponse({"error": "room data not found"}, status_code=404)
+
+    try:
+        now = datetime.datetime.now()
+        ts_now = int(now.timestamp())
+
+        if period == "today":
+            start_ts = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+            end_ts = int(now.replace(hour=23, minute=59, second=59, microsecond=999999).timestamp())
+        elif period == "week":
+            # 周一为每周第一天
+            weekday = now.weekday()
+            monday = now - datetime.timedelta(days=weekday)
+            start_ts = int(monday.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+            end_ts = ts_now
+        elif period == "month":
+            start_ts = int(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
+            end_ts = ts_now
+        else:  # all
+            start_ts = 0
+            end_ts = ts_now
+
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+
+        # 通用礼物统计（含盲盒）
+        gift_rows = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(gift_num), 0) as total_gift_count,
+                COALESCE(SUM(actual_value), 0) as total_value,
+                COUNT(1) as total_events
+            FROM gift_events
+            WHERE uid = ? AND ts >= ? AND ts <= ?
+            """,
+            (uid, start_ts, end_ts),
+        ).fetchone()
+
+        # 盲盒统计
+        blind_rows = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(gift_num), 0) as blind_count,
+                COALESCE(SUM(blind_box_cost), 0) as blind_cost,
+                COALESCE(SUM(actual_value), 0) as blind_actual,
+                COALESCE(SUM(profit_value), 0) as blind_profit
+            FROM gift_events
+            WHERE uid = ? AND ts >= ? AND ts <= ? AND is_blind_box = 1
+            """,
+            (uid, start_ts, end_ts),
+        ).fetchone()
+
+        # 获取用户信息
+        user_row = conn.execute(
+            "SELECT uname FROM gift_events WHERE uid = ? LIMIT 1",
+            (uid,),
+        ).fetchone()
+
+        conn.close()
+
+        uname = user_row["uname"] if user_row else f"UID:{uid}"
+
+        # actual_value 单位是角，转换为元
+        return {
+            "ok": True,
+            "uid": uid,
+            "uname": uname,
+            "period": period,
+            "gift": {
+                "total_events": int(gift_rows["total_events"]),
+                "total_gift_count": int(gift_rows["total_gift_count"]),
+                "total_value_yuan": round(int(gift_rows["total_value"]) / 10.0, 2),
+            },
+            "blindbox": {
+                "count": int(blind_rows["blind_count"]),
+                "cost_yuan": round(int(blind_rows["blind_cost"]) / 10.0, 2),
+                "actual_yuan": round(int(blind_rows["blind_actual"]) / 10.0, 2),
+                "profit_yuan": round(int(blind_rows["blind_profit"]) / 10.0, 2),
+            },
+        }
+    except Exception as exc:
+        logger.exception("external user_stats failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
