@@ -5173,11 +5173,34 @@ createApp({
             return cells;
         });
 
-        // 手动分列计算（仅分列，不排序）
+        // 手动分列计算
         const exportCols = Vue.computed(() => {
             let items = exportList.value;
             const perCol = Math.max(1, ePerCol.value);
             if (!items.length) return [];
+
+            // 排序（按当前选中的排序规则）
+            const s = eSort.value;
+            if (s === 'uname') {
+                items = [...items].sort((a, b) => {
+                    // 大航海优先
+                    const g = (b.guard_level || 0) - (a.guard_level || 0);
+                    if (g) return g;
+                    const n = (a.uname || '').localeCompare(b.uname || '');
+                    if (n) return n;
+                    return (b.actual_value || 0) - (a.actual_value || 0);
+                });
+            } else if (s === 'value') {
+                items = [...items].sort((a, b) => {
+                    const v = (b.actual_value || 0) - (a.actual_value || 0);
+                    if (v) return v;
+                    const g = (b.guard_level || 0) - (a.guard_level || 0);
+                    if (g) return g;
+                    return (a.uname || '').localeCompare(b.uname || '');
+                });
+            } else {
+                items = [...items].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+            }
 
             // 合并相同礼物模式
             if (eMergeGifts.value) {
@@ -5944,37 +5967,9 @@ createApp({
             errExport.value = '';
             loadUserDates();
         }
-        // 排序辅助函数
-        //   按时间: ts 升序
-        //   按用户: uname 字典序，同用户按价值降序
-        //   按价值: 价值降序，同价值大航海优先（guard_level 降序），再按 uname
-        function applySort(items, s) {
-            if (!items || !items.length) return items;
-            if (s === 'uname') {
-                return [...items].sort((a, b) => {
-                    const n = (a.uname || '').localeCompare(b.uname || '');
-                    if (n) return n;
-                    return (b.actual_value || 0) - (a.actual_value || 0);
-                });
-            } else if (s === 'value') {
-                return [...items].sort((a, b) => {
-                    const v = (b.actual_value || 0) - (a.actual_value || 0);
-                    if (v) return v;
-                    const g = (b.guard_level || 0) - (a.guard_level || 0);
-                    if (g) return g;
-                    return (a.uname || '').localeCompare(b.uname || '');
-                });
-            } else {
-                return [...items].sort((a, b) => (a.ts || 0) - (b.ts || 0));
-            }
-        }
-
-        // 排序切换时重新排序
-        Vue.watch(eSort, () => {
-            const items = exportList.value;
-            if (!items.length) return;
-            exportList.value = applySort(items, eSort.value);
-        });
+        // 排序辅助函数（已迁移到 exportCols computed 中）
+        // 保留空函数供 watch 调用时安全
+        function applySort(items, s) { return items; }
 
         function toggleDate(ymd) {
             // 多选模式（单用户和所有人模式都可以多选）
@@ -6046,7 +6041,6 @@ createApp({
                         guard_level: item.guard_level || 0,
                         gift_icon: item.gift_icon || '',
                     }));
-                    exportList.value = applySort(exportList.value, eSort.value);
                     if (!exportList.value.length) {
                         errExport.value = '所选日期范围内无送礼记录';
                     }
@@ -6087,7 +6081,6 @@ createApp({
                     guard_level: item.guard_level || 0,
                     gift_icon: item.gift_icon || '',
                 }));
-                exportList.value = applySort(exportList.value, eSort.value);
                 if (exportList.value.length) {
                     eName.value = exportList.value[0].uname || '';
                 } else {
