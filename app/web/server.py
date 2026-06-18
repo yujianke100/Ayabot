@@ -2865,8 +2865,7 @@ async def api_external_user_stats(
         except Exception:
             pass  # danmaku_log 表可能不存在
 
-        # 获取用户信息
-        # 获取用户信息（uname + avatar）
+        # 获取用户信息（uname + avatar + guard_level）
         user_row = conn.execute(
             """
             SELECT uname,
@@ -2874,9 +2873,21 @@ async def api_external_user_stats(
                        json_extract(raw_json, '$.sender_uinfo.base.face'),
                        json_extract(raw_json, '$.face'),
                        ''
-                   ) as avatar
+                   ) as avatar,
+                   COALESCE(
+                       json_extract(raw_json, '$.sender_uinfo.guard.level'),
+                       json_extract(raw_json, '$.sender_uinfo.medal.guard_level'),
+                       0
+                   ) as guard_level
             FROM gift_events WHERE uid = ? AND raw_json IS NOT NULL AND raw_json != ''
-            ORDER BY ts DESC LIMIT 1
+            ORDER BY
+                CASE
+                    WHEN json_extract(raw_json, '$.sender_uinfo.guard.level') IS NOT NULL AND json_extract(raw_json, '$.sender_uinfo.guard.level') > 0 THEN 0
+                    WHEN json_extract(raw_json, '$.sender_uinfo.medal.guard_level') IS NOT NULL AND json_extract(raw_json, '$.sender_uinfo.medal.guard_level') > 0 THEN 1
+                    ELSE 2
+                END,
+                ts DESC
+            LIMIT 1
             """,
             (uid,),
         ).fetchone()
@@ -2885,6 +2896,7 @@ async def api_external_user_stats(
 
         uname = user_row["uname"] if user_row else f"UID:{uid}"
         avatar = user_row["avatar"] if user_row and user_row["avatar"] else ""
+        guard_level = int(user_row["guard_level"]) if user_row and user_row["guard_level"] else 0
 
         # DB 存储单位是 电池（金瓜子÷100），直接使用
         def _to_battery(v: int) -> int:
@@ -2931,6 +2943,7 @@ async def api_external_user_stats(
             "uid": uid,
             "uname": uname,
             "avatar": avatar,
+            "guard_level": guard_level,
             "period": period,
             "danmaku_count": danmaku_count,
             "gift": {
