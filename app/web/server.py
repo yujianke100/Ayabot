@@ -4433,12 +4433,38 @@ INDEX_HTML = r"""<!DOCTYPE html>
                             <p v-if="updateData.hasUpdate" class="text-sm text-gray-600">
                                 最新版本：<span class="font-mono font-bold text-green-600">{{ updateData.latest }}</span>
                             </p>
-                            <div v-if="updateData.hasUpdate" class="pt-2">
-                                <a :href="updateData.url" target="_blank" class="inline-block bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded text-sm">前往 GitHub 下载</a>
+                            <div v-if="updateData.hasUpdate" class="pt-3 space-y-2">
+                                <a :href="updateData.url" target="_blank"
+                                   class="block w-full bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
+                                   📥 GitHub 下载
+                                </a>
+                                <a :href="updateData.mirrorUrl" target="_blank"
+                                   class="block w-full bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">
+                                   🇨🇳 国内镜像下载
+                                </a>
+                            </div>
+                            <div class="pt-3">
+                                <button @click="viewChangelog"
+                                        class="w-full bg-purple-50 hover:bg-purple-100 text-purple-600 font-medium px-4 py-2 rounded text-sm">
+                                    📝 查看更新日志
+                                </button>
                             </div>
                         </div>
                         <div class="pt-2">
                             <button @click="showUpdateModal = false" class="text-gray-400 hover:text-gray-600 text-sm">关闭</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 更新日志弹窗 -->
+                <div v-if="showChangelog" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+                    <div class="bg-white rounded-xl shadow-lg w-full max-w-lg mx-4 max-h-[70vh] flex flex-col" @click.stop>
+                        <div class="p-4 border-b flex items-center justify-between shrink-0">
+                            <h3 class="font-bold text-lg">📝 更新日志</h3>
+                            <button @click="showChangelog = false" class="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+                        </div>
+                        <div class="p-4 overflow-y-auto flex-1 text-sm leading-relaxed whitespace-pre-wrap"
+                             v-html="renderMarkdown(changelogContent)">
                         </div>
                     </div>
                 </div>
@@ -4636,6 +4662,58 @@ createApp({
         const updateChecking = ref(false);
         const updateError = ref('');
         const updateData = ref(null);
+        const showChangelog = ref(false);
+        const changelogContent = ref('');
+        async function viewChangelog() {
+            showChangelog.value = true;
+            if (!changelogContent.value) {
+                try {
+                    // 从 GitHub 获取当前版本的 tag 对应的 release body
+                    const verEl = document.querySelector('[data-ayabot-version]');
+                    const current = (verEl ? verEl.getAttribute('data-ayabot-version') : '0').replace(/^v/i, '');
+                    const r = await fetch(`https://api.github.com/repos/yujianke100/ayabot/releases/tags/v${current}`, {
+                        signal: AbortSignal.timeout(8000)
+                    });
+                    if (r.ok) {
+                        const j = await r.json();
+                        changelogContent.value = j.body || '*暂无更新日志*';
+                    } else {
+                        // 降级：请求 releases/latest
+                        const r2 = await fetch('https://api.github.com/repos/yujianke100/ayabot/releases/latest', {
+                            signal: AbortSignal.timeout(8000)
+                        });
+                        if (r2.ok) {
+                            const j2 = await r2.json();
+                            changelogContent.value = j2.body || '*暂无更新日志*';
+                        } else {
+                            changelogContent.value = '*无法加载更新日志*';
+                        }
+                    }
+                } catch(e) {
+                    changelogContent.value = '*加载失败: ' + e.message + '*';
+                }
+            }
+        }
+        function renderMarkdown(text) {
+            if (!text) return '';
+            return text
+                // 标题
+                .replace(/^#### (.*$)/gm, '<h4 class="font-bold text-sm mt-3 mb-1">$1</h4>')
+                .replace(/^### (.*$)/gm, '<h3 class="font-bold text-base mt-3 mb-1">$1</h3>')
+                .replace(/^## (.*$)/gm, '<h2 class="font-bold text-lg mt-4 mb-1">$1</h2>')
+                .replace(/^# (.*$)/gm, '<h1 class="font-bold text-xl mt-4 mb-1">$1</h1>')
+                // 粗体
+                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                // 行内代码
+                .replace(/`([^`]+)`/g, '<code class="bg-gray-100 px-1 rounded text-xs font-mono">$1</code>')
+                // 无序列表
+                .replace(/^- (.*$)/gm, '<li class="ml-4 list-disc">$1</li>')
+                // 链接
+                .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" class="text-blue-500 hover:underline">$1</a>')
+                // 换行
+                .replace(/\n\n/g, '</p><p class="my-2">')
+                .replace(/\n/g, '<br>');
+        }
         async function checkUpdate() {
             showUpdateModal.value = true;
             updateChecking.value = true;
@@ -4657,6 +4735,8 @@ createApp({
                     current: 'v' + current,
                     latest: 'v' + latest,
                     url: j.html_url || 'https://github.com/yujianke100/ayabot/releases',
+                    mirrorUrl: 'https://ghfast.top/https://github.com/yujianke100/ayabot/releases/latest/download/Ayabot-latest.exe',
+                    changelogUrl: 'https://github.com/yujianke100/ayabot/releases/tag/v' + latest,
                 };
             } catch(e) {
                 updateError.value = e.message || '网络错误，请稍后重试';
@@ -6806,7 +6886,7 @@ createApp({
             setTimeout(() => { applyTemplateMsg.value = ''; }, 5000);
         }
 
-        return {showUpdateModal, updateChecking, updateError, updateData, checkUpdate,
+        return {showUpdateModal, updateChecking, updateError, updateData, checkUpdate, viewChangelog, showChangelog, changelogContent, renderMarkdown,
                 loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
                 tab, userRole,
                 showUserMenu, showChangePwd, changePwdOld, changePwdNew, changePwdNewUser, changePwdMsg, changePwdOk, changingPwd,
