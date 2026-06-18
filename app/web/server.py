@@ -1652,16 +1652,11 @@ async def api_room_api_config(room_id: str, request: Request):
         base = f"{scheme}://{host}"
     api_url = f"{base}/api/external/user_stats?room_id={room_id}"
 
-    masked = ""
-    if api_token:
-        t = api_token
-        masked = t[:6] + "*" * (len(t) - 10) + t[-4:] if len(t) > 12 else "****"
-
     return {
         "ok": True,
         "api_enabled": api_enabled,
         "has_key": bool(api_token),
-        "key_masked": masked,
+        "full_key": api_token,
         "api_url": api_url,
     }
 
@@ -3986,14 +3981,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
                     <!-- 密钥 -->
                     <label class="text-xs text-gray-500 mt-3 block">API 密钥
-                        <div v-if="roomApiFullKey" class="flex items-center mt-1">
+                        <div class="flex items-center mt-1">
                             <input type="text" :value="roomApiFullKey" readonly class="border p-2 rounded-l w-full text-sm bg-gray-50 font-mono text-xs select-all">
                             <button @click="copyText(roomApiFullKey, 'apiMsg')" class="bg-gray-200 hover:bg-gray-300 px-3 py-2 rounded-r text-sm border-l-0" title="复制">📋</button>
                         </div>
-                        <div v-else class="flex items-center mt-1 gap-2">
-                            <input type="text" :value="roomApiKeyMasked || '(无密钥)'" readonly class="border p-2 rounded w-full text-sm bg-gray-50 font-mono text-xs flex-1">
-                            <span class="text-xs text-gray-400 whitespace-nowrap">点击下方「重新生成」获取完整密钥</span>
-                        </div>
+                        <span class="text-xs text-gray-400">点击 📋 复制密钥</span>
                     </label>
 
                     <!-- 操作按钮 -->
@@ -4586,8 +4578,6 @@ createApp({
         // Room API config
         const roomApiEnabled = ref(false);
         const roomApiUrl = ref('');
-        const roomApiKeyMasked = ref('');
-        const roomApiHasKey = ref(false);
         const roomApiFullKey = ref('');
         const roomApiBusy = ref(false);
         const apiMsg = ref('');
@@ -5380,10 +5370,7 @@ createApp({
                 const data = await res.json();
                 roomApiEnabled.value = data.api_enabled;
                 roomApiUrl.value = data.api_url || '';
-                roomApiKeyMasked.value = data.key_masked || '';
-                roomApiHasKey.value = data.has_key;
-                // 不在编辑页面上保留完整密钥（切换房间/刷新页面后清除）
-                // 用户需要重新生成来获取完整密钥
+                roomApiFullKey.value = data.full_key || '';
             } catch(e) {}
         }
 
@@ -5398,12 +5385,10 @@ createApp({
                 const data = await res.json();
                 if (data.ok) {
                     roomApiEnabled.value = data.api_enabled;
-                    roomApiKeyMasked.value = data.key_masked || '';
-                    roomApiHasKey.value = data.has_key;
                     apiMsg.value = data.message;
                     apiMsgOk.value = true;
-                    // 如果开启但没有完整密钥，刷新配置
-                    if (!data.has_key || !roomApiFullKey.value) {
+                    // 如果开启了且没完整密钥，刷新配置
+                    if (data.api_enabled && !roomApiFullKey.value) {
                         await loadRoomApiConfig();
                     }
                 } else {
@@ -5427,8 +5412,6 @@ createApp({
                 const res = await fetch(`/api/rooms/${rid}/api_regenerate`, { method: 'POST' });
                 const data = await res.json();
                 if (data.ok) {
-                    roomApiKeyMasked.value = data.key_masked;
-                    roomApiHasKey.value = true;
                     roomApiEnabled.value = true;
                     roomApiFullKey.value = data.full_key;
                     apiMsg.value = data.message;
@@ -6838,7 +6821,7 @@ createApp({
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
-                roomApiEnabled, roomApiUrl, roomApiKeyMasked, roomApiHasKey, roomApiFullKey, roomApiBusy,
+                roomApiEnabled, roomApiUrl, roomApiFullKey, roomApiBusy,
                 apiMsg, apiMsgOk, loadRoomApiConfig, toggleRoomApi, regenerateRoomApiKey, copyText,
                 danmakuRows, danmakuErr, danmakuOffset, danmakuLimit, danmakuTotal, danmakuPage,
                 loadDanmakuLog, clearDanmakuLog, fmtDanmakuTime, loadDmDates, dmToggleDate, dmExportSelected, dmCalDays, dmCalYear, dmCalMonth, dmShowCal, dmSelectedDates, dmDates, dmDatesSet, dmAsc,
