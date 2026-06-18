@@ -2446,15 +2446,17 @@ async def api_room_export_all(
     date_to: str = "",
     gift_type: str = "all",
     sort: str = "ts",
+    uid: int = 0,
 ):
     """
-    导出指定房间内所有用户在日期范围内的送礼明细（聚合排序版）。
-    
+    导出指定房间在日期范围内的送礼明细（聚合排序版）。
+
     Args:
         date_from: 起始日期 YYYY-MM-DD（留空不限）
         date_to: 结束日期 YYYY-MM-DD（留空不限）
         gift_type: all|gift|blindbox
         sort: ts|uname|value — 按时间/用户名/价值排序
+        uid: 指定用户 UID（0=所有人）
     """
     db_path = _room_db_path(room_id)
     if not db_path.exists():
@@ -2477,6 +2479,9 @@ async def api_room_export_all(
             conditions.append("is_blind_box = 0")
         elif gift_type == "blindbox":
             conditions.append("is_blind_box = 1")
+        if uid:
+            conditions.append("uid = ?")
+            params.append(uid)
 
         where = " AND ".join(conditions)
 
@@ -3661,7 +3666,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                     <span class="text-sm font-bold">{{ calYear }}年{{ calMonth+1 }}月</span>
                                     <button @click="calMonth++" type="button" class="px-2 py-1 hover:bg-gray-100 rounded text-sm">&gt;</button>
                                 </div>
-                                <div v-if="eModeAll" class="flex gap-1 mb-2">
+                                <div class="flex gap-1 mb-2">
                                     <button @click="selectAllDatesInRange" type="button" class="text-[10px] px-2 py-1 bg-blue-50 text-blue-600 rounded hover:bg-blue-100">全选当月</button>
                                     <button @click="clearSelectedDates" type="button" class="text-[10px] px-2 py-1 bg-gray-50 text-gray-500 rounded hover:bg-gray-100">清除</button>
                                     <button v-if="eSelectedDates.length>=1" @click="applyMultiDateExport" type="button" class="text-[10px] px-2 py-1 bg-green-50 text-green-600 rounded hover:bg-green-100 font-semibold ml-auto">
@@ -3700,7 +3705,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                         <option value="gift">仅一般礼物</option>
                         <option value="blindbox">仅盲盒</option>
                     </select>
-                    <label v-if="eModeAll" class="text-xs text-gray-500">
+                    <label class="text-xs text-gray-500">
                         排序
                         <select v-model="eSort" class="border p-2 rounded text-sm h-[34px] mt-0.5">
                             <option value="ts">按时间</option>
@@ -3739,12 +3744,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <!-- 精美数据展示区（水平可滚动，居中） -->
             <div id="capture" v-if="exportList.length" class="w-full overflow-x-auto">
                 <div class="capture-inner">
-                <div class="text-center text-gray-400 text-xs mb-3">
-                    <span class="font-semibold">{{ eModeAll ? '所有人' : eName }}</span> ·
-                    {{ eDateLabel }} · 礼物投喂明细
-                    <span v-if="eType==='gift'">（一般礼物）</span>
-                    <span v-else-if="eType==='blindbox'">（盲盒）</span>
-                </div>
+
                 <div class="capture-grid" :style="{ minWidth: exportCols.length * (eColWidth + 16) + 'px' }">
                     <div v-for="(col,cidx) in exportCols" :key="cidx" class="capture-col" :style="{ minWidth: eColWidth + 'px', maxWidth: eColWidth + 'px' }">
                         <div v-for="(item,idx2) in col" :key="item.id"
@@ -5955,15 +5955,7 @@ createApp({
             loadUserDates();
         }
         function toggleDate(ymd) {
-            if (!eModeAll.value) {
-                // 单用户模式：单选
-                eDate.value = ymd;
-                eSelectedDates.value = [ymd];
-                showCalendar.value = false;
-                loadExport();
-                return;
-            }
-            // 多选模式
+            // 多选模式（单用户和所有人模式都可以多选）
             const arr = eSelectedDates.value.slice();
             const idx = arr.indexOf(ymd);
             if (idx >= 0) {
@@ -6040,10 +6032,26 @@ createApp({
                 return;
             }
 
-            // 单用户模式
-            if (!eUid.value || !eDate.value) { errExport.value = '请填写 UID 和日期'; loadingExport.value = false; return; }
+            // 单用户模式（同样支持多选日期）
+            if (!eUid.value) { errExport.value = '请填写 UID'; loadingExport.value = false; return; }
+            const sel = eSelectedDates.value.slice().sort();
+            let dateFrom = '', dateTo = '';
+            if (sel.length === 1) {
+                dateFrom = sel[0];
+                dateTo = sel[0];
+            } else if (sel.length > 1) {
+                dateFrom = sel[0];
+                dateTo = sel[sel.length-1];
+            } else {
+                errExport.value = '请至少选择一个日期';
+                loadingExport.value = false;
+                return;
+            }
             try {
-                const res = await fetch(`/api/rooms/${roomId}/user_gifts?uid=${eUid.value}&date=${eDate.value}&gift_type=${eType.value}`);
+                const params = new URLSearchParams({ gift_type: eType.value, sort: eSort.value, uid: eUid.value });
+                if (dateFrom) params.set('date_from', dateFrom);
+                if (dateTo) params.set('date_to', dateTo);
+                const res = await fetch(`/api/rooms/${roomId}/export_all?${params}`);
                 if (!res.ok) { const txt = await res.text(); errExport.value = '请求失败: ' + txt.slice(0,80); loadingExport.value = false; return; }
                 const data = await res.json();
                 exportList.value = (data || []).map((item, idx) => ({
@@ -6059,7 +6067,7 @@ createApp({
                 if (exportList.value.length) {
                     eName.value = exportList.value[0].uname || '';
                 } else {
-                    errExport.value = '该用户当天无送礼记录';
+                    errExport.value = '该用户所选日期范围内无送礼记录';
                 }
             } catch(e) { errExport.value = '加载失败: ' + e.message; }
             loadingExport.value = false;
@@ -6147,7 +6155,8 @@ createApp({
                 });
                 const link = document.createElement('a');
                 const dateStr = eDateLabel.value || eDate.value;
-                link.download = `${eName.value || (eModeAll.value ? '所有人' : eUid.value)}_${dateStr}_礼物明细.png`;
+                const namePart = eModeAll.value ? '所有人' : (eName.value || eUid.value);
+                link.download = `${namePart}_${dateStr}_礼物明细.png`;
                 link.href = dataUrl;
                 link.click();
             } catch(e) {
