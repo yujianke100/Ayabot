@@ -2516,13 +2516,13 @@ async def api_external_user_stats(
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
 
-        # 通用礼物统计（含盲盒）
+        # 通用礼物统计（含盲盒）- 普通礼物的价值从 raw_json.total_coin 提取
         gift_rows = conn.execute(
             """
             SELECT
+                COUNT(1) as total_events,
                 COALESCE(SUM(gift_num), 0) as total_gift_count,
-                COALESCE(SUM(actual_value), 0) as total_value,
-                COUNT(1) as total_events
+                COALESCE(SUM(CASE WHEN is_blind_box=0 THEN CAST(json_extract(raw_json, '$.total_coin') AS INTEGER) / 100 ELSE actual_value END), 0) as total_value
             FROM gift_events
             WHERE uid = ? AND ts >= ? AND ts <= ?
             """,
@@ -2543,12 +2543,12 @@ async def api_external_user_stats(
             (uid, start_ts, end_ts),
         ).fetchone()
 
-        # 按礼物名称分组统计（所有礼物）
+        # 按礼物名称分组统计（普通礼物从 raw_json 提取 total_coin 作为价值）
         gift_detail_rows = conn.execute(
             """
             SELECT gift_name,
                    COALESCE(SUM(gift_num), 0) as total_num,
-                   COALESCE(SUM(actual_value), 0) as total_value
+                   COALESCE(SUM(CAST(json_extract(raw_json, '$.total_coin') AS INTEGER)), 0) / 100 as total_value
             FROM gift_events
             WHERE uid = ? AND ts >= ? AND ts <= ? AND is_blind_box = 0
             GROUP BY gift_name
