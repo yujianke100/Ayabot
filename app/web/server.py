@@ -2699,7 +2699,7 @@ async def api_external_user_stats(
             GROUP BY g.gift_name
             ORDER BY total_num DESC
             """,
-            (uid, start_ts, end_ts, uid, start_ts, end_ts),
+            (start_ts, end_ts, uid, start_ts, end_ts),
         ).fetchall()
 
         # 盲盒明细（从 raw_json 提取盲盒名称）
