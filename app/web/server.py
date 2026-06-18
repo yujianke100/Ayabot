@@ -2745,6 +2745,174 @@ async def api_external_clear_key():
     return {"ok": True, "message": "API Key 已清空，外部查询已禁用"}
 
 
+@app.get("/api/external/ranking")
+async def api_external_ranking(
+    request: Request,
+    room_id: str = "",
+    period: str = "all",
+    gift_type: str = "all",
+    limit: int = 20,
+):
+    """
+    外部查询接口：获取房间的送礼排行。
+    
+    Args:
+        room_id: 房间号
+        period: today|week|month|all
+        gift_type: all|gift|blindbox
+        limit: 返回条数（默认20，最大100）
+    
+    需要 Token 认证：?token=xxx
+    """
+    if not _verify_api_token(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not room_id:
+        return JSONResponse({"error": "room_id is required"}, status_code=400)
+
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return JSONResponse({"error": "room data not found"}, status_code=404)
+
+    try:
+        now = datetime.datetime.now()
+        ts_now = int(now.timestamp())
+        if period == "today":
+            start_ts = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+            end_ts = ts_now
+        elif period == "week":
+            weekday = now.weekday()
+            monday = now - datetime.timedelta(days=weekday)
+            start_ts = int(monday.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+            end_ts = ts_now
+        elif period == "month":
+            start_ts = int(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
+            end_ts = ts_now
+        else:
+            start_ts = 0
+            end_ts = ts_now
+
+        limit = min(max(limit, 1), 100)
+
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+
+        where = "ts >= ? AND ts <= ?"
+        params: list = [start_ts, end_ts]
+        if gift_type == "gift":
+            where += " AND is_blind_box = 0"
+        elif gift_type == "blindbox":
+            where += " AND is_blind_box = 1"
+
+        cur.execute(f"""
+            SELECT uid, uname,
+                   COALESCE(SUM(gift_num), 0) as total_count,
+                   COALESCE(SUM(CASE WHEN is_blind_box=0 THEN CAST(json_extract(raw_json, '$.total_coin') AS INTEGER) / 100 ELSE actual_value END), 0) as total_value,
+                   COALESCE(SUM(profit_value), 0) as total_profit
+            FROM gift_events
+            WHERE {where}
+            GROUP BY uid
+            ORDER BY total_value DESC
+            LIMIT ?
+        """, params + [limit])
+        rows = cur.fetchall()
+        conn.close()
+
+        ranking = []
+        for r in rows:
+            ranking.append({
+                "uid": int(r[0]),
+                "uname": str(r[1]),
+                "count": int(r[2]),
+                "value": int(r[3]),
+                "profit": int(r[4]),
+            })
+        return {"ok": True, "ranking": ranking, "total": len(ranking)}
+    except Exception as exc:
+        logger.exception("external ranking failed")
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/external/room_stats")
+async def api_external_room_stats(
+    request: Request,
+    room_id: str = "",
+    period: str = "all",
+):
+    """
+    外部查询接口：获取房间整体统计数据。
+    
+    Args:
+        room_id: 房间号
+        period: today|week|month|all
+    
+    需要 Token 认证：?token=xxx
+    """
+    if not _verify_api_token(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not room_id:
+        return JSONResponse({"error": "room_id is required"}, status_code=400)
+
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return JSONResponse({"error": "room data not found"}, status_code=404)
+
+    try:
+        now = datetime.datetime.now()
+        ts_now = int(now.timestamp())
+        if period == "today":
+            start_ts = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+            end_ts = ts_now
+        elif period == "week":
+            weekday = now.weekday()
+            monday = now - datetime.timedelta(days=weekday)
+            start_ts = int(monday.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+            end_ts = ts_now
+        elif period == "month":
+            start_ts = int(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
+            end_ts = ts_now
+        else:
+            start_ts = 0
+            end_ts = ts_now
+
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+
+        # 总览
+        overview = conn.execute("""
+            SELECT
+                COUNT(DISTINCT uid) as total_users,
+                COUNT(1) as total_events,
+                COALESCE(SUM(gift_num), 0) as total_gifts,
+                COALESCE(SUM(CASE WHEN is_blind_box=0 THEN CAST(json_extract(raw_json, '$.total_coin') AS INTEGER) / 100 ELSE actual_value END), 0) as total_value,
+                COALESCE(SUM(CASE WHEN is_blind_box=1 THEN 1 ELSE 0 END), 0) as blind_users,
+                COALESCE(SUM(CASE WHEN is_blind_box=1 THEN gift_num ELSE 0 END), 0) as blind_count,
+                COALESCE(SUM(CASE WHEN is_blind_box=1 THEN blind_box_cost ELSE 0 END), 0) as blind_cost,
+                COALESCE(SUM(CASE WHEN is_blind_box=1 THEN profit_value ELSE 0 END), 0) as blind_profit
+            FROM gift_events
+            WHERE ts >= ? AND ts <= ?
+        """, (start_ts, end_ts)).fetchone()
+
+        conn.close()
+
+        return {
+            "ok": True,
+            "period": period,
+            "overview": {
+                "total_users": int(overview["total_users"]),
+                "total_events": int(overview["total_events"]),
+                "total_gifts": int(overview["total_gifts"]),
+                "total_value": int(overview["total_value"]),
+                "blind_users": int(overview["blind_users"]),
+                "blind_count": int(overview["blind_count"]),
+                "blind_cost": int(overview["blind_cost"]),
+                "blind_profit": int(overview["blind_profit"]),
+            },
+        }
+    except Exception as exc:
+        logger.exception("external room_stats failed")
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @app.post("/api/external/api_domain")
 async def api_external_save_domain(request: Request):
     """保存 API 外部域名到配置文件并更新内存。"""
