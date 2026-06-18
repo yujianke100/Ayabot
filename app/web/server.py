@@ -457,9 +457,9 @@ async def _auth_middleware(request: Request, call_next):
     if _rate_limited(client_ip):
         return JSONResponse({"error": "rate limited"}, status_code=429)
 
-    # Allow login page and auth endpoint without session
+    # Allow login page, auth endpoint, and image proxy without session or rate limit
     path = request.url.path
-    if path in ("/", "/api/login", "/favicon.ico") or path.startswith("/api/external/"):
+    if path in ("/", "/api/login", "/favicon.ico") or path.startswith("/api/external/") or path.startswith("/api/proxy_image"):
         return await call_next(request)
 
     # API paths need auth
@@ -3414,8 +3414,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <div class="flex gap-2 items-center" @click.stop>
                     <button v-if="r.status !== 'running'"
                             @click="startRoom(r.room_id)"
-                            class="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded text-xs"
-                            v-show="userRole === 'admin'">启动</button>
+                            :disabled="startingRooms.has(r.room_id)"
+                            class="bg-green-500 hover:bg-green-600 disabled:bg-green-300 text-white px-3 py-1 rounded text-xs"
+                            v-show="userRole === 'admin'">{{ startingRooms.has(r.room_id) ? '启动中...' : '启动' }}</button>
                     <button v-if="r.status === 'running'"
                             @click="stopRoom(r.room_id)"
                             class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-xs"
@@ -3545,7 +3546,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                 <div v-if="eModeAll" class="flex gap-1 mb-2">
                                     <button @click="selectAllDatesInRange" type="button" class="text-[10px] px-2 py-1 bg-blue-50 text-blue-600 rounded hover:bg-blue-100">全选当月</button>
                                     <button @click="clearSelectedDates" type="button" class="text-[10px] px-2 py-1 bg-gray-50 text-gray-500 rounded hover:bg-gray-100">清除</button>
-                                    <button v-if="eSelectedDates.length>1" @click="applyMultiDateExport" type="button" class="text-[10px] px-2 py-1 bg-green-50 text-green-600 rounded hover:bg-green-100 font-semibold ml-auto">
+                                    <button v-if="eSelectedDates.length>=1" @click="applyMultiDateExport" type="button" class="text-[10px] px-2 py-1 bg-green-50 text-green-600 rounded hover:bg-green-100 font-semibold ml-auto">
                                         确定（{{ eSelectedDates.length }}天）
                                     </button>
                                 </div>
@@ -3592,8 +3593,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <button @click="loadExport" class="bg-green-500 hover:bg-green-600 text-white px-5 py-2 rounded text-sm h-[38px]">生成</button>
                 </div>
                 <div class="flex flex-wrap gap-4 items-end">
+                    <label class="text-xs text-gray-500 flex items-center gap-1.5 h-[38px]">
+                        <input type="checkbox" v-model="eMergeGifts" class="w-4 h-4">
+                        <span>合并相同礼物</span>
+                    </label>
                     <label class="text-xs text-gray-500">每列行数
-                        <input type="number" v-model.number="ePerCol" min="1" max="50" class="border p-2 rounded text-sm mt-1 w-20">
+                        <input type="number" v-model.number="ePerCol" min="1" max="50" class="border p-2 rounded text-sm mt-0.5 w-20">
                     </label>
                     <label class="text-xs text-gray-500 flex-1 min-w-[200px]">
                         单列宽度 <span class="text-sm font-mono ml-1">{{ eColWidth }}px</span>
@@ -3604,8 +3609,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <div v-if="errExport" class="text-red-500 text-sm mb-2">{{ errExport }}</div>
 
             <div v-if="exportList.length" class="text-center mb-4">
-                <button @click="captureExport" class="bg-purple-600 hover:bg-purple-700 text-white px-6 py-2.5 rounded-lg text-sm font-semibold shadow-md transition">
-                    📷 导出 PNG
+                <button @click="captureExport" :disabled="exporting"
+                        class="bg-purple-600 hover:bg-purple-700 disabled:bg-purple-300 text-white px-6 py-2.5 rounded-lg text-sm font-semibold shadow-md transition">
+                    {{ exporting ? '⏳ 导出中...' : '📷 导出 PNG' }}
                 </button>
                 <p class="text-xs text-gray-400 mt-2">所见即所得，完整捕获全部内容（不受滚动/遮挡影响）</p>
             </div>
@@ -3642,8 +3648,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                 <div class="flex items-center gap-1.5 mt-0.5 flex-wrap">
                                     <span class="text-xs text-white/80">投喂了 {{ item.gift_name }} × {{ item.gift_num }}</span>
                                     <span class="gift-value" v-if="item.actual_value">¥{{ Number(item.actual_value).toFixed(1) }}</span>
-                                    <span class="text-[10px] text-white/60" v-if="item.actual_value && item.gift_num > 1">(¥{{ Number(item.actual_value / item.gift_num).toFixed(2) }}/个)</span>
-                                    <span class="gift-time" v-if="item.ts">{{ fmtTime(item.ts) }}</span>
+                                    <span class="gift-time" v-if="item.ts && !eMergeGifts">{{ fmtDateTime(item.ts, eSelectedDates.length > 1) }}</span>
                                 </div>
                             </div>
                             <img v-if="item.gift_icon" :src="proxyImg(item.gift_icon)" class="gift-icon"
@@ -5018,9 +5023,11 @@ createApp({
         const eAllUserDates = ref([]);
         const eType = ref('all');
         const eSort = ref('ts');
+        const eMergeGifts = ref(false);
         const ePerCol = ref(6);
         const eColWidth = ref(340);
         const exportList = ref([]);
+        const exporting = ref(false);
         const exportDates = ref([]);
         const errExport = ref('');
 
@@ -5047,9 +5054,27 @@ createApp({
 
         // 手动分列计算
         const exportCols = Vue.computed(() => {
-            const items = exportList.value;
+            let items = exportList.value;
             const perCol = Math.max(1, ePerCol.value);
             if (!items.length) return [];
+
+            // 合并相同礼物模式
+            if (eMergeGifts.value) {
+                const merged = new Map();
+                for (const item of items) {
+                    const key = item.uid + '|' + item.gift_name;
+                    if (merged.has(key)) {
+                        const existing = merged.get(key);
+                        existing.gift_num += item.gift_num;
+                        existing.actual_value += item.actual_value;
+                        existing.ts = Math.max(existing.ts, item.ts);
+                    } else {
+                        merged.set(key, { ...item, id: key });
+                    }
+                }
+                items = [...merged.values()];
+            }
+
             const cols = [];
             for (let i = 0; i < items.length; i += perCol) {
                 cols.push(items.slice(i, i + perCol));
@@ -5228,6 +5253,7 @@ createApp({
             } catch(e) { newRoomAnchorName.value = '(查询失败)'; }
         });
         const restartingAll = ref(false);
+        const startingRooms = ref(new Set());
         const restartAllMsg = ref('');
         const restartAllOk = ref(false);
         const applyLlmTemplate = ref('');
@@ -5417,8 +5443,10 @@ createApp({
             eAllUserDates.value = [];
             eType.value = 'all';
             eSort.value = 'ts';
+            eMergeGifts.value = false;
             ePerCol.value = 6;
             eColWidth.value = 340;
+            exporting.value = false;
             showCalendar.value = false;
             roomConfig.value = null;
         }
@@ -5902,9 +5930,10 @@ createApp({
             } catch(e) { errExport.value = '加载失败: ' + e.message; }
         }
         async function captureExport() {
+            exporting.value = true;
             const el = document.getElementById('capture');
-            if (!el) return;
-            if (typeof window.modernScreenshot === 'undefined') { alert('截图库加载中，请稍后重试'); return; }
+            if (!el) { exporting.value = false; return; }
+            if (typeof window.modernScreenshot === 'undefined') { alert('截图库加载中，请稍后重试'); exporting.value = false; return; }
             // 0. 先确保原 DOM 所有图片已加载完成
             const origImgs = Array.from(el.querySelectorAll('img'));
             await Promise.all(origImgs.map(img => {
@@ -5989,8 +6018,19 @@ createApp({
             } catch(e) {
                 alert('导出失败: ' + e.message);
             } finally {
+                exporting.value = false;
                 if (container.parentNode) container.parentNode.removeChild(container);
             }
+        }
+        function fmtDateTime(ts, showDate) {
+            if (!ts) return '';
+            const d = new Date(ts * 1000);
+            if (showDate) {
+                const mo = String(d.getMonth()+1).padStart(2,'0');
+                const dd = String(d.getDate()).padStart(2,'0');
+                return `${mo}-${dd} ${d.toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit'})}`;
+            }
+            return d.toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit'});
         }
         function gotoExport(uid, uname) {
             eModeAll.value = false;
@@ -6569,7 +6609,9 @@ createApp({
             }
         }
         async function startRoom(roomId) {
+            if (startingRooms.value.has(roomId)) return;
             if (!confirm(`确定启动房间 ${roomId}？`)) return;
+            startingRooms.value = new Set([...startingRooms.value, roomId]);
             try {
                 const res = await fetch(`/api/rooms/${roomId}/start`, {
                     method: 'POST', credentials: 'include',
@@ -6577,6 +6619,11 @@ createApp({
                 if (!res.ok) throw new Error((await res.text()).slice(0,80));
                 await loadRooms();
             } catch(e) { alert('启动失败: ' + e.message); }
+            finally {
+                const s = new Set(startingRooms.value);
+                s.delete(roomId);
+                startingRooms.value = s;
+            }
         }
         async function stopRoom(roomId) {
             if (!confirm(`确定停止房间 ${roomId}？`)) return;
@@ -7489,6 +7536,7 @@ createApp({
                 loadExport, gotoExport, loadUserDates, onUidInput, onModeChange,
                 toggleDate, selectAllDatesInRange, clearSelectedDates, applyMultiDateExport,
                 pickDate, captureExport, eModeAll, eSelectedDates, eSelectedSet,
+                eMergeGifts, exporting, startingRooms, fmtDateTime,
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
