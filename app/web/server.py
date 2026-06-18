@@ -513,13 +513,14 @@ def _get_current_role(request: Request) -> tuple[str, str, list]:
 @app.middleware("http")
 async def _auth_middleware(request: Request, call_next):
     client_ip = request.client.host if request.client else "unknown"
-    if _rate_limited(client_ip):
-        return JSONResponse({"error": "rate limited"}, status_code=429)
 
-    # Allow login page, auth endpoint, and image proxy without session or rate limit
+    # Allow login page, auth endpoint, and image proxy without rate limit or auth
     path = request.url.path
     if path in ("/", "/api/login", "/favicon.ico") or path.startswith("/api/external/") or path.startswith("/api/proxy_image"):
         return await call_next(request)
+
+    if _rate_limited(client_ip):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
 
     # API paths need auth
     if not _check_auth(request):
