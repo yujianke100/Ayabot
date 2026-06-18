@@ -2434,6 +2434,78 @@ async def api_external_user_stats(
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@app.get("/api/external/api_token")
+async def api_external_get_token(request: Request):
+    """获取当前 API Token 配置状态（不返回完整 token）。"""
+    if _API_TOKEN:
+        masked = _API_TOKEN[:4] + "*" * min(len(_API_TOKEN) - 4, 8) + _API_TOKEN[-2:] if len(_API_TOKEN) > 8 else "****"
+    else:
+        masked = ""
+    return {
+        "ok": True,
+        "has_token": bool(_API_TOKEN),
+        "token_masked": masked,
+        "token_set": bool(_API_TOKEN),
+    }
+
+
+@app.post("/api/external/api_token")
+async def api_external_save_token(request: Request):
+    """保存 API Token 到配置文件并更新内存。"""
+    global _API_TOKEN
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    new_token = str(body.get("token", "")).strip()
+
+    # 更新内存
+    _API_TOKEN = new_token
+
+    # 保存到 config.yaml
+    try:
+        cfg_path = Path(_CONFIG_YAML_PATH)
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        web_ui = raw.setdefault("web_ui", {})
+        web_ui["api_token"] = new_token
+        cfg_path.write_text(
+            yaml.dump(raw, default_flow_style=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        logger.info("api_token saved to %s", cfg_path)
+    except Exception as exc:
+        logger.warning("failed to save api_token: %s", exc)
+        return JSONResponse({"error": f"保存失败: {exc}"}, status_code=500)
+
+    if new_token:
+        masked = new_token[:4] + "*" * min(len(new_token) - 4, 8) + new_token[-2:] if len(new_token) > 8 else "****"
+    else:
+        masked = ""
+    return {
+        "ok": True,
+        "message": "API Token 已保存，即时生效" if new_token else "API Token 已清空",
+        "token_masked": masked,
+        "token_set": bool(new_token),
+    }
+
+
+@app.post("/api/external/restart")
+async def api_external_restart():
+    """重启 WebUI 服务（让配置完全生效）。"""
+    import sys as _sys
+    import os as _os
+    logger.info("WebUI restart requested via external API config")
+
+    # 异步启动重启：先返回响应，再退出进程（由启动脚本自动重启）
+    async def _delayed_restart():
+        await asyncio.sleep(1)
+        _os.execl(_sys.executable, _sys.executable, *[_sys.argv[0]])
+
+    asyncio.create_task(_delayed_restart())
+    return {"ok": True, "message": "正在重启 WebUI..."}
+
+
 # ══════════════════════════════════════════════════════════════
 #  HTML
 # ══════════════════════════════════════════════════════════════════
@@ -3679,15 +3751,42 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
 
         <!-- 数据管理 -->
-        <div v-if="roomSubTab==='manage'" class="max-w-full sm:max-w-lg mx-auto bg-white p-4 sm:p-6 rounded-xl shadow-sm">
-            <h2 class="text-lg font-bold mb-4 text-red-600">⚠️ 数据管理</h2>
-            <p class="text-sm text-gray-500 mb-4">注意：删除操作不可恢复。礼物数据保留天数在「机器人配置 → 数据保留」中设置。</p>
-            <div class="flex items-end gap-2">
-                <label class="text-xs text-gray-500 flex-1">日期<input type="date" v-model="delDate" class="border p-2 rounded w-full text-sm mt-1"></label>
-                <button @click="confirmDelete('gift')" class="bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded text-sm h-[38px]">删除送礼</button>
-                <button @click="confirmDelete('danmaku')" class="bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded text-sm h-[38px]">删除弹幕</button>
+        <div v-if="roomSubTab==='manage'" class="max-w-full sm:max-w-lg mx-auto space-y-4">
+            <!-- API Token 配置 -->
+            <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm">
+                <h2 class="text-lg font-bold mb-3">🔑 外部 API Token</h2>
+                <p class="text-xs text-gray-500 mb-3">
+                    用于 AstrBot 插件等第三方服务查询礼物/盲盒数据。
+                    <a href="https://github.com/yujianke100/Ayabot-astrbot-plugin" target="_blank" class="text-blue-500 hover:underline">查看插件</a>
+                </p>
+                <label class="text-xs text-gray-500">API Token
+                    <input type="text" v-model="apiTokenInput" placeholder="留空则禁用外部查询" class="border p-2 rounded w-full text-sm mt-1 font-mono">
+                </label>
+                <div v-if="apiTokenCurrent" class="mt-1 text-xs text-gray-400">
+                    当前: {{ apiTokenCurrent }}
+                    <span v-if="apiTokenStatus" class="text-green-600 ml-2">● 已启用</span>
+                    <span v-else class="text-gray-400 ml-2">○ 未设置</span>
+                </div>
+                <div class="flex items-center gap-2 mt-3">
+                    <button @click="saveApiToken" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm" :disabled="apiTokenSaving">
+                        {{ apiTokenSaving ? '保存中...' : '保存' }}
+                    </button>
+                    <span v-if="apiTokenMsg" class="text-sm" :class="apiTokenOk ? 'text-green-600' : 'text-red-500'">{{ apiTokenMsg }}</span>
+                    <span v-if="apiTokenOk" class="text-xs text-green-600">✅ 即时生效，无需重启</span>
+                </div>
             </div>
-            <div v-if="delResult" class="mt-4 text-sm">{{ delResult }}</div>
+
+            <!-- 数据删除 -->
+            <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm">
+                <h2 class="text-lg font-bold mb-4 text-red-600">⚠️ 数据管理</h2>
+                <p class="text-sm text-gray-500 mb-4">注意：删除操作不可恢复。礼物数据保留天数在「机器人配置 → 数据保留」中设置。</p>
+                <div class="flex items-end gap-2">
+                    <label class="text-xs text-gray-500 flex-1">日期<input type="date" v-model="delDate" class="border p-2 rounded w-full text-sm mt-1"></label>
+                    <button @click="confirmDelete('gift')" class="bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded text-sm h-[38px]">删除送礼</button>
+                    <button @click="confirmDelete('danmaku')" class="bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded text-sm h-[38px]">删除弹幕</button>
+                </div>
+                <div v-if="delResult" class="mt-4 text-sm">{{ delResult }}</div>
+            </div>
         </div>
 
         <!-- Bot 日志 -->
@@ -4249,6 +4348,14 @@ createApp({
         const delDate = ref('');
         const delResult = ref('');
 
+        // API Token
+        const apiTokenInput = ref('');
+        const apiTokenCurrent = ref('');
+        const apiTokenStatus = ref(false);
+        const apiTokenSaving = ref(false);
+        const apiTokenMsg = ref('');
+        const apiTokenOk = ref(false);
+
         // Danmaku Log
         const danmakuRows = ref([]);
         const danmakuErr = ref('');
@@ -4520,6 +4627,8 @@ createApp({
             selectedRoomAccount.value = r.account_uid || '';
             // 清除上一个房间的查询状态
             _clearRoomState();
+            // 加载 API Token 状态
+            loadApiToken();
         }
         function goBackRoomList() {
             selectedRoom.value = null;
@@ -5022,6 +5131,45 @@ createApp({
                 if (data.deleted_danmaku > 0) parts.push(`${data.deleted_danmaku} 条弹幕`);
                 delResult.value = parts.length ? `已删除 ${parts.join('、')}` : '没有需要删除的数据';
             } catch(e) { delResult.value = '删除失败: ' + e.message; }
+        }
+
+        // ── API Token ──
+        async function loadApiToken() {
+            try {
+                const res = await fetch('/api/external/api_token');
+                if (!res.ok) return;
+                const data = await res.json();
+                apiTokenCurrent.value = data.token_masked || '(未设置)';
+                apiTokenStatus.value = data.token_set;
+                apiTokenInput.value = '';
+            } catch(e) {}
+        }
+
+        async function saveApiToken() {
+            apiTokenSaving.value = true;
+            apiTokenMsg.value = '';
+            apiTokenOk.value = false;
+            try {
+                const res = await fetch('/api/external/api_token', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({token: apiTokenInput.value})
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    apiTokenOk.value = true;
+                    apiTokenMsg.value = data.message;
+                    apiTokenCurrent.value = data.token_masked || '(未设置)';
+                    apiTokenStatus.value = data.token_set;
+                    apiTokenInput.value = '';
+                } else {
+                    apiTokenMsg.value = data.error || '保存失败';
+                }
+            } catch(e) {
+                apiTokenMsg.value = '保存失败: ' + e.message;
+            } finally {
+                apiTokenSaving.value = false;
+            }
         }
 
         // ── Bot Log ──
