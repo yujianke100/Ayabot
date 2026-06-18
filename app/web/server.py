@@ -2574,6 +2574,18 @@ async def api_external_user_stats(
             (uid, start_ts, end_ts),
         ).fetchall()
 
+        # 弹幕数统计
+        danmaku_count = 0
+        try:
+            dm_row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM danmaku_log WHERE uid = ? AND ts >= ? AND ts <= ?",
+                (uid, start_ts, end_ts),
+            ).fetchone()
+            if dm_row:
+                danmaku_count = int(dm_row["cnt"])
+        except Exception:
+            pass  # danmaku_log 表可能不存在
+
         # 获取用户信息
         user_row = conn.execute(
             "SELECT uname FROM gift_events WHERE uid = ? LIMIT 1",
@@ -2584,17 +2596,20 @@ async def api_external_user_stats(
 
         uname = user_row["uname"] if user_row else f"UID:{uid}"
 
+        # DB 存储单位是 电池（金瓜子÷100），直接使用
+        def _to_battery(v: int) -> int:
+            return int(v)
+
         # 构建礼物名称明细
         gift_details = []
         for r in gift_detail_rows:
             gift_details.append({
                 "name": r["gift_name"],
                 "count": int(r["total_num"]),
-                "value_yuan": round(int(r["total_value"]) / 10.0, 2),
+                "value": _to_battery(r["total_value"]),
             })
 
         blind_details = []
-        # 按盲盒名称分组聚合
         box_groups: dict[str, dict] = {}
         for r in blind_detail_rows:
             box_name = r["box_name"] or "未知盲盒"
@@ -2604,8 +2619,8 @@ async def api_external_user_stats(
             g["items"].append({
                 "name": r["item_name"],
                 "count": int(r["total_num"]),
-                "cost_yuan": round(int(r["total_cost"]) / 10.0, 2),
-                "profit_yuan": round(int(r["total_profit"]) / 10.0, 2),
+                "cost": _to_battery(r["total_cost"]),
+                "profit": _to_battery(r["total_profit"]),
             })
             g["total_count"] += int(r["total_num"])
             g["total_cost"] += int(r["total_cost"])
@@ -2614,28 +2629,28 @@ async def api_external_user_stats(
             blind_details.append({
                 "box_name": box_name,
                 "count": g["total_count"],
-                "cost_yuan": round(g["total_cost"] / 10.0, 2),
-                "profit_yuan": round(g["total_profit"] / 10.0, 2),
+                "cost": g["total_cost"],
+                "profit": g["total_profit"],
                 "items": g["items"],
             })
 
-        # actual_value 单位是角，转换为元
         return {
             "ok": True,
             "uid": uid,
             "uname": uname,
             "period": period,
+            "danmaku_count": danmaku_count,
             "gift": {
                 "total_events": int(gift_rows["total_events"]),
                 "total_gift_count": int(gift_rows["total_gift_count"]),
-                "total_value_yuan": round(int(gift_rows["total_value"]) / 10.0, 2),
+                "total_value": _to_battery(gift_rows["total_value"]),
                 "details": gift_details,
             },
             "blindbox": {
                 "count": int(blind_rows["blind_count"]),
-                "cost_yuan": round(int(blind_rows["blind_cost"]) / 10.0, 2),
-                "actual_yuan": round(int(blind_rows["blind_actual"]) / 10.0, 2),
-                "profit_yuan": round(int(blind_rows["blind_profit"]) / 10.0, 2),
+                "cost": _to_battery(blind_rows["blind_cost"]),
+                "actual": _to_battery(blind_rows["blind_actual"]),
+                "profit": _to_battery(blind_rows["blind_profit"]),
                 "details": blind_details,
             },
         }
