@@ -59,6 +59,58 @@ _API_TOKEN: str = ""
 # 外部 API 域名（留空则自动检测）
 _API_DOMAIN: str = ""
 
+# 图片代理缓存
+_IMAGE_CACHE_DIR: str = "data/cache/images"
+_IMAGE_CACHE_MAX_AGE = 86400 * 7  # 磁盘缓存保留 7 天
+_PROXY_SEMAPHORE = asyncio.Semaphore(3)  # 最多 3 个并发请求
+_PROXY_IN_FLIGHT: dict[str, asyncio.Future] = {}  # 正在进行的请求去重
+
+
+def _get_image_cache_path(url: str) -> Path:
+    """根据 URL 生成缓存文件路径（以 URL 的 MD5 命名）。"""
+    md5 = hashlib.md5(url.encode()).hexdigest()
+    ext = Path(url.split("?")[0]).suffix or ".jpg"
+    return Path(_IMAGE_CACHE_DIR) / f"{md5}{ext}"
+
+
+def _clean_expired_cache() -> None:
+    """清理过期缓存文件。"""
+    try:
+        cache_dir = Path(_IMAGE_CACHE_DIR)
+        if not cache_dir.exists():
+            return
+        now = time.time()
+        for f in cache_dir.iterdir():
+            if f.is_file() and now - f.stat().st_mtime > _IMAGE_CACHE_MAX_AGE:
+                f.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _save_image_cache(url: str, data: bytes) -> None:
+    """保存图片到磁盘缓存。"""
+    try:
+        path = _get_image_cache_path(url)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    except Exception:
+        pass
+
+
+def _load_image_cache(url: str) -> Optional[bytes]:
+    """从磁盘缓存读取图片，过期则删除并返回 None。"""
+    try:
+        path = _get_image_cache_path(url)
+        if path.exists():
+            age = time.time() - path.stat().st_mtime
+            if age < _IMAGE_CACHE_MAX_AGE:
+                return path.read_bytes()
+            else:
+                path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return None
+
 
 def _save_room_states() -> None:
     """保存当前各房间的运行状态到文件。"""
@@ -144,6 +196,13 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
 
     # 初始化/同步 users.json（不覆盖已通过 WebUI 修改过密码的账号）
     _init_users()
+
+    # 初始化图片代理缓存目录
+    global _IMAGE_CACHE_DIR
+    _IMAGE_CACHE_DIR = str(Path(_ROOMS_BASE_DIR).resolve() / "data/cache/images")
+    Path(_IMAGE_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    _clean_expired_cache()
+    logger.info("image proxy cache dir: %s", _IMAGE_CACHE_DIR)
 
 
 def _fallback_read_config() -> None:
@@ -719,22 +778,80 @@ async def api_delete_old(request: Request):
 
 @app.get("/api/proxy_image")
 async def api_proxy_image(url: str):
+    # 1. 检查磁盘缓存
+    cached = _load_image_cache(url)
+    if cached is not None:
+        return Response(
+            content=cached,
+            media_type="image/jpeg",
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "public, max-age=86400",
+                "X-Cache": "HIT",
+            },
+        )
+
+    # 2. 请求去重：同一个 URL 正在请求中则等待结果
+    if url in _PROXY_IN_FLIGHT:
+        try:
+            result = await _PROXY_IN_FLIGHT[url]
+            if result is not None:
+                return result
+        except Exception:
+            pass
+
+    # 3. 发起请求（限制并发）
+    future: asyncio.Future = asyncio.Future()
+    _PROXY_IN_FLIGHT[url] = future
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                body = await resp.read()
-                ct = resp.content_type or "image/png"
-                return Response(
-                    content=body,
-                    media_type=ct,
-                    headers={
-                        "Access-Control-Allow-Origin": "*",
-                        "Cache-Control": "public, max-age=86400",
-                    },
-                )
+        async with _PROXY_SEMAPHORE:
+            async with aiohttp.ClientSession() as session:
+                for attempt in range(3):
+                    try:
+                        async with session.get(
+                            url,
+                            timeout=aiohttp.ClientTimeout(total=10),
+                            headers={"User-Agent": "Mozilla/5.0 Ayabot Proxy"},
+                        ) as resp:
+                            if resp.status == 429:
+                                wait = 1.0 * (2 ** attempt)
+                                logger.warning(
+                                    "proxy_image 429 for %s, retrying in %.1fs (attempt %d/3)",
+                                    url, wait, attempt + 1,
+                                )
+                                await asyncio.sleep(wait)
+                                continue
+                            if resp.status != 200:
+                                raise ValueError(f"HTTP {resp.status}")
+                            body = await resp.read()
+                            ct = resp.content_type or "image/jpeg"
+                            # 写入磁盘缓存（异步不阻塞）
+                            _save_image_cache(url, body)
+                            result = Response(
+                                content=body,
+                                media_type=ct,
+                                headers={
+                                    "Access-Control-Allow-Origin": "*",
+                                    "Cache-Control": "public, max-age=86400",
+                                    "X-Cache": "MISS",
+                                },
+                            )
+                            future.set_result(result)
+                            return result
+                    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                        if attempt < 2:
+                            await asyncio.sleep(0.5 * (2 ** attempt))
+                            continue
+                        raise
+                # 重试耗尽
+                raise ValueError("429 retry exhausted")
     except Exception as exc:
         logger.warning("proxy_image failed for %s: %s", url, exc)
-        return Response(status_code=302, headers={"Location": url})
+        result = Response(status_code=302, headers={"Location": url})
+        future.set_result(result)
+        return result
+    finally:
+        _PROXY_IN_FLIGHT.pop(url, None)
 
 
 # ══════════════════════════════════════════════════════════════════
