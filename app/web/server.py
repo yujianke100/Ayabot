@@ -3986,13 +3986,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
                     <!-- 密钥 -->
                     <label class="text-xs text-gray-500 mt-3 block">API 密钥
-                        <div class="flex items-center mt-1">
-                            <input type="text" :value="roomApiDisplayKey" readonly class="border p-2 rounded-l w-full text-sm bg-gray-50 font-mono text-xs select-all">
-                            <button @click="copyText(roomApiFullKey || roomApiDisplayKey, 'apiMsg')" class="bg-gray-200 hover:bg-gray-300 px-3 py-2 rounded-r text-sm border-l-0" title="复制">📋</button>
-                            <button v-if="roomApiFullKey && !showFullKey" @click="showFullKey = true" class="bg-blue-100 hover:bg-blue-200 text-blue-600 px-2 py-2 rounded-r text-sm ml-1 whitespace-nowrap" title="显示完整密钥">👁️</button>
-                            <button v-if="showFullKey" @click="showFullKey = false" class="bg-gray-100 hover:bg-gray-200 text-gray-500 px-2 py-2 rounded-r text-sm ml-1 whitespace-nowrap">🙈 隐藏</button>
+                        <div v-if="roomApiFullKey" class="flex items-center mt-1">
+                            <input type="text" :value="roomApiFullKey" readonly class="border p-2 rounded-l w-full text-sm bg-gray-50 font-mono text-xs select-all">
+                            <button @click="copyText(roomApiFullKey, 'apiMsg')" class="bg-gray-200 hover:bg-gray-300 px-3 py-2 rounded-r text-sm border-l-0" title="复制">📋</button>
                         </div>
-                        <span class="text-xs text-gray-400">点击 📋 复制密钥到剪贴板</span>
+                        <div v-else class="flex items-center mt-1 gap-2">
+                            <input type="text" :value="roomApiKeyMasked || '(无密钥)'" readonly class="border p-2 rounded w-full text-sm bg-gray-50 font-mono text-xs flex-1">
+                            <span class="text-xs text-gray-400 whitespace-nowrap">点击下方「重新生成」获取完整密钥</span>
+                        </div>
                     </label>
 
                     <!-- 操作按钮 -->
@@ -4588,8 +4589,6 @@ createApp({
         const roomApiKeyMasked = ref('');
         const roomApiHasKey = ref(false);
         const roomApiFullKey = ref('');
-        const roomApiDisplayKey = ref('');
-        const showFullKey = ref(false);
         const roomApiBusy = ref(false);
         const apiMsg = ref('');
         const apiMsgOk = ref(false);
@@ -5383,10 +5382,8 @@ createApp({
                 roomApiUrl.value = data.api_url || '';
                 roomApiKeyMasked.value = data.key_masked || '';
                 roomApiHasKey.value = data.has_key;
-                // 没有完整密钥时显示脱敏版
-                if (!roomApiFullKey.value) {
-                    roomApiDisplayKey.value = data.key_masked || '(无密钥)';
-                }
+                // 不在编辑页面上保留完整密钥（切换房间/刷新页面后清除）
+                // 用户需要重新生成来获取完整密钥
             } catch(e) {}
         }
 
@@ -5434,8 +5431,6 @@ createApp({
                     roomApiHasKey.value = true;
                     roomApiEnabled.value = true;
                     roomApiFullKey.value = data.full_key;
-                    roomApiDisplayKey.value = data.full_key;
-                    showFullKey.value = true;
                     apiMsg.value = data.message;
                     apiMsgOk.value = true;
                 } else {
@@ -6843,7 +6838,7 @@ createApp({
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
-                roomApiEnabled, roomApiUrl, roomApiKeyMasked, roomApiHasKey, roomApiFullKey, roomApiDisplayKey, showFullKey, roomApiBusy,
+                roomApiEnabled, roomApiUrl, roomApiKeyMasked, roomApiHasKey, roomApiFullKey, roomApiBusy,
                 apiMsg, apiMsgOk, loadRoomApiConfig, toggleRoomApi, regenerateRoomApiKey, copyText,
                 danmakuRows, danmakuErr, danmakuOffset, danmakuLimit, danmakuTotal, danmakuPage,
                 loadDanmakuLog, clearDanmakuLog, fmtDanmakuTime, loadDmDates, dmToggleDate, dmExportSelected, dmCalDays, dmCalYear, dmCalMonth, dmShowCal, dmSelectedDates, dmDates, dmDatesSet, dmAsc,
