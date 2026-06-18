@@ -1527,10 +1527,10 @@ def _extract_blindbox_profit(payload: dict[str, Any]) -> dict[str, Any]:
     blind_unit //= 100
 
     # Actual revealed gift value: for blindboxes, blind_gift.gift_tip_price is
-    # the revealed item's worth per item, NOT total_coin (which is what the user paid).
+    # the revealed item's worth, NOT total_coin (which is what the user paid).
     actual_total = 0
     if blind_dict:
-        actual_total = _safe_int(blind_dict.get("gift_tip_price")) * num
+        actual_total = _safe_int(blind_dict.get("gift_tip_price"))
     if actual_total == 0:
         for key in ("total_coin", "original_gift_price_total", "gift_price_total"):
             if key in payload and _safe_int(payload.get(key)) > 0:
