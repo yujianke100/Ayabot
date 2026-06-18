@@ -3708,7 +3708,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
                             <option value="value">按价值</option>
                         </select>
                     </label>
-                    <button @click="loadExport" class="bg-green-500 hover:bg-green-600 text-white px-5 py-2 rounded text-sm h-[38px]">生成</button>
+                    <button @click="loadExport" :disabled="loadingExport"
+                            class="bg-green-500 hover:bg-green-600 disabled:bg-green-300 text-white px-5 py-2 rounded text-sm h-[38px] transition">
+                        {{ loadingExport ? '⏳ 加载中...' : '生成' }}</button>
                 </div>
                 <div class="flex flex-wrap gap-4 items-end">
                     <label class="text-xs text-gray-500 flex items-center gap-1.5 h-[38px]">
@@ -5146,6 +5148,7 @@ createApp({
         const eColWidth = ref(340);
         const exportList = ref([]);
         const exporting = ref(false);
+        const loadingExport = ref(false);
         const exportDates = ref([]);
         const errExport = ref('');
 
@@ -5175,6 +5178,16 @@ createApp({
             let items = exportList.value;
             const perCol = Math.max(1, ePerCol.value);
             if (!items.length) return [];
+
+            // 排序（客户端 fallback，确保与下拉框一致）
+            const s = eSort.value;
+            if (s === 'uname') {
+                items = [...items].sort((a, b) => (a.uname || '').localeCompare(b.uname || '') || (a.ts || 0) - (b.ts || 0));
+            } else if (s === 'value') {
+                items = [...items].sort((a, b) => (b.actual_value || 0) - (a.actual_value || 0));
+            } else {
+                items = [...items].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+            }
 
             // 合并相同礼物模式
             if (eMergeGifts.value) {
@@ -5983,8 +5996,9 @@ createApp({
         async function loadExport() {
             errExport.value = '';
             exportList.value = [];
+            loadingExport.value = true;
             const roomId = selectedRoom.value?.room_id;
-            if (!roomId) return;
+            if (!roomId) { loadingExport.value = false; return; }
 
             if (eModeAll.value) {
                 // 所有人模式
@@ -5998,6 +6012,7 @@ createApp({
                     dateTo = sel[sel.length-1];
                 } else {
                     errExport.value = '请至少选择一个日期';
+                    loadingExport.value = false;
                     return;
                 }
                 try {
@@ -6005,7 +6020,7 @@ createApp({
                     if (dateFrom) params.set('date_from', dateFrom);
                     if (dateTo) params.set('date_to', dateTo);
                     const res = await fetch(`/api/rooms/${roomId}/export_all?${params}`);
-                    if (!res.ok) { const txt = await res.text(); errExport.value = '请求失败: ' + txt.slice(0,80); return; }
+                    if (!res.ok) { const txt = await res.text(); errExport.value = '请求失败: ' + txt.slice(0,80); loadingExport.value = false; return; }
                     const data = await res.json();
                     exportList.value = (data || []).map((item, idx) => ({
                         ...item,
@@ -6021,14 +6036,15 @@ createApp({
                         errExport.value = '所选日期范围内无送礼记录';
                     }
                 } catch(e) { errExport.value = '加载失败: ' + e.message; }
+                loadingExport.value = false;
                 return;
             }
 
             // 单用户模式
-            if (!eUid.value || !eDate.value) { errExport.value = '请填写 UID 和日期'; return; }
+            if (!eUid.value || !eDate.value) { errExport.value = '请填写 UID 和日期'; loadingExport.value = false; return; }
             try {
                 const res = await fetch(`/api/rooms/${roomId}/user_gifts?uid=${eUid.value}&date=${eDate.value}&gift_type=${eType.value}`);
-                if (!res.ok) { const txt = await res.text(); errExport.value = '请求失败: ' + txt.slice(0,80); return; }
+                if (!res.ok) { const txt = await res.text(); errExport.value = '请求失败: ' + txt.slice(0,80); loadingExport.value = false; return; }
                 const data = await res.json();
                 exportList.value = (data || []).map((item, idx) => ({
                     ...item,
@@ -6046,6 +6062,7 @@ createApp({
                     errExport.value = '该用户当天无送礼记录';
                 }
             } catch(e) { errExport.value = '加载失败: ' + e.message; }
+            loadingExport.value = false;
         }
         async function captureExport() {
             exporting.value = true;
@@ -7650,7 +7667,7 @@ createApp({
                 userFormRole, userFormRooms, showUserRoomDropdown, savingUserForm, userFormMsg, userFormOk,
                 openAddUser, editUser, saveUserForm, deleteUser, toggleUserRoom,
                 rStart, rEnd, rType, ranking, errRanking, loadRanking,
-                eUid, eName, eDate, eType, ePerCol, eColWidth, exportList, exportDates, exportCols, errExport,
+                eUid, eName, eDate, eType, ePerCol, eColWidth, exportList, exportDates, exportCols, errExport, loadingExport,
                 loadExport, gotoExport, loadUserDates, onUidInput, onModeChange,
                 toggleDate, selectAllDatesInRange, clearSelectedDates, applyMultiDateExport,
                 pickDate, captureExport, eModeAll, eSelectedDates, eSelectedSet,
