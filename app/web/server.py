@@ -5450,6 +5450,13 @@ createApp({
             if (selectedRoom.value?.room_id) loadDanmakuLog();
         });
 
+        // 切换到数据管理标签时刷新 API Key 信息
+        Vue.watch(roomSubTab, (val) => {
+            if (val === 'manage' && selectedRoom.value) {
+                loadApiKey();
+            }
+        });
+
         // ── LLM Config ──
         async function loadLlmConfig() {
             // 如果当前在房间详情中，从房间配置加载 LLM 设置
