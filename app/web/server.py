@@ -5680,6 +5680,9 @@ createApp({
                 loadDmDates();
                 loadDanmakuLog();
             }
+            if (key === 'export') {
+                loadUserDates();
+            }
         }
         function toggleCreateRoom() { showCreateRoom.value = !showCreateRoom.value; }
         function toggleNewAccount() { showNewAccount.value = !showNewAccount.value; }
