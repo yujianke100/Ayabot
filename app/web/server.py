@@ -1981,6 +1981,7 @@ async def api_bili_login_account(request: Request):
 
     _BILI_LOGIN_SESSIONS[session_id] = {
         "qr": qr,
+        "qrcode_key": qr._QrCodeLogin__qr_key,  # noqa: SLF001
         "created_at": time.time(),
         "state": "waiting",
         "target_uid": account_uid or "",
@@ -2010,10 +2011,12 @@ async def api_save_account_credential(request: Request):
     session_id = body.get("session_id", "")
     sess = _BILI_LOGIN_SESSIONS.get(session_id)
     if not sess:
+        logger.warning("bili save: session not found: %s", session_id)
         return {"ok": False, "error": "session expired"}
 
     qr = sess["qr"]
-    if not qr.has_done():
+    if not qr.has_done() and not sess.get("cred_cookies"):
+        logger.warning("bili save: login not completed for session %s", session_id)
         return {"ok": False, "error": "login not completed"}
 
     target_uid = sess.get("target_uid", "")
@@ -2021,20 +2024,53 @@ async def api_save_account_credential(request: Request):
         # 如果没传 UID，登录后从 credential 获取
         target_uid = ""
 
-    try:
-        credential = qr.get_credential()
-    except Exception as exc:
-        return {"ok": False, "error": f"get credential failed: {exc}"}
+    # 优先使用 status 轮询时当场解析好的完整凭据（B站 编码 URL 兼容）
+    if sess.get("cred_cookies"):
+        cookies = dict(sess["cred_cookies"])
+    else:
+        # 兜底：直接取库解析结果（旧版明文 URL 场景）
+        try:
+            credential = qr.get_credential()
+        except Exception as exc:
+            logger.warning("bili save: get credential failed: %s", exc)
+            return {"ok": False, "error": f"get credential failed: {exc}"}
+        cookies = credential.get_cookies()
 
-    cookies = credential.get_cookies()
+    # 统一重建 credential（供 nav 兜底等后续使用）
+    from bilibili_api import Credential as _Cred  # noqa: PLC0415
+
+    credential = _Cred(
+        sessdata=cookies.get("SESSDATA", ""),
+        bili_jct=cookies.get("bili_jct", ""),
+        buvid3=cookies.get("buvid3", "") or None,
+        dedeuserid=cookies.get("DedeUserID", "") or None,
+        ac_time_value=cookies.get("ac_time_value", ""),
+    )
+
     dedeuserid = cookies.get("DedeUserID", "")
 
     # 如果没传 UID，使用登录后的 DedeUserID
     if not target_uid and dedeuserid:
         target_uid = dedeuserid
 
+    # 兜底：B站 新接口格式变化导致 check_state() 解析不到 DedeUserID 时，
+    # 用 SESSDATA 调 nav 接口恢复用户 UID（data.mid）
+    if not target_uid and cookies.get("SESSDATA"):
+        try:
+            from bilibili_api.utils.network import API as _BILI_API, Api as _BILI_Api  # noqa: PLC0415
+            nav = await _BILI_Api(**_BILI_API["info"]["valid"], credential=credential).result
+            mid = str(nav.get("mid", "") or "")
+            if mid and mid != "0":
+                target_uid = mid
+                logger.warning("bili save: recovered uid from nav: %s", mid[:6])
+            else:
+                logger.warning("bili save: nav returned no mid (isLogin=%s)", nav.get("isLogin"))
+        except Exception as exc:
+            logger.warning("bili save: nav fallback failed: %s", exc)
+
     if not target_uid:
-        return {"ok": False, "error": "no target uid"}
+        logger.warning("bili save: no target uid after fallback")
+        return {"ok": False, "error": "no target uid (未能从登录结果获取 DedeUserID)"}
 
     # 保存到 accounts/<uid>/
     acc_dir = _get_account_dir(target_uid)
@@ -2103,20 +2139,66 @@ async def api_account_login_status(session_id: str):
         return {"state": "timeout"}
 
     try:
-        if qr.has_done():
+        # 如果此前已解析出完整凭据，直接返回 done
+        if sess.get("cred_cookies"):
             return {"state": "done"}
 
-        state = await qr.check_state()
+        # 直接用 qrcode_key 轮询 B站 poll 接口（bilibili_api 的 Api 自带 buvid 指纹，
+        # 避开 412 风控）。B站 新接口扫码成功后 url 只含 ticket、不再直接携带
+        # SESSDATA 等，bilibili_api 17.4.x 的 check_state() 无法适配，
+        # 这里自行轮询并在 code=0 时访问 crossDomain URL 收集登录 Cookie。
+        from bilibili_api import login_v2 as _lv2  # noqa: PLC0415
+        from bilibili_api.utils.network import Api as _BILI_Api  # noqa: PLC0415
+        from bilibili_api import Credential as _Cred  # noqa: PLC0415
 
-        if state == login_v2.QrCodeLoginEvents.TIMEOUT:
-            return {"state": "timeout"}
-        # 注意：bilibili_api 的 SCAN = 86101 = 还没被扫（二维码有效等待扫码）
-        # CONF = 86090 = 已扫码等待确认
-        if state == login_v2.QrCodeLoginEvents.SCAN:
+        _ev = (
+            await _BILI_Api(credential=_Cred(), **_lv2.API["qrcode"]["web"]["get_events"])
+            .update_params(**{"qrcode_key": sess["qrcode_key"]})
+            .result
+        )
+        _code = _ev.get("code")
+        if _code == 86101:  # 未扫码
             return {"state": "waiting"}
-        if state == login_v2.QrCodeLoginEvents.CONF:
+        if _code == 86090:  # 已扫码待确认
             return {"state": "scanned"}
-
+        if _code == 86038:  # 过期
+            return {"state": "timeout"}
+        if _code == 0:  # 登录成功
+            _raw_url = _ev.get("url", "")
+            _cookies = {
+                "SESSDATA": "", "bili_jct": "", "buvid3": "",
+                "DedeUserID": "", "ac_time_value": _ev.get("refresh_token", ""),
+            }
+            # B站 新流程：登录成功后 url 只含 ticket（不再直接带 SESSDATA 等），
+            # 需访问该 crossDomain URL，B站 通过 Set-Cookie 下发登录 Cookie。
+            if _raw_url:
+                try:
+                    _headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Referer": "https://www.bilibili.com/",
+                    }
+                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), headers=_headers) as _s:
+                        async with _s.get(_raw_url) as _r:
+                            await _r.read()  # 确保响应被消费，Set-Cookie 写入 cookie jar
+                            for _ck in _s.cookie_jar:
+                                if _ck.key in _cookies:
+                                    _cookies[_ck.key] = _ck.value
+                    logger.warning(
+                        "bili status: crossDomain visited -> has_sess=%s has_jct=%s dede=%r",
+                        bool(_cookies.get("SESSDATA")),
+                        bool(_cookies.get("bili_jct")),
+                        (_cookies.get("DedeUserID") or "")[:6],
+                    )
+                except Exception as exc:
+                    logger.warning("bili status: crossDomain visit failed: %s", exc)
+            sess["cred_cookies"] = _cookies
+            logger.warning(
+                "bili status: parsed ok has_sess=%s has_jct=%s dede=%r",
+                bool(_cookies.get("SESSDATA")),
+                bool(_cookies.get("bili_jct")),
+                (_cookies.get("DedeUserID") or "")[:6],
+            )
+            return {"state": "done"}
         return {"state": "waiting"}
     except Exception as exc:
         logger.warning("account login status error: %s", exc)
@@ -5804,7 +5886,11 @@ createApp({
                 if (data.state === 'done') {
                     accountQrState.value = 'done';
                     if (accountsPollTimer) { clearInterval(accountsPollTimer); accountsPollTimer = null; }
-                    await saveAccountLogin();
+                    const saved = await saveAccountLogin();
+                    if (!saved) {
+                        // 保存失败：停留在错误状态，不关闭面板
+                        return;
+                    }
                     // 登录成功，自动关闭二维码面板
                     setTimeout(() => {
                         showNewAccount.value = false;
@@ -5826,15 +5912,28 @@ createApp({
             } catch(e) { /* ignore */ }
         }
         async function saveAccountLogin() {
+            let ok = false;
             try {
-                await fetch('/api/bili_accounts/save', {
+                const res = await fetch('/api/bili_accounts/save', {
                     method: 'POST',
                     headers: {'Content-Type':'application/json'},
                     credentials: 'include',
                     body: JSON.stringify({session_id: accountSessionId.value}),
                 });
-            } catch(e) { /* ignore */ }
+                const data = await res.json().catch(() => ({}));
+                if (data.ok) {
+                    ok = true;
+                } else {
+                    accountQrError.value = data.error || '保存凭据失败';
+                }
+            } catch(e) {
+                accountQrError.value = '保存失败: ' + e.message;
+            }
+            if (!ok) {
+                accountQrState.value = 'error';
+            }
             await loadAccounts();
+            return ok;
         }
         async function refreshAccount(uid) {
             // 目前没有单独的刷新 API，重新加载列表
