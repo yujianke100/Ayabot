@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from contextlib import suppress
 import json
@@ -9,6 +10,7 @@ import random
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
 try:
@@ -21,7 +23,17 @@ from bilibili_api import Credential, live, user
 from bilibili_api.utils.danmaku import Danmaku
 
 from .config import AppConfig, KeywordRule
+from .gift_v2 import decode_send_gift_v2
 from .storage import GiftEvent, StatsStore
+
+# 机器人心跳文件（同 data 目录），供 WebUI 判断「进程活着但已掉线」
+HEARTBEAT_FILE = "bot_status.json"
+# 心跳写入间隔（秒）
+_HEARTBEAT_INTERVAL = 15.0
+# 弹幕连接守护间隔（秒）
+_DANMAKU_GUARD_INTERVAL = 60.0
+# 凭证热更新检查间隔（秒）
+_CREDENTIAL_CHECK_INTERVAL = 15.0
 
 
 @dataclass(slots=True)
@@ -32,9 +44,16 @@ class OutboundMessage:
 
 
 class LiveRobot:
-    def __init__(self, config: AppConfig, credential: Optional[Credential] = None) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        credential: Optional[Credential] = None,
+        auth: Any = None,
+    ) -> None:
         self.config = config
         self.logger = logging.getLogger("bili-live-robot")
+        # AuthManager（可选）：用于凭证失效后引导重新登录 / 热更新凭证
+        self.auth = auth
 
         self.credential = credential or Credential(
             sessdata=config.credential.sessdata,
@@ -70,6 +89,17 @@ class LiveRobot:
 
         self._last_welcome_ts: dict[int, float] = {}
         self._last_thanks_ts: dict[int, float] = {}
+        # 诊断用时间戳：写进心跳文件，便于排查「收不到礼物/弹幕」
+        self._last_gift_ts: int = 0
+        self._last_danmaku_ts: int = 0
+        self._last_uid_warn_ts: float = 0.0
+        self._is_live: bool = False
+        # 礼物去重：(uid, tid/rnd) -> 最近时间戳（仅用于新协议灰度期防重复计账）
+        self._recent_gifts: dict[tuple, float] = {}
+        # 后台守护任务（run() 里创建）
+        self._heartbeat_task: Optional[asyncio.Task[None]] = None
+        self._danmaku_guard_task: Optional[asyncio.Task[None]] = None
+        self._credential_task: Optional[asyncio.Task[None]] = None
 
         self._pending_texts: set[str] = set()
         self._chat_contexts: dict[int, list[dict[str, str]]] = {}
@@ -109,36 +139,172 @@ class LiveRobot:
         self.logger.info("bot uid set to %s (config=%s)", self._bot_uid, config.credential.dedeuserid)
 
     async def run(self) -> None:
-        self.logger.info("robot started, room=%s", self.config.room_display_id)
+        self.logger.info(
+            "robot started, room=%s pid=%s", self.config.room_display_id, os.getpid()
+        )
         self._poll_counter = 0
+        self._is_live = False
         self._msg_worker_task = asyncio.create_task(self._message_worker())
         self._periodic_task = asyncio.create_task(self._periodic_message_loop())
+        # 心跳 / 弹幕守护 / 凭证热更新：解决「进程活着但已掉线」和「凭证失效后只能重启」
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        self._danmaku_guard_task = asyncio.create_task(self._danmaku_guard_loop())
+        self._credential_task = asyncio.create_task(self._credential_watch_loop())
 
         try:
             while True:
-                is_live = await self._is_room_live()
-                if is_live and self._danmaku is None:
-                    await self._start_danmaku()
-                if (not is_live) and self._danmaku is not None:
-                    await self._stop_danmaku()
-
-                self._poll_counter = (self._poll_counter + 1) % 10
-                if self._poll_counter == 0:
-                    self.logger.info("poll: live=%s danmaku=%s", is_live, self._danmaku is not None)
+                try:
+                    await self._poll_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    # 单次轮询异常绝不能让进程退出 —— 这是 Windows 上「机器人意外关闭」的典型成因
+                    self.logger.error("poll loop error: %s", exc, exc_info=True)
                 await asyncio.sleep(self.config.runtime.poll_interval_seconds)
         finally:
             await self.shutdown()
 
+    async def _poll_once(self) -> None:
+        is_live = await self._is_room_live()
+        self._is_live = is_live
+        if is_live and self._danmaku is None:
+            await self._start_danmaku()
+        if (not is_live) and self._danmaku is not None:
+            await self._stop_danmaku()
+
+        self._poll_counter = (self._poll_counter + 1) % 10
+        if self._poll_counter == 0:
+            self.logger.info("poll: live=%s danmaku=%s", is_live, self._danmaku is not None)
+
+    # ── 心跳（WebUI/守护进程据此判断是否需要重启） ───────────
+
+    def _status_path(self) -> Path:
+        return Path(self.config.storage.sqlite_path).parent / HEARTBEAT_FILE
+
+    def write_heartbeat(self, phase: str = "running") -> None:
+        payload = {
+            "ts": int(time.time()),
+            "pid": os.getpid(),
+            "phase": phase,
+            "room_display_id": self.config.room_display_id,
+            "live": bool(getattr(self, "_is_live", False)),
+            "danmaku_connected": self._danmaku is not None,
+            "danmaku_task_alive": bool(
+                self._danmaku_task is not None and not self._danmaku_task.done()
+            ),
+            "last_gift_ts": getattr(self, "_last_gift_ts", 0),
+            "last_danmaku_ts": getattr(self, "_last_danmaku_ts", 0),
+            "queue_depth": self._msg_queue.qsize(),
+            "credential_status": (
+                self.auth.load_status().get("status") if self.auth is not None else "ok"
+            ),
+        }
+        try:
+            path = self._status_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(path)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("write heartbeat failed: %s", exc)
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            self.write_heartbeat()
+            await asyncio.sleep(_HEARTBEAT_INTERVAL)
+
+    # ── 弹幕连接守护 ────────────────────────────────────────
+
+    async def _danmaku_guard_loop(self) -> None:
+        """弹幕任务异常结束（但进程还活着）时自动重连。"""
+        while True:
+            await asyncio.sleep(_DANMAKU_GUARD_INTERVAL)
+            try:
+                task = self._danmaku_task
+                if self._danmaku is None or task is None or not task.done():
+                    continue
+                exc = None
+                if not task.cancelled():
+                    try:
+                        exc = task.exception()
+                    except Exception:  # noqa: BLE001
+                        exc = None
+                if exc is not None:
+                    self.logger.error("danmaku task died: %r — reconnecting", exc)
+                else:
+                    self.logger.warning("danmaku task finished unexpectedly — reconnecting")
+                await self._restart_danmaku()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self.logger.error("danmaku guard error: %s", exc, exc_info=True)
+
+    async def _restart_danmaku(self) -> None:
+        try:
+            await self._stop_danmaku()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("stop danmaku before restart failed: %s", exc)
+        if self._is_live:
+            try:
+                await self._start_danmaku()
+                self.logger.info("danmaku reconnected")
+            except Exception as exc:  # noqa: BLE001
+                self.logger.error("danmaku reconnect failed: %s", exc, exc_info=True)
+
+    # ── 凭证热更新（运行中失效 → 重新扫码 → 自动恢复） ───────
+
+    def _note_send_failure(self, err: str) -> None:
+        if self.auth is None:
+            return
+        markers = ("-101", "-403", "未登录", "账号未登录", "not logged in")
+        low = err.lower()
+        if any(m.lower() in low for m in markers):
+            self.auth.mark_needs_login("发送弹幕失败：B站登录状态已失效")
+
+    async def _credential_watch_loop(self) -> None:
+        if self.auth is None:
+            return
+        while True:
+            try:
+                await asyncio.sleep(_CREDENTIAL_CHECK_INTERVAL)
+                new_credential = await self.auth.try_pick_up_new_credential()
+                if new_credential is None:
+                    continue
+                self._swap_credential(new_credential)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self.logger.debug("credential watch error: %s", exc)
+
+    def _swap_credential(self, credential: Credential) -> None:
+        self.credential = credential
+        try:
+            self.live_room.credential = credential
+        except Exception:  # noqa: BLE001
+            pass
+        if self._danmaku is not None:
+            try:
+                self._danmaku.credential = credential
+            except Exception:  # noqa: BLE001
+                pass
+        if self.auth is not None:
+            self.auth.mark_ok()
+        self.logger.info("credential hot-swapped (re-login detected)")
+
     async def shutdown(self) -> None:
+        try:
+            self.write_heartbeat("stopped")
+        except Exception:  # noqa: BLE001
+            pass
         await self._stop_danmaku()
-        if self._msg_worker_task:
-            self._msg_worker_task.cancel()
+        for name in ("_msg_worker_task", "_periodic_task", "_heartbeat_task",
+                     "_danmaku_guard_task", "_credential_task"):
+            task = getattr(self, name, None)
+            if task is None:
+                continue
+            task.cancel()
             with suppress(asyncio.CancelledError):
-                await self._msg_worker_task
-        if self._periodic_task:
-            self._periodic_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._periodic_task
+                await task
         self._in_pk = False
         self.store.close()
 
@@ -161,6 +327,8 @@ class LiveRobot:
         self._danmaku.on("INTERACT_WORD_V2")(self._on_interact_word)
 
         self._danmaku.on("SEND_GIFT")(self._on_gift)
+        # 2026-07 起 B 站灰度新协议 SEND_GIFT_V2（protobuf 编码），必须单独监听
+        self._danmaku.on("SEND_GIFT_V2")(self._on_gift_v2)
         self._danmaku.on("COMBO_SEND")(self._on_gift)
         self._danmaku.on("UNIVERSAL_EVENT_GIFT")(self._on_gift)
         self._danmaku.on("UNIVERSAL_EVENT_GIFT_V2")(self._on_gift)
@@ -185,7 +353,7 @@ class LiveRobot:
             await self._danmaku.connect()
 
         self._danmaku_task = asyncio.create_task(_run_connect())
-        self.logger.info("danmaku connected")
+        self.logger.info("danmaku connecting")
         # 记录开播日期
         self.store.record_stream_date(_now().strftime("%Y-%m-%d"))
 
@@ -298,6 +466,8 @@ class LiveRobot:
                         resp = await self.live_room.send_danmaku(danmaku=danmaku)
                     except Exception as exc:  # noqa: BLE001
                         err_str = str(exc)
+                        # 登录态失效时给出明确的「重新登录」引导，而不是无限重试
+                        self._note_send_failure(err_str)
                         # Rate-limited or server error → back off
                         if attempt < retries:
                             backoff = 1.0 * (attempt + 1) + random.uniform(0, 0.5)
@@ -340,6 +510,7 @@ class LiveRobot:
                     "send danmaku unexpected error: reply_uid=%s err=%s",
                     msg.reply_uid, exc,
                 )
+                self._note_send_failure(str(exc))
 
             if not success:
                 consecutive_fails += 1
@@ -531,32 +702,90 @@ class LiveRobot:
             self.logger.warning("Error processing LIKE_INFO_V3_CLICK: %s", exc)
 
     async def _on_gift(self, event: dict[str, Any]) -> None:
-        if not self.config.features.thanks_enabled:
-            return
-
+        """旧协议礼物事件（SEND_GIFT / COMBO_SEND / UNIVERSAL_EVENT_GIFT*）。"""
         gift = _extract_gift_payload(event)
         if gift is None:
             return
-
-        uid = gift["uid"]
-        uname = gift["uname"]
-        gift_name = gift["gift_name"]
-        gift_num = gift["gift_num"]
-
-        self.logger.debug(
-            "gift event: type=%s uid=%s gift_name=%s num=%s raw_keys=%s",
-            gift["event_type"], uid, gift_name, gift_num,
-            list(gift["raw"].keys()),
+        await self._handle_gift_payload(
+            gift["raw"], gift["event_type"], gift_name_fallback=gift["gift_name"]
         )
 
-        # Record to DB regardless of cooldown — always persist stats
+    async def _on_gift_v2(self, event: dict[str, Any]) -> None:
+        """新协议礼物事件 SEND_GIFT_V2（2026-07 起灰度，protobuf 编码）。
+
+        礼物数据在 `data.data.pb`（base64 protobuf），一个事件里可能打包了
+        多件礼物（盲盒批量），必须逐件记录，否则统计会少算。
+        """
+        data = event.get("data")
+        inner = data.get("data") if isinstance(data, dict) else None
+        pb = inner.get("pb") if isinstance(inner, dict) else None
+        if not pb:
+            self.logger.debug(
+                "SEND_GIFT_V2 without pb payload: keys=%s",
+                list(inner.keys()) if isinstance(inner, dict) else inner,
+            )
+            return
+
+        payloads = decode_send_gift_v2(pb)
+        if not payloads:
+            self.logger.warning("SEND_GIFT_V2 decode failed (pb len=%s)", len(pb))
+            return
+
+        for payload in payloads:
+            await self._handle_gift_payload(payload, "SEND_GIFT")
+
+    async def _handle_gift_payload(
+        self,
+        payload: dict[str, Any],
+        event_type: str,
+        gift_name_fallback: str = "gift",
+    ) -> None:
+        uid = _safe_int(payload.get("uid"))
+        uname = str(payload.get("uname") or "")
+        gift_name = str(
+            payload.get("giftName") or payload.get("gift_name") or gift_name_fallback or "gift"
+        )
+        gift_num = max(_safe_int(payload.get("num") or payload.get("gift_num") or 1), 1)
+
+        if uid <= 0:
+            # 未登录（匿名）连接时 B 站会把 uid/uname 抹掉（uname 形如「要***」），
+            # 这种事件无法归属到用户，只能丢弃并提示 —— 通常意味着凭证没生效。
+            self._warn_gift_without_uid(uname, gift_name)
+            return
+
+        # 灰度期间同一件礼物可能同时走新旧协议推送，按 tid/rnd 去重，避免重复计账
+        # （只对新协议事件做去重判断：旧协议 COMBO_SEND 可能与 SEND_GIFT 同 tid 但语义不同）
+        is_v2 = payload.get("src_protocol") == "SEND_GIFT_V2"
+        dedupe_key = (
+            uid,
+            str(payload.get("tid") or payload.get("rnd") or "")
+            or f"{gift_name}:{gift_num}:{payload.get('timestamp') or 0}",
+        )
+        now_mono = time.time()
+        seen = self._recent_gifts.get(dedupe_key)
+        if is_v2 and seen is not None and now_mono - seen < 120:
+            self.logger.debug("duplicate gift skipped: %s %s", uname, gift_name)
+            return
+        self._recent_gifts[dedupe_key] = now_mono
+        if len(self._recent_gifts) > 2000:
+            self._recent_gifts = {
+                k: v for k, v in self._recent_gifts.items() if now_mono - v < 300
+            }
+
+        self._last_gift_ts = int(time.time())
+
+        self.logger.debug(
+            "gift event: type=%s uid=%s gift_name=%s num=%s proto=%s",
+            event_type, uid, gift_name, gift_num, payload.get("src_protocol", "json"),
+        )
+
+        # 统计与「感谢开关」解耦：即使关闭感谢，也必须记录礼物
         now = time.time()
-        blind = _extract_blindbox_profit(gift["raw"])
+        blind = _extract_blindbox_profit(payload)
         if not blind["is_blind_box"]:
             self.logger.debug(
-                "gift not detected as blindbox: uid=%s gift_name=%s raw_keys=%s blind_gift=%s",
-                uid, gift_name, list(gift["raw"].keys()),
-                gift["raw"].get("blind_gift"),
+                "gift not detected as blindbox: uid=%s gift_name=%s blind_gift=%s",
+                uid, gift_name, payload.get("blind_gift"),
             )
         is_blind = 1 if blind["is_blind_box"] else 0
         cost = blind["blind_box_cost"]
@@ -569,16 +798,20 @@ class LiveRobot:
             month=month,
             uid=uid,
             uname=uname,
-            event_type=gift["event_type"],
+            # 统一写 SEND_GIFT：兼容既有排行/导出 SQL（真实协议见 raw_json.src_protocol）
+            event_type="SEND_GIFT",
             gift_name=gift_name,
             gift_num=gift_num,
             is_blind_box=is_blind,
             blind_box_cost=cost,
             actual_value=actual,
             profit_value=profit,
-            raw_json=json.dumps(gift["raw"], ensure_ascii=False),
+            raw_json=json.dumps(payload, ensure_ascii=False),
         )
         self.store.record_gift_event(event_row)
+
+        if not self.config.features.thanks_enabled:
+            return
 
         # Cooldown only gates the thank-you message, not recording
         # 当 cooldown=0 时跳过（完全依赖限流队列的 send_interval_seconds 控制发送间隔）
@@ -601,6 +834,18 @@ class LiveRobot:
                 thanks += f"，{profit}电池"
 
         await self._enqueue_message(text=thanks, reply_uid=uid)
+
+    def _warn_gift_without_uid(self, uname: str, gift_name: str) -> None:
+        """礼物事件缺少 uid 时给出限流告警（常见原因：凭证失效/匿名连接）。"""
+        now = time.time()
+        if now - getattr(self, "_last_uid_warn_ts", 0.0) < 60:
+            return
+        self._last_uid_warn_ts = now
+        self.logger.warning(
+            "gift ignored: uid missing (uname=%r gift=%r) — 未登录态下 B站会屏蔽用户信息，"
+            "请检查 B站账号凭证是否有效",
+            uname, gift_name,
+        )
 
     async def _on_special_gift(self, event: dict[str, Any]) -> None:
         self.logger.debug(
@@ -653,6 +898,7 @@ class LiveRobot:
             return
 
         uid, uname, text, moderator_hint = parsed
+        self._last_danmaku_ts = int(time.time())
         self.logger.debug("danmaku received: uid=%s text=%s (anchor_uid=%s)", uid, text, self.config.anchor_uid)
 
         # ── UID 黑名单 ──

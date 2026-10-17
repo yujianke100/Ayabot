@@ -47,7 +47,8 @@
 
 > **下载链接**：[Ayabot-latest.exe](https://github.com/yujianke100/ayabot/releases/latest/download/Ayabot-latest.exe)（永远指向最新版）
 >
-> 🇨🇳 **国内镜像**：[ghproxy.com 加速](https://ghproxy.com/https://github.com/yujianke100/ayabot/releases/latest/download/Ayabot-latest.exe)
+> 🇨🇳 **国内镜像**：[gh-proxy.com 加速](https://gh-proxy.com/https://github.com/yujianke100/ayabot/releases/latest/download/Ayabot-latest.exe)
+> （管理后台里点「检查更新」会自动测速并推荐当前可用的线路，不用自己猜）
 
 ```
 Ayabot.exe 单独一个文件，双击即运行

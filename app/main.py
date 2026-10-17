@@ -31,22 +31,46 @@ def _setup_logging(level: str) -> None:
     )
 
 
+def _install_exception_hooks() -> None:
+    """把未捕获异常写进日志，避免进程静默退出（Windows 上尤其重要）。"""
+    logger = logging.getLogger("bili-live-robot")
+
+    def _excepthook(exc_type, exc, tb):  # noqa: ANN001
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        logger.critical("unhandled exception", exc_info=(exc_type, exc, tb))
+
+    sys.excepthook = _excepthook
+
+
 async def _run(config_path: str) -> None:
     # 按需导入（避免 init 操作时触发 bilibili_api 等依赖）
-    from .auth import AuthManager  # noqa: PLC0415
+    from .auth import AuthManager, CredentialError  # noqa: PLC0415
     from .bot import LiveRobot  # noqa: PLC0415
 
     config = load_config(config_path)
     _setup_logging(config.runtime.log_level)
+    asyncio.get_running_loop().set_exception_handler(
+        lambda loop, ctx: logging.getLogger("bili-live-robot").error(
+            "asyncio loop error: %s", ctx.get("message"), exc_info=ctx.get("exception")
+        )
+    )
 
     from app.web.server import init_app  # noqa: PLC0415
     init_app(config, config_path=config_path)
 
     auth = AuthManager(config)
-    credential = await auth.prepare_credential()
+    try:
+        credential = await auth.prepare_credential()
+    except CredentialError as exc:
+        # 凭证不可用且未配置等待登录：给出可操作的提示，而不是抛栈
+        auth.mark_needs_login(str(exc))
+        logging.getLogger("bili-live-robot").error("%s", exc)
+        return
     auth.start_refresh_loop(credential)
 
-    robot = LiveRobot(config=config, credential=credential)
+    robot = LiveRobot(config=config, credential=credential, auth=auth)
     try:
         await robot.run()
     finally:
@@ -106,6 +130,7 @@ def main() -> None:
         config_path = "config.yaml"
 
     try:
+        _install_exception_hooks()
         asyncio.run(_run(config_path))
     except KeyboardInterrupt:
         pass

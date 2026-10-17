@@ -34,7 +34,7 @@ import uvicorn
 from bilibili_api import live
 
 from app.config import DEFAULT_ROOMS_DIR
-from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room, set_rooms_base_dir, start_room_async, stop_room_async, restart_room_async, start_periodic_log_cleanup, cleanup_all_stale_pidfiles
+from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room, set_rooms_base_dir, start_room_async, stop_room_async, restart_room_async, start_periodic_log_cleanup, cleanup_all_stale_pidfiles, last_exit_code
 from app.version import get_version_display
 
 _APP_VERSION = get_version_display()
@@ -137,6 +137,65 @@ def _load_room_states() -> dict[str, bool]:
     except Exception as exc:
         logger.warning("load room states failed: %s", exc)
     return {}
+
+
+# ── 期望状态（用户显式 start/stop 决定，守护进程据此自动恢复） ──
+
+_DESIRED_STATES_PATH = "data/desired_states.json"
+
+
+def _desired_path() -> Path:
+    return Path(_ROOMS_BASE_DIR).resolve() / _DESIRED_STATES_PATH
+
+
+def _load_desired_states() -> dict[str, bool]:
+    p = _desired_path()
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {str(k): bool(v) for k, v in data.items()}
+        except Exception as exc:
+            logger.warning("load desired states failed: %s", exc)
+    # 首次升级：从旧 room_states.json 迁移
+    legacy = _load_room_states()
+    if legacy:
+        _save_desired_states(legacy)
+        return legacy
+    return {}
+
+
+def _save_desired_states(states: dict[str, bool]) -> None:
+    try:
+        p = _desired_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(states, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("save desired states failed: %s", exc)
+
+
+def _mark_desired(room_id: str, running: bool) -> None:
+    states = _load_desired_states()
+    states[str(room_id)] = bool(running)
+    _save_desired_states(states)
+
+
+def _room_data_file(room_id: str, name: str) -> Path:
+    """房间 data 目录下的状态文件（心跳/凭证状态/崩溃记录）。"""
+    return Path(_ROOMS_BASE_DIR).resolve() / "rooms" / room_id / "data" / name
+
+
+def _read_room_json(room_id: str, name: str) -> dict:
+    try:
+        path = _room_data_file(room_id, name)
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
 
 
 def get_llm_config() -> dict[str, Any]:
@@ -451,6 +510,8 @@ async def _startup():
     start_periodic_log_cleanup()
     # 自动启动所有已配置的房间（Docker 部署时自动拉起）
     asyncio.create_task(_auto_start_rooms())
+    # 房间守护：崩溃/假死自动恢复
+    asyncio.create_task(_supervise_loop())
 
 
 @app.on_event("shutdown")
@@ -472,6 +533,7 @@ async def _auto_start_rooms() -> None:
         await asyncio.sleep(3)
         cleanup_all_stale_pidfiles()
         saved = _load_room_states()
+        desired = _load_desired_states()
         rooms = _list_rooms_from_disk()
         if not rooms:
             logger.info("auto-start: no rooms found on disk")
@@ -479,7 +541,7 @@ async def _auto_start_rooms() -> None:
         started = 0
         for room in rooms:
             room_id = room["room_id"]
-            should_run = saved.get(room_id, False)
+            should_run = desired.get(room_id, saved.get(room_id, False))
             status = room_status(room_id)
             if should_run and status != "running":
                 logger.info("auto-start: starting room %s (was running before restart)", room_id)
@@ -498,6 +560,132 @@ async def _auto_start_rooms() -> None:
         _save_room_states()
     except Exception as exc:
         logger.error("auto-start: error: %s", exc, exc_info=True)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  房间守护：崩溃/假死自动恢复
+# ══════════════════════════════════════════════════════════════════
+
+_SUPERVISE_INTERVAL = 20.0          # 巡检间隔（秒）
+_HEARTBEAT_STALE_SECONDS = 180      # 心跳超过该时长视为假死
+_CRASH_WINDOW = 900.0               # 崩溃统计窗口（15 分钟）
+_CRASH_MAX_ATTEMPTS = 5             # 窗口内最多自动重启次数
+_CRASH_COOLDOWN = 600.0             # 超过次数后冷却 10 分钟
+
+_restart_attempts: dict[str, list[float]] = {}
+_zombie_restarts: dict[str, float] = {}
+
+
+def _crash_info_path(room_id: str) -> Path:
+    return Path(_ROOMS_BASE_DIR).resolve() / "rooms" / room_id / "data" / "crash_info.json"
+
+
+def _write_crash_info(room_id: str, reason: str, exit_code: Optional[int] = None) -> None:
+    try:
+        path = _crash_info_path(room_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "ts": int(time.time()),
+            "reason": reason,
+            "exit_code": exit_code,
+            "attempts": len(_restart_attempts.get(room_id, [])),
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("write crash info failed: %s", exc)
+
+
+def _read_crash_info(room_id: str) -> dict:
+    try:
+        path = _crash_info_path(room_id)
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
+def _restart_allowed(room_id: str, now: float) -> bool:
+    """崩溃重启限流：窗口内最多 5 次，超限后冷却。"""
+    history = [t for t in _restart_attempts.get(room_id, []) if now - t < _CRASH_WINDOW]
+    _restart_attempts[room_id] = history
+    if len(history) < _CRASH_MAX_ATTEMPTS:
+        return True
+    return (now - history[-1]) > _CRASH_COOLDOWN
+
+
+async def _recover_room(room_id: str, reason: str, now: float) -> None:
+    if not _restart_allowed(room_id, now):
+        logger.warning(
+            "supervisor: room %s crashed too often (%d times/15min), 冷却中，暂停自动重启",
+            room_id, len(_restart_attempts.get(room_id, [])),
+        )
+        return
+    _restart_attempts.setdefault(room_id, []).append(now)
+    exit_code = last_exit_code(room_id)
+    _write_crash_info(room_id, reason, exit_code)
+    logger.warning(
+        "supervisor: room %s %s (exit_code=%s) — 自动重启 (第 %d 次)",
+        room_id, reason, exit_code, len(_restart_attempts[room_id]),
+    )
+    try:
+        ok = await restart_room_async(room_id)
+        if not ok:
+            logger.error("supervisor: room %s restart failed", room_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("supervisor: room %s restart error: %s", room_id, exc, exc_info=True)
+
+
+async def _supervise_once() -> None:
+    desired = _load_desired_states()
+    if not desired:
+        return
+    rooms = {r["room_id"] for r in _list_rooms_from_disk()}
+    now = time.time()
+    for room_id, should_run in desired.items():
+        if not should_run or room_id not in rooms:
+            continue
+        try:
+            if room_status(room_id) != "running":
+                # 用户主动点「停止」会把 desired 置 false，所以这里只可能是崩溃
+                await _recover_room(room_id, "进程已退出", now)
+                continue
+
+            heartbeat = _read_room_json(room_id, "bot_status.json")
+            ts = int(heartbeat.get("ts") or 0)
+            if not ts:
+                continue
+            stale = now - ts
+            if stale <= _HEARTBEAT_STALE_SECONDS:
+                continue
+            # 进程还在但心跳停了：卡死 / 事件循环阻塞 / 连接僵死
+            if now - _zombie_restarts.get(room_id, 0.0) < _CRASH_COOLDOWN:
+                continue
+            _zombie_restarts[room_id] = now
+            _write_crash_info(room_id, f"心跳超时 {int(stale)}s（疑似卡死）", None)
+            logger.warning(
+                "supervisor: room %s heartbeat stale %.0fs — 重启", room_id, stale
+            )
+            try:
+                await restart_room_async(room_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("supervisor: zombie restart failed for %s: %s", room_id, exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("supervisor: room %s check error: %s", room_id, exc, exc_info=True)
+
+
+async def _supervise_loop() -> None:
+    """后台巡检：进程崩溃/假死时自动重启（Windows 上「机器人意外关闭」的兜底）。"""
+    await asyncio.sleep(_SUPERVISE_INTERVAL)
+    logger.info("room supervisor started (interval=%ss)", int(_SUPERVISE_INTERVAL))
+    while True:
+        try:
+            await _supervise_once()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("supervisor error: %s", exc, exc_info=True)
+        await asyncio.sleep(_SUPERVISE_INTERVAL)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1440,6 +1628,147 @@ async def api_user_change_password(request: Request):
 
 
 # ══════════════════════════════════════════════════════════════
+#  更新检查（自动选择国内可用的 GitHub 加速镜像）
+# ══════════════════════════════════════════════════════════════
+
+_UPDATE_REPO = "yujianke100/ayabot"
+_UPDATE_ASSET = "Ayabot-latest.exe"
+_GH_RELEASE_API = f"https://api.github.com/repos/{_UPDATE_REPO}/releases/latest"
+# 元数据（版本号）候选：直连 + 能代理 api.github.com 的加速站
+_META_SOURCES: tuple[tuple[str, str], ...] = (
+    ("GitHub", ""),
+    ("gh-proxy.com", "https://gh-proxy.com/"),
+    ("gh-proxy.net", "https://gh-proxy.net/"),
+)
+# 安装包下载候选：直连 + 国内加速站（2026-10 实测均可用）
+_DOWNLOAD_SOURCES: tuple[tuple[str, str], ...] = (
+    ("GitHub", ""),
+    ("gh-proxy.com", "https://gh-proxy.com/"),
+    ("gh.llkk.cc", "https://gh.llkk.cc/"),
+    ("ghfile.geekertao.top", "https://ghfile.geekertao.top/"),
+    ("ghfast.top", "https://ghfast.top/"),
+    ("ghproxy.net", "https://ghproxy.net/"),
+)
+
+
+def _release_urls(latest: str) -> dict[str, str]:
+    tag = f"v{latest}" if not latest.startswith("v") else latest
+    return {
+        "page": f"https://github.com/{_UPDATE_REPO}/releases/tag/{tag}",
+        "asset": f"https://github.com/{_UPDATE_REPO}/releases/download/{tag}/{_UPDATE_ASSET}",
+    }
+
+
+async def _fetch_release_meta(session: aiohttp.ClientSession, name: str, prefix: str) -> Optional[dict]:
+    """从直连/镜像取 latest release 元数据。"""
+    url = prefix + _GH_RELEASE_API
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            if resp.status != 200:
+                logger.debug("update meta %s -> HTTP %s", name, resp.status)
+                return None
+            data = await resp.json(content_type=None)
+        if not isinstance(data, dict) or not data.get("tag_name"):
+            return None
+        return data
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("update meta %s failed: %s", name, exc)
+        return None
+
+
+async def _probe_url(session: aiohttp.ClientSession, name: str, url: str) -> dict[str, Any]:
+    """探测下载地址是否可用（Range 只取 1 字节，省流量）。"""
+    started = time.time()
+    try:
+        async with session.get(
+            url, timeout=aiohttp.ClientTimeout(total=10),
+            headers={"Range": "bytes=0-0"},
+        ) as resp:
+            ok = resp.status < 400
+            size = resp.headers.get("Content-Range") or resp.headers.get("Content-Length") or ""
+        return {
+            "name": name,
+            "url": url,
+            "ok": ok,
+            "status": resp.status,
+            "ms": int((time.time() - started) * 1000),
+            "size": size,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "name": name,
+            "url": url,
+            "ok": False,
+            "error": str(exc)[:80],
+            "ms": int((time.time() - started) * 1000),
+        }
+
+
+def _version_tuple(text: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for chunk in str(text).lstrip("vV").split("."):
+        digits = "".join(ch for ch in chunk if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+@app.get("/api/update/check")
+async def api_update_check():
+    """检查更新，并探测国内加速镜像可用性。
+
+    很多国内用户直连 api.github.com / objects.githubusercontent.com 会超时，
+    因此这里由服务端（就在用户机器上跑）依次尝试直连和加速镜像，把能用的
+    下载地址按速度排好返回，前端不再需要用户自己猜哪个镜像能用。
+    """
+    current = get_version_display()
+    meta: Optional[dict] = None
+    meta_source = ""
+    async with aiohttp.ClientSession(
+        headers={"User-Agent": "Ayabot-UpdateChecker", "Accept": "application/vnd.github+json"},
+        trust_env=True,
+    ) as session:
+        for name, prefix in _META_SOURCES:
+            meta = await _fetch_release_meta(session, name, prefix)
+            if meta is not None:
+                meta_source = name or "GitHub"
+                break
+
+        if meta is None:
+            # 拿不到版本号也把下载镜像探测一遍，方便用户手动下载最新版
+            urls = _release_urls(get_version().lstrip("v"))
+            probes = await asyncio.gather(*[
+                _probe_url(session, name or "GitHub", prefix + urls["asset"])
+                for name, prefix in _DOWNLOAD_SOURCES
+            ])
+            return {
+                "ok": False,
+                "error": "无法获取版本信息（直连与镜像均失败）",
+                "current": current,
+                "downloads": sorted(probes, key=lambda p: (not p["ok"], p.get("ms", 9999))),
+            }
+
+        latest = str(meta.get("tag_name") or "").lstrip("vV")
+        urls = _release_urls(latest)
+        probes = await asyncio.gather(*[
+            _probe_url(session, name or "GitHub", prefix + urls["asset"])
+            for name, prefix in _DOWNLOAD_SOURCES
+        ])
+    downloads = sorted(probes, key=lambda p: (not p["ok"], p.get("ms", 9999)))
+    return {
+        "ok": True,
+        "current": current,
+        "latest": "v" + latest,
+        "has_update": _version_tuple(latest) > _version_tuple(current),
+        "meta_source": meta_source,
+        "page_url": urls["page"],
+        "changelog": str(meta.get("body") or ""),
+        "published_at": meta.get("published_at") or "",
+        "downloads": downloads,
+        "recommended": next((d for d in downloads if d["ok"]), downloads[0]),
+    }
+
+
+# ══════════════════════════════════════════════════════════════
 #  多房间管理 API
 # ══════════════════════════════════════════════════════════════
 
@@ -1530,9 +1859,42 @@ async def api_list_rooms(request: Request):
     rooms = _list_rooms_from_disk()
     # 补齐 account_nick
     accounts_map = {a["uid"]: a.get("nickname", "") for a in _list_accounts()}
+    now = int(time.time())
     for r in rooms:
         if r.get("account_uid"):
             r["account_nick"] = accounts_map.get(str(r["account_uid"]), "")
+        rid = r["room_id"]
+        # B站凭证状态（needs_login → 前端引导重新扫码）
+        auth_st = _read_room_json(rid, "auth_status.json")
+        r["auth_status"] = auth_st.get("status", "ok")
+        r["auth_reason"] = auth_st.get("reason", "")
+        # 用户已经重新扫码（凭证文件比状态文件新）时不必再提示，等机器人自己恢复
+        if r["auth_status"] == "needs_login" and r.get("account_uid"):
+            try:
+                cred_file = _get_account_dir(str(r["account_uid"])) / "credential.json"
+                status_file = _room_data_file(rid, "auth_status.json")
+                if cred_file.exists() and status_file.exists():
+                    cred_mtime = int(cred_file.stat().st_mtime)
+                    status_mtime = int(status_file.stat().st_mtime)
+                    if cred_mtime > status_mtime + 5:
+                        r["auth_status"] = "ok"
+                        r["auth_reason"] = ""
+            except Exception:  # noqa: BLE001
+                pass
+        # 心跳（进程活着但掉线时前端能显示细节）
+        hb = _read_room_json(rid, "bot_status.json")
+        r["heartbeat"] = hb
+        if hb.get("ts"):
+            r["heartbeat_age"] = now - int(hb["ts"])
+        # 上次崩溃记录
+        crash = _read_crash_info(rid)
+        if crash:
+            r["crash_info"] = crash
+            r["recent_crash"] = (now - int(crash.get("ts") or 0)) < 900
+        else:
+            r["recent_crash"] = False
+        if r.get("status") == "running" and r["auth_status"] == "needs_login":
+            r["status_note"] = "运行中（等待重新登录）"
     # 根据用户角色过滤
     token = request.cookies.get("session", "")
     _, role, allowed = _user_role(token)
@@ -1617,7 +1979,14 @@ async def api_start_room(room_id: str):
     ok = await start_room_async(room_id)
     if not ok:
         return JSONResponse({"error": "启动失败，请检查配置"}, status_code=500)
+    _mark_desired(room_id, True)
     _save_room_states()
+    # 清除上次崩溃记录
+    try:
+        _crash_info_path(room_id).unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001
+        pass
+    _restart_attempts.pop(room_id, None)
     return {"ok": True, "status": "running"}
 
 
@@ -1625,6 +1994,7 @@ async def api_start_room(room_id: str):
 async def api_stop_room(room_id: str):
     """停止房间 Bot（同时清理同进程和子进程）。"""
     await stop_room_async(room_id)
+    _mark_desired(room_id, False)
     _save_room_states()
     return {"ok": True, "status": "stopped"}
 
@@ -1633,6 +2003,8 @@ async def api_stop_room(room_id: str):
 async def api_restart_room(room_id: str):
     """重启房间 Bot（自动选择同进程/子进程模式）。"""
     ok = await restart_room_async(room_id)
+    if ok:
+        _mark_desired(room_id, True)
     _save_room_states()
     return {"ok": ok, "status": "running" if ok else "stopped"}
 
@@ -3625,9 +3997,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
                         <span v-if="r.room_name" class="text-xs text-gray-400">#{{ r.room_id }}</span>
                         <span class="text-xs text-gray-400 ml-1">UID: {{ r.anchor_uid }}</span>
                     </div>
-                    <div class="text-xs text-gray-500 mt-1 flex gap-3">
+                    <div class="text-xs text-gray-500 mt-1 flex gap-3 flex-wrap items-center">
                         <span>状态: {{ r.status === 'running' ? '🟢 运行中' : '⏹️ 已停止' }}</span>
                         <span v-if="r.account_nick">账号: {{ r.account_nick }}</span>
+                        <span v-if="r.auth_status === 'needs_login'"
+                              class="px-2 py-0.5 rounded bg-red-100 text-red-600 font-medium">
+                            ⚠️ 登录已失效，需重新扫码
+                        </span>
+                        <span v-else-if="r.recent_crash"
+                              class="px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">
+                            ⚠️ 刚发生异常退出（已自动恢复）
+                        </span>
                     </div>
                 </div>
                 <div class="flex gap-2 items-center" @click.stop>
@@ -3653,6 +4033,31 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div class="mb-4">
             <button @click="goBackRoomList()"
                     class="text-blue-500 hover:text-blue-700 text-sm">&larr; 返回房间列表</button>
+        </div>
+
+        <!-- 登录失效引导（凭证不可用时引导重新扫码，而不是报错） -->
+        <div v-if="selectedRoom && selectedRoom.auth_status === 'needs_login'"
+             class="bg-red-50 border border-red-200 rounded-xl p-4 mb-4 flex items-start gap-3">
+            <div class="text-2xl">⚠️</div>
+            <div class="flex-1">
+                <div class="font-bold text-red-700 text-sm">B站 登录凭证已失效，机器人需要重新登录才能发弹幕/统计礼物</div>
+                <div class="text-xs text-red-600 mt-1">
+                    {{ selectedRoom.auth_reason || 'Cookie 已过期或被踢下线' }}
+                </div>
+                <div class="text-xs text-gray-600 mt-1">
+                    机器人进程保持运行中，扫码登录成功后会自动恢复，无需重启房间。
+                </div>
+            </div>
+            <button @click="goRelogin()"
+                    class="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded text-xs whitespace-nowrap">
+                📱 去扫码登录
+            </button>
+        </div>
+
+        <!-- 异常退出提示（自动守护已恢复） -->
+        <div v-if="selectedRoom && selectedRoom.recent_crash"
+             class="bg-yellow-50 border border-yellow-200 rounded-xl p-3 mb-4 text-xs text-yellow-800">
+            ⚠️ 机器人刚刚异常退出（{{ selectedRoom.crash_info?.reason }}<span v-if="selectedRoom.crash_info?.exit_code !== null && selectedRoom.crash_info?.exit_code !== undefined">，退出码 {{ selectedRoom.crash_info.exit_code }}</span>），守护进程已自动重启。
         </div>
 
         <!-- 房间信息头 -->
@@ -3926,6 +4331,45 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <label class="text-xs text-gray-500">API Key
                     <input type="password" v-model="llmApiKey" placeholder="sk-..." class="border p-2 rounded w-full text-sm mt-1">
                 </label>
+
+                <!-- 小感叹号：没有 API Key 也能用 —— 魔搭每日免费额度（点击展开） -->
+                <div class="text-xs -mt-1">
+                    <div class="flex items-start gap-1.5">
+                        <button type="button" @click="showMsTip = !showMsTip"
+                                class="inline-flex items-center justify-center w-4 h-4 mt-[2px] shrink-0 rounded-full
+                                       bg-amber-400 hover:bg-amber-500 text-white text-[10px] font-bold
+                                       cursor-pointer select-none"
+                                title="魔搭 ModelScope 每天提供免费 API 调用额度，点击看怎么填">
+                            !
+                        </button>
+                        <span class="text-gray-400 leading-snug">
+                            没有 API Key？<a href="https://modelscope.cn" target="_blank"
+                                           class="text-blue-500 hover:underline">魔搭 ModelScope</a>
+                            每天提供免费调用额度
+                            <span class="text-blue-400 cursor-pointer hover:underline" @click="showMsTip = !showMsTip">
+                                {{ showMsTip ? '收起' : '（点感叹号看怎么填）' }}
+                            </span>
+                        </span>
+                    </div>
+                    <div v-if="showMsTip"
+                         class="mt-2 ml-5 rounded-lg bg-gray-800 text-white text-[11px] leading-relaxed p-3 shadow-sm">
+                        <div class="font-bold text-amber-300 mb-1">没有 API Key？可以白嫖魔搭的每日免费额度</div>
+                        <div class="text-gray-200">
+                            魔搭社区（ModelScope）每天赠送 <b>2000 次免费 API 调用</b>（部分模型另有 500 次/天），
+                            手机号注册即可领取，做直播聊天机器人日常够用。
+                        </div>
+                        <div class="mt-2 text-gray-300 space-y-0.5">
+                            <div>Base URL 填：<code class="text-amber-200">https://api-inference.modelscope.cn/v1</code></div>
+                            <div>API Key：
+                                <a href="https://modelscope.cn/my/myaccesstoken" target="_blank"
+                                   class="text-blue-300 hover:underline">modelscope.cn/my/myaccesstoken</a>
+                                新建令牌后复制
+                            </div>
+                            <div>模型名填魔搭的模型 ID，例如 <code class="text-amber-200">Qwen/Qwen2.5-7B-Instruct</code></div>
+                        </div>
+                        <div class="mt-2 text-[10px] text-gray-400">额度与规则以魔搭官网为准，超出后需自行绑定付费。</div>
+                    </div>
+                </div>
 
                 <label class="text-xs text-gray-500">Base URL
                     <input type="url" v-model="llmBaseUrl" placeholder="https://api.openai.com/v1" class="border p-2 rounded w-full text-sm mt-1">
@@ -5102,13 +5546,29 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                 最新版本：<span class="font-mono font-bold text-green-600">{{ updateData.latest }}</span>
                             </p>
                             <div v-if="updateData.hasUpdate" class="pt-3 space-y-2">
-                                <a :href="updateData.url" target="_blank"
-                                   class="block w-full bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
-                                   📥 GitHub 下载
-                                </a>
-                                <a :href="updateData.mirrorUrl" target="_blank"
+                                <a v-if="updateData.recommended" :href="updateData.recommended.url" target="_blank"
                                    class="block w-full bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">
-                                   🇨🇳 国内镜像下载
+                                   📥 下载 {{ updateData.latest }}
+                                   <span class="text-xs opacity-80">
+                                       （{{ updateData.recommended.name === 'GitHub' ? 'GitHub 直连' : '国内镜像 ' + updateData.recommended.name }}）
+                                   </span>
+                                </a>
+                                <div v-if="updateData.downloads && updateData.downloads.length > 1" class="text-left">
+                                    <p class="text-[11px] text-gray-400 mb-1">
+                                        其他线路（已自动测速，✅ 可用 / ❌ 当前不通）：
+                                    </p>
+                                    <div class="space-y-1 max-h-56 overflow-y-auto">
+                                        <a v-for="d in updateData.downloads" :key="d.name" :href="d.url" target="_blank"
+                                           class="flex items-center justify-between gap-2 text-xs px-2 py-1 rounded hover:bg-gray-50"
+                                           :class="d.ok ? 'text-gray-600' : 'text-gray-300'">
+                                            <span>{{ d.ok ? '✅' : '❌' }} {{ d.name === 'GitHub' ? 'GitHub 直连' : d.name }}</span>
+                                            <span class="font-mono text-[10px]">{{ d.ok ? d.ms + 'ms' : (d.status || '超时') }}</span>
+                                        </a>
+                                    </div>
+                                </div>
+                                <a :href="updateData.url" target="_blank"
+                                   class="block w-full bg-blue-50 hover:bg-blue-100 text-blue-600 px-4 py-2 rounded text-sm">
+                                   📄 查看 Release 页面
                                 </a>
                             </div>
                             <div class="pt-3">
@@ -5456,26 +5916,51 @@ createApp({
             updateError.value = '';
             updateData.value = null;
             try {
-                const r = await fetch('https://api.github.com/repos/yujianke100/ayabot/releases/latest', {
-                    signal: AbortSignal.timeout(8000)
+                // 服务端检查：会依次尝试直连与国内加速镜像，并探测哪个下载地址可用
+                const r = await fetch('/api/update/check', {
+                    credentials: 'include',
+                    signal: AbortSignal.timeout(25000)
                 });
                 if (!r.ok) throw new Error(`HTTP ${r.status}`);
                 const j = await r.json();
-                const latest = (j.tag_name || '').replace(/^v/i, '');
-                // 从页面版本文本读取当前版本（格式如 v1.0.1，去掉 v 前缀再比较）
-                const verEl = document.querySelector('[data-ayabot-version]');
-                const current = (verEl ? verEl.getAttribute('data-ayabot-version') : '0').replace(/^v/i, '');
-                const hasUpdate = latest.localeCompare(current, undefined, {numeric: true}) > 0;
+                if (!j.ok) throw new Error(j.error || '无法获取版本信息');
                 updateData.value = {
-                    hasUpdate,
-                    current: 'v' + current,
-                    latest: 'v' + latest,
-                    url: j.html_url || 'https://github.com/yujianke100/ayabot/releases',
-                    mirrorUrl: 'https://ghfast.top/https://github.com/yujianke100/ayabot/releases/latest/download/Ayabot-latest.exe',
-                    changelogUrl: 'https://github.com/yujianke100/ayabot/releases/tag/v' + latest,
+                    hasUpdate: !!j.has_update,
+                    current: j.current,
+                    latest: j.latest,
+                    url: j.page_url || 'https://github.com/yujianke100/ayabot/releases',
+                    changelogUrl: j.page_url || 'https://github.com/yujianke100/ayabot/releases',
+                    downloads: j.downloads || [],
+                    recommended: j.recommended || null,
+                    metaSource: j.meta_source || '',
+                    changelog: j.changelog || '',
                 };
             } catch(e) {
-                updateError.value = e.message || '网络错误，请稍后重试';
+                // 兜底：老版本/离线环境仍直接问 GitHub
+                try {
+                    const r2 = await fetch('https://api.github.com/repos/yujianke100/ayabot/releases/latest', {
+                        signal: AbortSignal.timeout(8000)
+                    });
+                    if (!r2.ok) throw new Error(`HTTP ${r2.status}`);
+                    const j2 = await r2.json();
+                    const latest = (j2.tag_name || '').replace(/^v/i, '');
+                    const verEl = document.querySelector('[data-ayabot-version]');
+                    const current = (verEl ? verEl.getAttribute('data-ayabot-version') : '0').replace(/^v/i, '');
+                    const asset = `https://github.com/yujianke100/ayabot/releases/download/v${latest}/Ayabot-latest.exe`;
+                    updateData.value = {
+                        hasUpdate: latest.localeCompare(current, undefined, {numeric: true}) > 0,
+                        current: 'v' + current,
+                        latest: 'v' + latest,
+                        url: j2.html_url || 'https://github.com/yujianke100/ayabot/releases',
+                        changelogUrl: 'https://github.com/yujianke100/ayabot/releases/tag/v' + latest,
+                        downloads: [{name: 'GitHub', url: asset, ok: true}],
+                        recommended: {name: 'GitHub', url: asset, ok: true},
+                        metaSource: 'GitHub（前端直连）',
+                        changelog: j2.body || '',
+                    };
+                } catch(e2) {
+                    updateError.value = (e.message || '') + ' / ' + (e2.message || '网络错误');
+                }
             } finally {
                 updateChecking.value = false;
             }
@@ -5534,6 +6019,7 @@ createApp({
         const llmProvider = ref('openai');
         const llmApiKey = ref('');
         const llmApiKeyReal = ref('');  // 真实的 API key（不掩码）
+        const showMsTip = ref(false);   // 魔搭免费额度提示是否展开
         const llmBaseUrl = ref('');
         const llmModel = ref('');
         const llmWakeWord = ref('ayabot');
@@ -5623,6 +6109,12 @@ createApp({
                 await loadAccounts();
                 await loadUsers();
                 await loadTemplates();
+                // 房间状态/凭证失效需要实时反映（守护进程会自动重启/等待登录）
+                if (!window.__roomStatusTimer) {
+                    window.__roomStatusTimer = setInterval(() => {
+                        if (loggedIn.value) loadRooms();
+                    }, 15000);
+                }
             } catch(e) { loginErr.value = '登录失败: ' + e.message; }
         }
         function doLogout() {
@@ -5768,6 +6260,15 @@ createApp({
         }
         function toggleCreateRoom() { showCreateRoom.value = !showCreateRoom.value; }
         function toggleNewAccount() { showNewAccount.value = !showNewAccount.value; }
+        // 登录失效时的一键恢复：跳到「用户管理 → B站账号」并直接开二维码
+        async function goRelogin() {
+            tab.value = 'users';
+            showNewAccount.value = true;
+            accountQrState.value = 'idle';
+            accountQrError.value = '';
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+            await startAccountLogin();
+        }
         async function assignAccountToRoom() {
             const rid = selectedRoom.value?.room_id;
             if (!rid) return;
@@ -5933,6 +6434,8 @@ createApp({
                 accountQrState.value = 'error';
             }
             await loadAccounts();
+            // 扫码成功：机器人会自动拾取新凭证，刷新房间状态让提示消失
+            await loadRooms();
             return ok;
         }
         async function refreshAccount(uid) {
@@ -6815,6 +7318,11 @@ createApp({
                 const data = await res.json();
                 rooms.value = data.rooms || [];
                 allRooms.value = data.rooms || [];
+                // 同步当前打开的详情页（凭证状态/心跳/崩溃信息需要实时反映）
+                if (selectedRoom.value) {
+                    const fresh = (data.rooms || []).find(x => x.room_id === selectedRoom.value.room_id);
+                    if (fresh) Object.assign(selectedRoom.value, fresh);
+                }
             } catch(e) { /* ignore */ }
         }
         async function createRoom() {
@@ -7834,6 +8342,7 @@ createApp({
                 danmakuRows, danmakuErr, danmakuOffset, danmakuLimit, danmakuTotal, danmakuPage,
                 loadDanmakuLog, clearDanmakuLog, fmtDanmakuTime, loadDmDates, dmToggleDate, dmExportSelected, dmCalDays, dmCalYear, dmCalMonth, dmShowCal, dmSelectedDates, dmDates, dmDatesSet, dmAsc,
                 llmEnabled, llmProvider, llmApiKey, llmBaseUrl, llmModel, llmPrompt,
+                showMsTip,
                 llmWakeWord, llmTemp, llmTopP, llmMaxTokens,
                 llmSaveMsg, llmSaveOk, llmTestText, llmTestResp,
                 ctxEnabled, ctxMode, ctxContent, ctxMaxMsg,
@@ -7847,7 +8356,7 @@ createApp({
                 cfgSaveMsg, cfgSaveOk, loadGeneralConfig,
                 restartMsg, restartOk, restartService,
                 selectedRoom, roomSubTab, roomSubTabs, newRoomAccount, selectedRoomAccount,
-                selectRoom, goBackRoomList, assignAccountToRoom, toggleCreateRoom, toggleNewAccount, downloadUrl, downloadJson, importJsonFile, exportRoomConfig, importRoomConfig, afterImportLlm,
+                selectRoom, goBackRoomList, assignAccountToRoom, toggleCreateRoom, toggleNewAccount, goRelogin, downloadUrl, downloadJson, importJsonFile, exportRoomConfig, importRoomConfig, afterImportLlm,
                 selectRoomSubTab, accountAssignMsg, accountAssignOk, accountRestarting, assignAccountAndRestart,
                 onSortChange,
                 startEditRoomName, saveRoomName, editingRoomName, roomNameEdit,

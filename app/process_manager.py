@@ -41,6 +41,14 @@ _rooms_base_dir: Path | None = None
 # room_id -> (robot, auth_manager, asyncio.Task)
 _inproc_bots: dict[str, tuple[Any, Any, asyncio.Task]] = {}
 
+# 最近一次子进程退出码（用于向 WebUI 汇报崩溃原因）
+_LAST_EXIT_CODE: dict[str, int] = {}
+
+
+def last_exit_code(room_id: str) -> Optional[int]:
+    return _LAST_EXIT_CODE.get(room_id)
+
+
 
 def set_rooms_base_dir(dir_path: str | Path) -> None:
     """设置 rooms/ 的基础目录路径（覆盖默认的自动检测）。"""
@@ -112,7 +120,11 @@ def _use_inprocess() -> bool:
 
 
 async def start_bot_in_process(room_id: str) -> bool:
-    """在当前进程内启动 Bot（asyncio Task），返回 True 表示成功。"""
+    """在当前进程内启动 Bot（asyncio Task），返回 True 表示已受理。
+
+    注意：启动不再阻塞等待凭证校验 —— 登录失效时 Bot 会保持运行并写
+    auth_status.json，由 WebUI 引导用户重新扫码，登录后自动恢复。
+    """
     # 检查是否已在运行
     if _inproc_is_running(room_id):
         logger.info("room %s in-process bot already running", room_id)
@@ -131,18 +143,34 @@ async def start_bot_in_process(room_id: str) -> bool:
 
     try:
         config = load_config(str(config_path))
-        auth = AuthManager(config)
-        credential = await auth.prepare_credential()
-        auth.start_refresh_loop(credential)
-
-        robot = LiveRobot(config=config, credential=credential)
-        task = asyncio.create_task(robot.run())
-        _inproc_bots[room_id] = (robot, auth, task)
-        logger.info("room %s in-process bot started", room_id)
-        return True
     except Exception as exc:
-        logger.error("room %s in-process start failed: %s", room_id, exc, exc_info=True)
+        logger.error("room %s config load failed: %s", room_id, exc, exc_info=True)
         return False
+
+    auth = AuthManager(config)
+    holder: dict[str, Any] = {"robot": None}
+
+    async def _supervised_run() -> None:
+        try:
+            credential = await auth.prepare_credential()
+            auth.start_refresh_loop(credential)
+            robot = LiveRobot(config=config, credential=credential, auth=auth)
+            holder["robot"] = robot
+            await robot.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # 任何异常都不能让同进程 Bot 静默消失（Windows 冻结模式主要崩溃点）
+            logger.error("room %s bot task crashed: %s", room_id, exc, exc_info=True)
+            try:
+                auth.write_status("error", f"机器人异常退出：{exc}"[:300])
+            except Exception:  # noqa: BLE001
+                pass
+
+    task = asyncio.create_task(_supervised_run(), name=f"bot-{room_id}")
+    _inproc_bots[room_id] = (holder, auth, task)
+    logger.info("room %s in-process bot started", room_id)
+    return True
 
 
 async def stop_bot_in_process(room_id: str) -> bool:
@@ -150,9 +178,11 @@ async def stop_bot_in_process(room_id: str) -> bool:
     entry = _inproc_bots.pop(room_id, None)
     if entry is None:
         return True
-    robot, auth, task = entry
+    holder, auth, task = entry
     try:
-        await robot.shutdown()
+        robot = holder.get("robot")
+        if robot is not None:
+            await robot.shutdown()
         task.cancel()
         try:
             await task
@@ -330,6 +360,8 @@ def _is_running(room_id: str) -> bool:
             return True
         # 进程已退出，清理
         _procs.pop(room_id, None)
+        _LAST_EXIT_CODE[room_id] = proc.returncode
+        logger.warning("room %s process exited (code=%s)", room_id, proc.returncode)
 
     # 2) 检查 PID 文件
     pid = _read_pid(room_id)

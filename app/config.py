@@ -135,6 +135,8 @@ class AuthConfig:
     auto_login: bool
     qr_poll_seconds: float
     refresh_interval_seconds: int
+    # 凭证失效时是否保持进程运行、等待用户扫码重新登录（而不是直接退出报错）
+    wait_for_login: bool = True
 
 
 @dataclass(slots=True)
@@ -349,6 +351,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             auto_login=bool(auth.get("auto_login", True)),
             qr_poll_seconds=float(auth.get("qr_poll_seconds", 1.0)),
             refresh_interval_seconds=int(auth.get("refresh_interval_seconds", 3600)),
+            wait_for_login=bool(auth.get("wait_for_login", True)),
         ),
         web_ui=WebUIConfig(
             enabled=bool(web_ui.get("enabled", True)),

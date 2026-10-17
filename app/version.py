@@ -20,8 +20,9 @@ def _find_version_file() -> Path:
 
 
 def get_version() -> str:
-    """从 VERSION 文件读取版本号。"""
-    return _find_version_file().read_text(encoding="utf-8").strip()
+    """从 VERSION 文件读取版本号（去掉 BOM/空白/换行）。"""
+    text = _find_version_file().read_text(encoding="utf-8-sig")
+    return text.strip().lstrip("\ufeff").strip()
 
 
 def get_version_display() -> str:
