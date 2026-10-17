@@ -74,9 +74,18 @@ def main() -> int:
             first = downloads[0]
             if not first.get("ok"):
                 failures.append("recommended 未排在第一个可用线路")
-        # 至少应探测到国内镜像（GitHub 直连在国内常不可用）
-        if not any(d["name"] != "GitHub" and d.get("ok") for d in ok_ones):
-            failures.append("国内镜像均不可用")
+            # 至少应探测到国内镜像（GitHub 直连在国内常不可用）
+            if not any(d["name"] != "GitHub" and d.get("ok") for d in ok_ones):
+                failures.append("国内镜像均不可用")
+            # 推荐线路必须是「可用且不是旧缓存」
+            rec = data.get("recommended") or {}
+            print("recommended:", rec.get("name"), "stale=", rec.get("stale"),
+                  "bytes=", rec.get("total_bytes"), "expected=", data.get("expected_bytes"))
+            if rec.get("stale"):
+                failures.append(f"推荐了缓存旧文件的线路: {rec.get('name')}")
+            stale = [d["name"] for d in downloads if d.get("stale")]
+            if stale:
+                print("检测到缓存旧版的线路:", stale)
         if data.get("ok") and data.get("has_update") and not data.get("recommended"):
             failures.append("有待更新时未给出推荐下载地址")
 

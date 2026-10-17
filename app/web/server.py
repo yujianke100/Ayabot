@@ -1676,8 +1676,18 @@ async def _fetch_release_meta(session: aiohttp.ClientSession, name: str, prefix:
         return None
 
 
-async def _probe_url(session: aiohttp.ClientSession, name: str, url: str) -> dict[str, Any]:
-    """探测下载地址是否可用（Range 只取 1 字节，省流量）。"""
+async def _probe_url(
+    session: aiohttp.ClientSession,
+    name: str,
+    url: str,
+    expected_size: int = 0,
+) -> dict[str, Any]:
+    """探测下载地址是否可用（Range 只取 1 字节，省流量）。
+
+    传了 expected_size 时会核对镜像返回的文件总长：加速站普遍做缓存，
+    Release 资产被重新上传后镜像仍可能吐旧文件（实测 gh.llkk.cc 就这样），
+    这种线路标 stale，不能推荐给用户。
+    """
     started = time.time()
     try:
         async with session.get(
@@ -1686,6 +1696,13 @@ async def _probe_url(session: aiohttp.ClientSession, name: str, url: str) -> dic
         ) as resp:
             ok = resp.status < 400
             size = resp.headers.get("Content-Range") or resp.headers.get("Content-Length") or ""
+        total = 0
+        if "/" in size:
+            tail = size.rsplit("/", 1)[-1].strip()
+            total = int(tail) if tail.isdigit() else 0
+        elif size.strip().isdigit():
+            total = int(size.strip())
+        stale = bool(expected_size and total and total != expected_size)
         return {
             "name": name,
             "url": url,
@@ -1693,12 +1710,15 @@ async def _probe_url(session: aiohttp.ClientSession, name: str, url: str) -> dic
             "status": resp.status,
             "ms": int((time.time() - started) * 1000),
             "size": size,
+            "total_bytes": total,
+            "stale": stale,
         }
     except Exception as exc:  # noqa: BLE001
         return {
             "name": name,
             "url": url,
             "ok": False,
+            "stale": False,
             "error": str(exc)[:80],
             "ms": int((time.time() - started) * 1000),
         }
@@ -1749,11 +1769,24 @@ async def api_update_check():
 
         latest = str(meta.get("tag_name") or "").lstrip("vV")
         urls = _release_urls(latest)
+        # 从 release 元数据里取资产真实大小，用来识别镜像缓存的旧文件
+        expected_size = 0
+        digest = ""
+        for asset in (meta.get("assets") or []):
+            if isinstance(asset, dict) and asset.get("name") == _UPDATE_ASSET:
+                expected_size = int(asset.get("size") or 0)
+                digest = str(asset.get("digest") or "")
+                break
         probes = await asyncio.gather(*[
-            _probe_url(session, name or "GitHub", prefix + urls["asset"])
+            _probe_url(session, name or "GitHub", prefix + urls["asset"], expected_size)
             for name, prefix in _DOWNLOAD_SOURCES
         ])
-    downloads = sorted(probes, key=lambda p: (not p["ok"], p.get("ms", 9999)))
+    # 可用且不是旧缓存优先，其次按延迟
+    downloads = sorted(probes, key=lambda p: (not p["ok"], bool(p.get("stale")), p.get("ms", 9999)))
+    recommended = next((d for d in downloads if d["ok"] and not d.get("stale")), None)
+    if recommended is None:
+        # 全部线路都拿不到新文件时，至少给出可用的（并保留 stale 标记提醒用户）
+        recommended = next((d for d in downloads if d["ok"]), downloads[0])
     return {
         "ok": True,
         "current": current,
@@ -1763,8 +1796,10 @@ async def api_update_check():
         "page_url": urls["page"],
         "changelog": str(meta.get("body") or ""),
         "published_at": meta.get("published_at") or "",
+        "expected_bytes": expected_size,
+        "asset_digest": digest,
         "downloads": downloads,
-        "recommended": next((d for d in downloads if d["ok"]), downloads[0]),
+        "recommended": recommended,
     }
 
 
@@ -5622,7 +5657,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                    class="block w-full bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">
                                    📥 下载 {{ updateData.latest }}
                                    <span class="text-xs opacity-80">
-                                       （{{ updateData.recommended.name === 'GitHub' ? 'GitHub 直连' : '国内镜像 ' + updateData.recommended.name }}）
+                                       （{{ updateData.recommended.name === 'GitHub' ? 'GitHub 直连' : '国内镜像 ' + updateData.recommended.name }}{{ updateData.recommended.stale ? '，该线路缓存未更新' : '' }}）
                                    </span>
                                 </a>
                                 <div v-if="updateData.downloads && updateData.downloads.length > 1" class="text-left">
@@ -5632,8 +5667,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                     <div class="space-y-1 max-h-56 overflow-y-auto">
                                         <a v-for="d in updateData.downloads" :key="d.name" :href="d.url" target="_blank"
                                            class="flex items-center justify-between gap-2 text-xs px-2 py-1 rounded hover:bg-gray-50"
-                                           :class="d.ok ? 'text-gray-600' : 'text-gray-300'">
-                                            <span>{{ d.ok ? '✅' : '❌' }} {{ d.name === 'GitHub' ? 'GitHub 直连' : d.name }}</span>
+                                           :class="d.ok && !d.stale ? 'text-gray-600' : 'text-gray-400'">
+                                            <span>{{ d.ok ? (d.stale ? '⚠️' : '✅') : '❌' }} {{ d.name === 'GitHub' ? 'GitHub 直连' : d.name }}<span v-if="d.stale" class="text-[10px] text-amber-600 ml-1">缓存旧版</span></span>
                                             <span class="font-mono text-[10px]">{{ d.ok ? d.ms + 'ms' : (d.status || '超时') }}</span>
                                         </a>
                                     </div>
