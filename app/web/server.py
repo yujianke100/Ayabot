@@ -3880,6 +3880,18 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <button v-if="userRole === 'admin'" @click="tab='users'" :class="tab==='users'?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">👥 用户管理</button>
         <button @click="tab='help'"  :class="tab==='help' ?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">帮助</button>
     </div>
+    <!-- 新版本提醒（启动静默检查到更新，管理员可见） -->
+    <button v-if="updateNotice && userRole === 'admin'" @click="openUpdateNotice()"
+            class="flex-shrink-0 flex items-center gap-1 bg-amber-50 hover:bg-amber-100 border border-amber-200
+                   text-amber-700 px-2 py-1 rounded-lg text-xs whitespace-nowrap mr-1"
+            :title="'发现新版本 ' + updateNotice + '，点击查看'">
+        <span class="relative flex h-2 w-2">
+            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+            <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+        </span>
+        <span class="hidden sm:inline">新版本 {{ updateNotice }}</span>
+        <span class="sm:hidden">🎁</span>
+    </button>
     <div class="relative flex-shrink-0">
         <button @click="showUserMenu = !showUserMenu" class="text-gray-600 hover:text-gray-800 border rounded px-2 py-1 text-xs whitespace-nowrap">
             {{ loginUser }} ▾
@@ -5579,6 +5591,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
                             </div>
                         </div>
                         <div class="pt-2">
+                            <button v-if="updateData && updateData.hasUpdate" @click="ignoreUpdate"
+                                    class="text-xs text-gray-400 hover:text-gray-600 underline mr-4">忽略此版本</button>
                             <button @click="showUpdateModal = false" class="text-gray-400 hover:text-gray-600 text-sm">关闭</button>
                         </div>
                     </div>
@@ -5858,6 +5872,9 @@ createApp({
         const updateChecking = ref(false);
         const updateError = ref('');
         const updateData = ref(null);
+        // 启动时静默检查到的更新（管理员才提示；可忽略某个版本）
+        const silentUpdate = ref(null);
+        const updateNotice = ref('');   // 非空 = 有未忽略的新版本，值是版本号
         const showChangelog = ref(false);
         const changelogContent = ref('');
         async function viewChangelog() {
@@ -5935,6 +5952,12 @@ createApp({
                     metaSource: j.meta_source || '',
                     changelog: j.changelog || '',
                 };
+                // 手动检查过就同步提示状态（有更新 → 亮红点；已验证最新 → 清掉）
+                if (j.has_update) {
+                    updateNotice.value = j.latest;
+                } else {
+                    updateNotice.value = '';
+                }
             } catch(e) {
                 // 兜底：老版本/离线环境仍直接问 GitHub
                 try {
@@ -5964,6 +5987,55 @@ createApp({
             } finally {
                 updateChecking.value = false;
             }
+        }
+
+        // ── 启动静默检查更新（不打断操作，只在导航栏亮一个提示） ──
+        function _ignoredVersion() {
+            try { return localStorage.getItem('ayabot_ignored_version') || ''; } catch(e) { return ''; }
+        }
+        async function silentCheckUpdate() {
+            if (userRole.value !== 'admin') return;   // 只有管理员能更新，普通用户不打扰
+            try {
+                const r = await fetch('/api/update/check', {
+                    credentials: 'include',
+                    signal: AbortSignal.timeout(25000),
+                });
+                if (!r.ok) return;
+                const j = await r.json();
+                if (!j.ok || !j.has_update) return;
+                if (j.latest && j.latest === _ignoredVersion()) return;
+                silentUpdate.value = {
+                    hasUpdate: true,
+                    current: j.current,
+                    latest: j.latest,
+                    url: j.page_url || 'https://github.com/yujianke100/ayabot/releases',
+                    changelogUrl: j.page_url || 'https://github.com/yujianke100/ayabot/releases',
+                    downloads: j.downloads || [],
+                    recommended: j.recommended || null,
+                    metaSource: j.meta_source || '',
+                    changelog: j.changelog || '',
+                };
+                updateNotice.value = j.latest;
+            } catch(e) {
+                // 网络不通就静默失败，绝不弹错误打断用户
+            }
+        }
+        function openUpdateNotice() {
+            if (silentUpdate.value) {
+                // 用启动时已探测好的结果，点开即显示（不再等一遍测速）
+                updateError.value = '';
+                updateData.value = silentUpdate.value;
+                showUpdateModal.value = true;
+                return;
+            }
+            checkUpdate();
+        }
+        function ignoreUpdate() {
+            const ver = (updateData.value && updateData.value.latest) || updateNotice.value || '';
+            try { localStorage.setItem('ayabot_ignored_version', ver); } catch(e) { /* 无痕模式忽略 */ }
+            silentUpdate.value = null;
+            updateNotice.value = '';
+            showUpdateModal.value = false;
         }
 
         // 模板管理
@@ -6114,6 +6186,10 @@ createApp({
                     window.__roomStatusTimer = setInterval(() => {
                         if (loggedIn.value) loadRooms();
                     }, 15000);
+                }
+                // 进去后静默查一次更新：有新版本就在导航栏亮提示，不弹窗打断
+                if (!window.__updateTimer) {
+                    window.__updateTimer = setTimeout(() => { silentCheckUpdate(); }, 8000);
                 }
             } catch(e) { loginErr.value = '登录失败: ' + e.message; }
         }
@@ -8320,6 +8396,7 @@ createApp({
         }
 
         return {showUpdateModal, updateChecking, updateError, updateData, checkUpdate, viewChangelog, showChangelog, changelogContent, renderMarkdown,
+                updateNotice, openUpdateNotice, ignoreUpdate, silentCheckUpdate,
                 loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
                 tab, userRole,
                 showUserMenu, showChangePwd, changePwdOld, changePwdNew, changePwdNewUser, changePwdMsg, changePwdOk, changingPwd,
