@@ -2853,6 +2853,27 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
         return []
 
 
+@app.get("/api/rooms/{room_id}/guards")
+async def api_room_guards(room_id: str, rStart: str = "", rEnd: str = "", limit: int = 200):
+    """大航海（上舰）记录：列表 + 汇总."""
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return {"items": [], "totals": {"count": 0, "value": 0, "captain": 0, "commander": 0, "governor": 0}}
+    try:
+        from app.storage import StatsStore  # noqa: PLC0415
+
+        store = StatsStore(str(db_path))
+        try:
+            items = store.list_guard_events(date_from=rStart, date_to=rEnd, limit=max(1, min(limit, 1000)))
+            totals = store.get_guard_totals(date_from=rStart, date_to=rEnd)
+        finally:
+            store.close()
+        return {"items": items, "totals": totals}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("room %s guards query failed: %s", room_id, exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @app.get("/api/rooms/{room_id}/user_dates")
 async def api_room_user_dates(room_id: str, uid: int = 0):
     """获取指定房间某用户有送礼记录的所有日期."""
@@ -4148,6 +4169,45 @@ INDEX_HTML = r"""<!DOCTYPE html>
             </div>
             <div class="bg-white p-4 rounded-xl shadow-sm flex flex-col min-h-[300px]">
                 <canvas id="chartRank" class="flex-1 min-h-0"></canvas>
+            </div>
+
+            <!-- 大航海（上舰）记录 -->
+            <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm">
+                <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+                    <h3 class="font-bold text-sm">🚢 上舰记录
+                        <span v-if="guardTotals" class="font-normal text-xs text-gray-400 ml-1">
+                            共 {{ guardTotals.count }} 次 · 舰长 {{ guardTotals.captain }} / 提督 {{ guardTotals.commander }} / 总督 {{ guardTotals.governor }}
+                            · 价值 {{ guardTotals.value }} 电池
+                        </span>
+                    </h3>
+                    <button @click="loadGuards" class="text-xs text-blue-500 hover:underline">刷新</button>
+                </div>
+                <div v-if="guardItems.length" class="overflow-y-auto max-h-[360px]">
+                    <table class="w-full text-xs sm:text-sm">
+                        <thead><tr class="bg-gray-50 sticky top-0">
+                            <th class="p-2 text-left">时间</th><th class="p-2 text-left">用户</th>
+                            <th class="p-2 text-left">等级</th><th class="p-2 text-right">月数</th>
+                            <th class="p-2 text-right">价值(电池)</th>
+                        </tr></thead>
+                        <tbody>
+                            <tr v-for="g in guardItems" :key="g.uid + '-' + g.start_time" class="border-t">
+                                <td class="p-2 text-gray-500 whitespace-nowrap">{{ fmtGuardTime(g.ts) }}</td>
+                                <td class="p-2">{{ g.uname }}</td>
+                                <td class="p-2">
+                                    <span class="px-1.5 py-0.5 rounded text-[10px] font-bold"
+                                          :class="g.guard_level === 1 ? 'bg-amber-100 text-amber-700'
+                                                : g.guard_level === 2 ? 'bg-purple-100 text-purple-700'
+                                                : 'bg-blue-100 text-blue-700'">{{ g.guard_name || '大航海' }}</span>
+                                </td>
+                                <td class="p-2 text-right">{{ g.months }}</td>
+                                <td class="p-2 text-right">{{ g.value }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div v-else class="text-gray-400 text-center py-6 text-xs">
+                    还没有上舰记录（开通后会出现在这里）
+                </div>
             </div>
         </div>
 
@@ -5694,6 +5754,28 @@ createApp({
         const rType  = ref('all');
         const ranking = ref([]);
         const errRanking = ref('');
+        // 上舰（大航海）记录
+        const guardItems = ref([]);
+        const guardTotals = ref(null);
+        function fmtGuardTime(ts) {
+            if (!ts) return '';
+            const d = new Date(ts * 1000);
+            return d.toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+        }
+        async function loadGuards() {
+            const roomId = selectedRoom.value?.room_id;
+            if (!roomId) return;
+            try {
+                const params = new URLSearchParams();
+                if (rStart.value) params.set('rStart', rStart.value);
+                if (rEnd.value) params.set('rEnd', rEnd.value);
+                const res = await fetch(`/api/rooms/${roomId}/guards?${params}`, {credentials: 'include'});
+                if (!res.ok) return;
+                const data = await res.json();
+                guardItems.value = data.items || [];
+                guardTotals.value = data.totals || null;
+            } catch(e) { /* ignore */ }
+        }
 
         // Export
         const eModeAll = ref(false);  // true=所有人模式
@@ -6241,6 +6323,8 @@ createApp({
             _clearRoomState();
             // 加载房间 API 配置
             loadRoomApiConfig();
+            // 上舰记录自动加载（排行仍需点「查询」）
+            loadGuards();
         }
         function goBackRoomList() {
             selectedRoom.value = null;
@@ -6250,6 +6334,8 @@ createApp({
         function _clearRoomState() {
             ranking.value = [];
             errRanking.value = '';
+            guardItems.value = [];
+            guardTotals.value = null;
             exportList.value = [];
             exportDates.value = [];
             exportDatesSet.value = new Set();
@@ -6332,6 +6418,9 @@ createApp({
             }
             if (key === 'export') {
                 loadUserDates();
+            }
+            if (key === 'ranking') {
+                loadGuards();
             }
         }
         function toggleCreateRoom() { showCreateRoom.value = !showCreateRoom.value; }
@@ -6612,6 +6701,7 @@ createApp({
             } catch(e) { errRanking.value = '加载失败: ' + e.message; }
             await nextTick();
             updateChart();
+            loadGuards();
         }
         function updateChart() {
             const canvas = document.getElementById('chartRank');
@@ -8406,6 +8496,7 @@ createApp({
                 userFormRole, userFormRooms, showUserRoomDropdown, savingUserForm, userFormMsg, userFormOk,
                 openAddUser, editUser, saveUserForm, deleteUser, toggleUserRoom,
                 rStart, rEnd, rType, ranking, errRanking, loadRanking,
+                guardItems, guardTotals, loadGuards, fmtGuardTime,
                 eUid, eName, eDate, eType, ePerCol, eColWidth, exportList, exportDates, exportCols, errExport, loadingExport,
                 loadExport, gotoExport, loadUserDates, onUidInput, onModeChange,
                 toggleDate, selectAllDatesInRange, clearSelectedDates, applyMultiDateExport,

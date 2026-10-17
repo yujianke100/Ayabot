@@ -103,6 +103,30 @@ class StatsStore:
                 uname TEXT NOT NULL,
                 content TEXT NOT NULL
             );
+
+            -- 大航海（上舰）记录：B站 同一次开通会推送 GUARD_BUY / USER_TOAST_MSG /
+            -- USER_TOAST_MSG_V2 三种事件，靠 (uid, start_time) 唯一索引去重
+            CREATE TABLE IF NOT EXISTS guard_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                month TEXT NOT NULL,
+                uid INTEGER NOT NULL,
+                uname TEXT NOT NULL,
+                guard_level INTEGER NOT NULL,
+                guard_name TEXT NOT NULL DEFAULT '',
+                months INTEGER NOT NULL DEFAULT 1,
+                price_coin INTEGER NOT NULL DEFAULT 0,
+                value INTEGER NOT NULL DEFAULT 0,
+                start_time INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT '',
+                raw_json TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_guard_events_dedupe
+            ON guard_events(uid, start_time) WHERE start_time > 0;
+
+            CREATE INDEX IF NOT EXISTS idx_guard_events_ts
+            ON guard_events(ts);
             """
         )
         self._conn.commit()
@@ -454,6 +478,10 @@ class StatsStore:
                 "DELETE FROM gift_events WHERE ts < ?", (cutoff,)
             ).rowcount
             result["deleted_gifts"] = deleted
+            deleted_guards = self._conn.execute(
+                "DELETE FROM guard_events WHERE ts < ?", (cutoff,)
+            ).rowcount
+            result["deleted_guards"] = deleted_guards
             if deleted:
                 self._conn.execute(
                     "DELETE FROM monthly_blindbox_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)"
@@ -470,6 +498,105 @@ class StatsStore:
         self._conn.commit()
         return result
 
+    # ── 大航海（上舰） ──────────────────────────────────────
+
+    def record_guard_event(
+        self,
+        *,
+        ts: int,
+        month: str,
+        uid: int,
+        uname: str,
+        guard_level: int,
+        guard_name: str = "",
+        months: int = 1,
+        price_coin: int = 0,
+        value: int = 0,
+        start_time: int = 0,
+        source: str = "",
+        raw_json: str = "",
+    ) -> bool:
+        """写入一条上舰记录（已存在则仅在价格不同时更新金额）。返回是否新增行。
+
+        B站 同一次开通会推 GUARD_BUY（原价）与 USER_TOAST_MSG*（实付价），
+        先到先存，后到的实付价会把金额纠正过来。
+        """
+        cur = self._conn.execute(
+            """
+            INSERT INTO guard_events (
+                ts, month, uid, uname, guard_level, guard_name,
+                months, price_coin, value, start_time, source, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(uid, start_time) WHERE start_time > 0 DO UPDATE SET
+                price_coin = CASE
+                    WHEN excluded.price_coin > 0 AND excluded.price_coin <> guard_events.price_coin
+                    THEN excluded.price_coin ELSE guard_events.price_coin END,
+                value = CASE
+                    WHEN excluded.price_coin > 0 AND excluded.price_coin <> guard_events.price_coin
+                    THEN excluded.value ELSE guard_events.value END
+            """,
+            (ts, month, uid, uname, guard_level, guard_name, months,
+             price_coin, value, start_time, source, raw_json),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def list_guard_events(
+        self,
+        date_from: str = "",
+        date_to: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """按时间倒序列出上舰记录。"""
+        where = ["1=1"]
+        params: list[Any] = []
+        if date_from:
+            where.append("date(ts, 'unixepoch', 'localtime') >= date(?)")
+            params.append(date_from)
+        if date_to:
+            where.append("date(ts, 'unixepoch', 'localtime') <= date(?)")
+            params.append(date_to)
+        params.append(limit)
+        rows = self._conn.execute(
+            f"""
+            SELECT ts, uid, uname, guard_level, guard_name, months, price_coin, value, start_time
+            FROM guard_events WHERE {' AND '.join(where)}
+            ORDER BY ts DESC LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        keys = ("ts", "uid", "uname", "guard_level", "guard_name", "months",
+                "price_coin", "value", "start_time")
+        return [dict(zip(keys, row)) for row in rows]
+
+    def get_guard_totals(self, date_from: str = "", date_to: str = "") -> dict[str, Any]:
+        """上舰数量与价值汇总（value 单位：电池）。"""
+        where = ["1=1"]
+        params: list[Any] = []
+        if date_from:
+            where.append("date(ts, 'unixepoch', 'localtime') >= date(?)")
+            params.append(date_from)
+        if date_to:
+            where.append("date(ts, 'unixepoch', 'localtime') <= date(?)")
+            params.append(date_to)
+        row = self._conn.execute(
+            f"""
+            SELECT COUNT(*), COALESCE(SUM(value), 0),
+                   COALESCE(SUM(CASE WHEN guard_level = 3 THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN guard_level = 2 THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN guard_level = 1 THEN 1 ELSE 0 END), 0)
+            FROM guard_events WHERE {' AND '.join(where)}
+            """,
+            params,
+        ).fetchone()
+        return {
+            "count": int(row[0] or 0),
+            "value": int(row[1] or 0),
+            "captain": int(row[2] or 0),
+            "commander": int(row[3] or 0),
+            "governor": int(row[4] or 0),
+        }
+
     def close(self) -> None:
         self._conn.close()
 
@@ -478,7 +605,10 @@ class StatsStore:
         deleted_gift = self._conn.execute(
             "DELETE FROM gift_events WHERE ts < ?", (before_ts,)
         ).rowcount
-        
+        deleted_guards = self._conn.execute(
+            "DELETE FROM guard_events WHERE ts < ?", (before_ts,)
+        ).rowcount
+
         # 同时清理对应的月度汇总（重新计算）
         # 简单做法：如果该月已无数据则删除汇总行
         # 获取被删除事件涉及的月份
@@ -498,6 +628,7 @@ class StatsStore:
         self._conn.commit()
         return {
             "deleted_gift_events": deleted_gift,
+            "deleted_guard_events": deleted_guards,
             "deleted_blindbox_stats": deleted_blind,
             "deleted_gift_stats": deleted_gift_stats,
         }

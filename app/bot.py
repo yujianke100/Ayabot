@@ -96,6 +96,8 @@ class LiveRobot:
         self._is_live: bool = False
         # 礼物去重：(uid, tid/rnd) -> 最近时间戳（仅用于新协议灰度期防重复计账）
         self._recent_gifts: dict[tuple, float] = {}
+        # 上舰去重：(uid, start_time) -> 最近时间戳（一次开通会推送三种事件）
+        self._recent_guards: dict[tuple, float] = {}
         # 后台守护任务（run() 里创建）
         self._heartbeat_task: Optional[asyncio.Task[None]] = None
         self._danmaku_guard_task: Optional[asyncio.Task[None]] = None
@@ -855,20 +857,70 @@ class LiveRobot:
 
     async def _on_guard_buy(self, event: dict[str, Any]) -> None:
         event_type = event.get("type", "?")
-        if not self.config.features.guard_thanks_enabled:
-            return
 
         guard = _extract_guard_buy_payload(event)
         if guard is None:
-            self.logger.debug("guard_buy parse failed: type=%s data=%s", event_type, event.get("data"))
+            self.logger.warning(
+                "guard_buy parse failed: type=%s keys=%s",
+                event_type,
+                list(((event.get("data") or {}).get("data") or {}).keys())[:12],
+            )
             return
 
         uid = guard["uid"]
         uname = guard["uname"]
         months = guard["months"]
         guard_type = guard["guard_type"]
+        guard_name = guard["guard_name"]
+        guard_level = guard["guard_level"]
+        start_time = int(guard["start_time"])
 
+        # 同一次开通会推送 GUARD_BUY + USER_TOAST_MSG + USER_TOAST_MSG_V2：
+        # 记录只写一次（DB 层按 uid+start_time 去重，并会用实付价纠正金额），
+        # 感谢文案只发一次。
+        dedupe_key = (uid, start_time)
         now = time.time()
+        is_duplicate = dedupe_key in self._recent_guards
+        self._recent_guards[dedupe_key] = now
+        if len(self._recent_guards) > 500:
+            self._recent_guards = {
+                k: v for k, v in self._recent_guards.items() if now - v < 86400
+            }
+
+        # 记录与「感谢开关」解耦：关掉致谢也必须留下上舰记录
+        try:
+            recorded = self.store.record_guard_event(
+                ts=int(now),
+                month=_now().strftime("%Y-%m"),
+                uid=uid,
+                uname=uname,
+                guard_level=guard_level,
+                guard_name=guard_name,
+                months=months,
+                price_coin=guard["price_coin"],
+                value=guard["value"],
+                start_time=start_time,
+                source=event_type,
+                raw_json=json.dumps(
+                    (event.get("data") or {}).get("data") or {}, ensure_ascii=False
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            recorded = False
+            self.logger.warning("guard record failed: uid=%s err=%s", uid, exc)
+
+        self.logger.info(
+            "guard buy: uid=%s uname=%s %s x%s 价值=%s电池 start_time=%s type=%s recorded=%s%s",
+            uid, uname, guard_name, months, guard["value"], start_time, event_type, recorded,
+            " (重复事件，仅纠正金额)" if is_duplicate else "",
+        )
+
+        if is_duplicate:
+            return
+
+        if not self.config.features.guard_thanks_enabled:
+            return
+
         if self.config.cooldown.thanks_user_seconds > 0:
             last = self._last_thanks_ts.get(uid, 0.0)
             if now - last < self.config.cooldown.thanks_user_seconds:
@@ -887,7 +939,14 @@ class LiveRobot:
         text = (
             template.replace("{uname}", uname)
             .replace("{months}", str(months))
-            .replace("{guard_type}", guard_type)
+            # {guard_type} 历史上输出英文键（captain/…），中文模板里读起来很怪，
+            # 现在统一输出中文；想用英文键的可用 {guard_type_en}
+            .replace("{guard_type}", guard_name)
+            .replace("{guard_type_en}", guard_type)
+            .replace("{guard_name}", guard_name)
+            .replace("{level}", str(guard_level))
+            .replace("{value}", str(guard["value"]))
+            .replace("{price}", str(round(guard["price_coin"] / 1000, 1)))
         )
         await self._enqueue_message(text=text, reply_uid=uid)
 
@@ -1693,7 +1752,23 @@ def _extract_gift_payload(event: dict[str, Any]) -> Optional[dict[str, Any]]:
     }
 
 
+GUARD_NAMES = {1: "总督", 2: "提督", 3: "舰长"}
+GUARD_TYPE_KEYS = {1: "governor", 2: "commander", 3: "captain"}
+
+
 def _extract_guard_buy_payload(event: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """解析上舰事件。
+
+    B站 同一次开通会连续推送三种事件，字段结构各不相同：
+      - GUARD_BUY        : data.data = {uid, username, guard_level, num, price, start_time}
+      - USER_TOAST_MSG   : data.data = 同上 + role_name / toast_msg
+      - USER_TOAST_MSG_V2: data.data = {sender_uinfo, guard_info, pay_info, ...}
+
+    历史 bug（2026-04-28 引入）：uid/uname 用了
+    `payload.get("uid") or payload.get("user_info", {}).get("uid") if isinstance(user_info, dict) else 0`
+    这种写法，条件表达式优先级导致「没有 user_info 字段时整个表达式取 0」，
+    而三种真实事件都没有 user_info → 永远解析失败 → 上舰文案与记录全部丢失。
+    """
     data = event.get("data", {})
     payload = data.get("data") if isinstance(data, dict) else None
     if not isinstance(payload, dict):
@@ -1701,29 +1776,73 @@ def _extract_guard_buy_payload(event: dict[str, Any]) -> Optional[dict[str, Any]
     if not isinstance(payload, dict):
         return None
 
-    uid = _safe_int(payload.get("uid") or payload.get("user_info", {}).get("uid") if isinstance(payload.get("user_info"), dict) else 0)
-    uname = str(payload.get("username") or payload.get("uname") or payload.get("user_info", {}).get("uname") if isinstance(payload.get("user_info"), dict) else "")
-    months = max(_safe_int(payload.get("num") or payload.get("month") or 1), 1)
-    guard_level = _safe_int(payload.get("guard_level") or payload.get("level") or 0)
+    uid = 0
+    uname = ""
+    guard_level = 0
+    months = 1
+    price_coin = 0
+    start_time = 0
+
+    # 形态 A：USER_TOAST_MSG_V2（嵌套 sender_uinfo / guard_info / pay_info）
+    sender = payload.get("sender_uinfo")
+    if isinstance(sender, dict):
+        uid = _safe_int(sender.get("uid"))
+        base = sender.get("base")
+        if not uid and isinstance(base, dict):
+            uid = _safe_int(base.get("uid"))
+        if isinstance(base, dict):
+            uname = str(base.get("name") or "")
+        guard_info = payload.get("guard_info")
+        if isinstance(guard_info, dict):
+            guard_level = _safe_int(guard_info.get("guard_level"))
+            start_time = _safe_int(guard_info.get("start_time"))
+        pay_info = payload.get("pay_info")
+        if isinstance(pay_info, dict):
+            months = _safe_int(pay_info.get("num")) or 1
+            price_coin = _safe_int(pay_info.get("price"))
+
+    # 形态 B：GUARD_BUY / USER_TOAST_MSG（扁平结构）
+    if uid <= 0:
+        uid = _safe_int(payload.get("uid"))
+    if not uname:
+        uname = str(payload.get("username") or payload.get("uname") or "")
+    if guard_level <= 0:
+        guard_level = _safe_int(payload.get("guard_level") or payload.get("level"))
+    if start_time <= 0:
+        start_time = _safe_int(payload.get("start_time"))
+    if price_coin <= 0:
+        price_coin = _safe_int(payload.get("price"))
+    if months <= 1:
+        months = max(_safe_int(payload.get("num") or payload.get("month")) or months, 1)
+
+    # 形态 C：旧版 user_info 包裹（历史兼容）
+    user_info = payload.get("user_info")
+    if isinstance(user_info, dict):
+        if uid <= 0:
+            uid = _safe_int(user_info.get("uid"))
+        if not uname:
+            uname = str(user_info.get("uname") or user_info.get("name") or "")
 
     if uid <= 0 or not uname:
         return None
 
-    # Common Bilibili mapping: 1=Governor, 2=Commander, 3=Captain
-    if guard_level == 1:
-        guard_type = "governor"
-    elif guard_level == 2:
-        guard_type = "commander"
-    elif guard_level == 3:
-        guard_type = "captain"
-    else:
-        guard_type = "guard"
+    guard_name = GUARD_NAMES.get(guard_level, str(payload.get("role_name") or payload.get("gift_name") or "大航海"))
+    if not guard_name or guard_name == "None":
+        guard_name = "大航海"
 
+    now_ts = int(time.time())
     return {
         "uid": uid,
         "uname": uname,
-        "months": months,
-        "guard_type": guard_type,
+        "months": max(months, 1),
+        "guard_level": guard_level,
+        "guard_type": GUARD_TYPE_KEYS.get(guard_level, "guard"),
+        "guard_name": guard_name,
+        "price_coin": price_coin,
+        # 金瓜子 → 电池（与礼物统计口径一致：÷100）
+        "value": price_coin // 100 if price_coin > 0 else 0,
+        "start_time": start_time or now_ts,
+        "source": str(event.get("type") or ""),
     }
 
 
