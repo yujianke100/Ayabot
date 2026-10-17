@@ -79,6 +79,21 @@ def main() -> int:
             failures.append("国内镜像均不可用")
         if data.get("ok") and data.get("has_update") and not data.get("recommended"):
             failures.append("有待更新时未给出推荐下载地址")
+
+        # 模拟旧版本客户端（v1.1.1）→ 应当看到 v1.2.0 的更新
+        orig = srv.get_version_display
+        srv.get_version_display = lambda: "v1.1.1"  # type: ignore[assignment]
+        try:
+            code2, old_data = _get("/api/update/check")
+            print("\n模拟 v1.1.1 客户端:", json.dumps(
+                {k: old_data.get(k) for k in ("ok", "current", "latest", "has_update")},
+                ensure_ascii=False))
+            if code2 != 200 or not old_data.get("ok"):
+                failures.append("旧版本客户端检查更新失败")
+            if not old_data.get("has_update"):
+                failures.append("v1.1.1 客户端未识别出 v1.2.0 更新")
+        finally:
+            srv.get_version_display = orig  # type: ignore[assignment]
     finally:
         server.should_exit = True
         thread.join(timeout=10)
