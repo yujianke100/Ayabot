@@ -285,18 +285,26 @@ python scripts/build_exe.py
 两种处理：
 
 1. **用户侧**：点「运行」即可；程序启动后会自动清掉下载标记，之后不再提示。
-2. **彻底解决**：给 exe 做 Authenticode 签名（CI 已支持，配两个 secret 即可）：
+2. **彻底解决**：给 exe 做签名。本项目两条路，都会在 CI 里自动完成：
 
-| Secret | 内容 |
+| 方式 | 成本 | 说明 |
+|---|---|---|
+| [SignPath Foundation](https://signpath.org/) | 免费 | 面向开源项目，证书签发给 SignPath Foundation（发布者显示为该基金会）。每个版本需在 SignPath 后台人工批准一次签名请求。申请入径见 [SIGNING.md](SIGNING.md) |
+| 自购证书（pfx） | €25~400/年 | 配 `WIN_CERT_BASE64` + `WIN_CERT_PASSWORD` 两个 secret，CI 用 signtool 签名（带时间戳） |
+
+签名配置与否都不影响构建：没配就是未签名产物，配了自动签并校验。
+GitHub Actions 里的三个 secret：
+
+| Secret | 用途 |
 |---|---|
-| `WIN_CERT_BASE64` | `.pfx` 证书文件的 base64（`base64 -w0 cert.pfx`） |
-| `WIN_CERT_PASSWORD` | 导出 pfx 时的密码 |
+| `SIGNPATH_API_TOKEN` | SignPath API 令牌（批准后在其后台生成） |
+| `SIGNPATH_ORG_ID` | SignPath 组织 ID |
+| `WIN_CERT_BASE64` / `WIN_CERT_PASSWORD` | 自购 pfx 证书（可选，与 SignPath 二选一） |
 
-配好后每次打 tag，CI 会在上传前用 `signtool` 签名并校验（时间戳走 DigiCert）。
-没配就跳过签名，构建照常成功。
+签名完成后的效果：文件属性里有「数字签名」页，发布者显示为 SignPath Foundation；
+SmartScreen 不再把它当未知程序拦。
 
-个人开发者可考虑 Certum 的开源代码签名证书（约 €40/年）或 SignPath Foundation（开源项目免费）；
-OV/EV 证书通常要求企业主体。签名后的 exe 在 SmartScreen 里会显示发布者名称，随着下载量积累告警也会消失。
+**Code signing policy**：[SIGNING.md](SIGNING.md)（签名对象、团队角色、构建流程、隐私政策）
 
 ### 嵌入的资源
 

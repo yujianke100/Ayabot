@@ -62,7 +62,7 @@ def _write_version_file(ver: str, out_path: Path) -> Path | None:
         StringStruct('FileDescription', 'Ayabot B站直播间机器人'),
         StringStruct('FileVersion', '{ver}'),
         StringStruct('InternalName', 'Ayabot'),
-        StringStruct('LegalCopyright', 'MIT License'),
+        StringStruct('LegalCopyright', 'GPL-3.0-only'),
         StringStruct('OriginalFilename', 'Ayabot-v{ver}.exe'),
         StringStruct('ProductName', 'Ayabot 直播间机器人'),
         StringStruct('ProductVersion', '{ver}')

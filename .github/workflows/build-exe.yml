@@ -1,4 +1,10 @@
 # ── Windows .exe 构建（打 tag 时自动构建并发布到 Release） ──
+#
+# 签名有三种情况，构建流程一致，只是产物是否带签名不同：
+#   signpath : 已通过 SignPath Foundation（免费 OSS 代码签名）。每个版本需在
+#              SignPath 后台人工批准一次签名请求（详见 SIGNING.md）
+#   pfx      : 自购证书，配了 WIN_CERT_BASE64 / WIN_CERT_PASSWORD
+#   none     : 都没配。产物未签名，用户首次运行会被 Windows 提示「无法验证发布者」
 
 name: Build Windows .exe
 
@@ -13,6 +19,10 @@ jobs:
     permissions:
       contents: write
       packages: read
+    outputs:
+      artifact_id: ${{ steps.upload-artifact.outputs.artifact-id }}
+      sign_mode: ${{ steps.sign_mode.outputs.mode }}
+      version: ${{ steps.sign_mode.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
@@ -27,35 +37,58 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller pystray pillow
 
+      - name: 判断签名方式
+        id: sign_mode
+        shell: pwsh
+        env:
+          SIGNPATH_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORG: ${{ secrets.SIGNPATH_ORG_ID }}
+          PFX_BASE64: ${{ secrets.WIN_CERT_BASE64 }}
+        run: |
+          $ver = "${{ github.ref_name }}".TrimStart("v")
+          "version=$ver" >> $env:GITHUB_OUTPUT
+          if ($env:SIGNPATH_TOKEN -and $env:SIGNPATH_ORG) {
+            "mode=signpath" >> $env:GITHUB_OUTPUT
+            Write-Host "签名方式: SignPath Foundation（每个版本需人工批准签名请求）"
+          } elseif ($env:PFX_BASE64) {
+            "mode=pfx" >> $env:GITHUB_OUTPUT
+            Write-Host "签名方式: 自带 pfx 证书"
+          } else {
+            "mode=none" >> $env:GITHUB_OUTPUT
+            Write-Host "签名方式: 不签名（产物可用，用户首次运行会看到发布者提示）"
+          }
+
       - name: 清理同版本的旧 Release 和 artifact
         continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.ref_name }}"
-          echo "清理旧 Release: $TAG"
-          # 删除同名 Release
-          gh release delete "$TAG" --cleanup-tag --yes 2>/dev/null && echo "已删除旧 Release" || echo "无旧 Release"
-          # 清理同名 artifact（如果有）
-          gh api "/repos/${{ github.repository }}/actions/artifacts" --paginate 2>/dev/null \
-            | jq -r ".artifacts[] | select(.name == \"Ayabot-$TAG\") | .id" 2>/dev/null \
-            | while read id; do
-              gh api -X DELETE "/repos/${{ github.repository }}/actions/artifacts/$id" --silent 2>/dev/null || true
-            done
+          $tag = "${{ github.ref_name }}"
+          Write-Host "清理旧 Release: $tag"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete $tag --cleanup-tag --yes
+            if ($LASTEXITCODE -eq 0) { Write-Host "已删除旧 Release" }
+          } else {
+            Write-Host "无旧 Release"
+          }
+          $ids = gh api "/repos/${{ github.repository }}/actions/artifacts" --paginate |
+            ConvertFrom-Json | Select-Object -ExpandProperty artifacts |
+            Where-Object { $_.name -eq "Ayabot-$tag" } | ForEach-Object { $_.id }
+          foreach ($id in $ids) { gh api -X DELETE "/repos/${{ github.repository }}/actions/artifacts/$id" *> $null }
 
       - name: Build .exe
         run: python scripts/build_exe.py --version "${{ github.ref_name }}"
 
-      # 有签名证书时才签名；没配置就跳过（exe 依然能用，只是 Windows 首次运行会提示「无法验证发布者」）
-      - name: 代码签名
+      # 只有自带 pfx 证书时才在这里签（SignPath 走下面的 sign job）
+      - name: 代码签名（自有证书）
+        if: steps.sign_mode.outputs.mode == 'pfx'
         shell: pwsh
         env:
           WIN_CERT_BASE64: ${{ secrets.WIN_CERT_BASE64 }}
           WIN_CERT_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
         run: |
-          if (-not $env:WIN_CERT_BASE64) {
-            Write-Host "未配置 WIN_CERT_BASE64，跳过签名。"
-            Write-Host "想让用户不再看到「无法验证发布者」，需要一张代码签名证书（见 README 常见问题）。"
-            exit 0
-          }
           $pfx = Join-Path $env:RUNNER_TEMP "ayabot.pfx"
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WIN_CERT_BASE64))
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
@@ -76,12 +109,17 @@ jobs:
           Copy-Item $exe dist/Ayabot-latest.exe
           echo "latest_exe=dist/Ayabot-latest.exe" >> $env:GITHUB_ENV
 
+      # 未签名产物同时作为 workflow artifact 上传：SignPath 会校验「这个二进制确实是
+      # 本次 GitHub workflow 构建的」—— origin 元数据由 GitHub 提供，构建脚本无法伪造。
       - name: Upload artifact
+        id: upload-artifact
         uses: actions/upload-artifact@v4
         with:
           name: Ayabot-${{ github.ref_name }}
           path: dist/Ayabot-v*.exe
 
+      # 先发布未签名产物：签名要人工批准，可能等很久；这期间用户至少能下到能用的版本。
+      # 签名完成后由 sign job 用签名版覆盖同名资产（--clobber）。
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -90,3 +128,54 @@ jobs:
             dist/Ayabot-v*.exe
             dist/Ayabot-latest.exe
           generate_release_notes: true
+
+  # ── SignPath Foundation 签名（未配置 SIGNPATH_* 时整个 job 跳过） ──
+  sign:
+    needs: build
+    if: needs.build.outputs.sign_mode == 'signpath' && startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 提交签名请求（等待人工批准）
+        id: sign
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
+          project-slug: ayabot
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ needs.build.outputs.artifact_id }}
+          wait-for-completion: true
+          # 默认只等 10 分钟；人工批准可能更久，放宽到 1 小时
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed
+          # params 必须一行一个 "<name>: \"<json string>\""，值要用双引号
+          parameters: |
+            version: "${{ needs.build.outputs.version }}"
+
+      - name: 校验签名
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem signed -Recurse -Filter *.exe
+          if (-not $files) { throw "签名产物为空" }
+          foreach ($f in $files) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            Write-Host "$($f.Name) -> $($sig.Status) / $($sig.SignerCertificate.Subject)"
+            if ($sig.Status -ne 'Valid') { throw "签名校验未通过: $($f.Name)" }
+          }
+
+      - name: 用签名版覆盖 Release 资产
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $signed = Get-ChildItem signed -Recurse -Filter "Ayabot-v*.exe" | Select-Object -First 1
+          if (-not $signed) { throw "找不到签名后的 Ayabot-v*.exe" }
+          $latest = Join-Path $signed.DirectoryName "Ayabot-latest.exe"
+          Copy-Item $signed.FullName $latest
+          gh release upload $tag $signed.FullName $latest --clobber
+          if ($LASTEXITCODE -ne 0) { throw "上传签名产物失败" }
+          Write-Host "已用签名版覆盖 Release 资产: $($signed.Name) + Ayabot-latest.exe"
