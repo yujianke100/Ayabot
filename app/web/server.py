@@ -6101,6 +6101,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <div v-if="tab==='help'" class="max-w-3xl mx-auto">
     <div class="bg-white p-6 rounded-xl shadow-sm space-y-6 text-sm leading-relaxed">
         <h2 class="text-lg font-bold">📖 使用指南</h2>
+        <!-- 官网入口：放在最显眼的位置（下载、功能说明、常见问题都在上面） -->
+        <a href="https://ayabot.jianke-yu.online" target="_blank" rel="noopener"
+           class="flex items-center gap-3 bg-gradient-to-r from-pink-50 to-sky-50 border border-pink-200 rounded-lg p-3 hover:border-pink-300 transition no-underline">
+            <span class="text-2xl shrink-0">🌐</span>
+            <span class="flex-1 min-w-0">
+                <span class="block font-bold text-[13px] sm:text-sm text-gray-800 break-words">官网 · ayabot.jianke-yu.online</span>
+                <span class="block text-xs text-gray-500 mt-0.5">最新版下载（国内线路自动测速）、功能说明、常见问题</span>
+            </span>
+            <span class="hidden sm:inline text-xs text-blue-500 whitespace-nowrap shrink-0">打开 ↗</span>
+        </a>
         <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-3">
             <h3 class="font-bold text-blue-700">🚀 快速开始</h3>
             <ol class="list-decimal pl-4 space-y-2 text-xs">
@@ -6128,7 +6138,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
         <div class="pt-4 border-t border-gray-200">
             <p class="text-xs text-gray-400 text-center">
-                <a href="https://github.com/yujianke100/ayabot" target="_blank" class="text-blue-500 hover:underline">⭐ 去 GitHub 给个 Star</a>
+                <a href="https://ayabot.jianke-yu.online" target="_blank" rel="noopener" class="text-blue-500 hover:underline">🌐 官网</a>
+                <span class="mx-1">·</span>
+                <a href="https://github.com/yujianke100/ayabot" target="_blank" rel="noopener" class="text-blue-500 hover:underline">⭐ 去 GitHub 给个 Star</a>
                 <span class="mx-1">·</span>
                 本软件<span class="text-red-500 font-bold">完全免费</span>，以 GPLv3 协议开源
                 <span class="block mt-1" data-ayabot-version="__AYABOT_VERSION__">Ayabot __AYABOT_VERSION__</span>
