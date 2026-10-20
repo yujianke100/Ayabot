@@ -36,7 +36,12 @@ EOF
 echo "version.json -> v$ver, ${size_mb} MB"
 
 ssh "$HOST" "mkdir -p $DEST/assets"
-scp "$SRC/index.html" "$SRC/version.json" "$SRC/404.html" "$SRC/site.webmanifest" "$HOST:$DEST/"
+scp "$SRC/index.html" "$SRC/version.json" "$SRC/404.html" "$SRC/site.webmanifest" \
+    "$SRC/robots.txt" "$SRC/sitemap.xml" "$HOST:$DEST/"
+# IndexNow 验证文件（Bing / Yandex 靠它确认域名归属），有就一起传
+if ls "$SRC"/indexnow-*.txt >/dev/null 2>&1; then
+  scp "$SRC"/indexnow-*.txt "$HOST:$DEST/"
+fi
 scp "$SRC"/assets/* "$HOST:$DEST/assets/"
 # 根目录也放一份 favicon.ico：浏览器在没解析到 <link> 时会直接请求 /favicon.ico
 scp "$SRC"/assets/favicon.ico "$HOST:$DEST/favicon.ico"

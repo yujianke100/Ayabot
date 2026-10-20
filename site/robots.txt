@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /404.html
+
+# 站点地图
+Sitemap: https://ayabot.jianke-yu.online/sitemap.xml

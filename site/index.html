@@ -3,15 +3,43 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Ayabot · B站直播间机器人</title>
-<meta name="description" content="Ayabot 是一个开源的 B站直播间机器人：礼物 / 盲盒 / 上舰统计、弹幕关键词与 AI 回复、多房间管理，Windows 单文件 exe 即开即用。">
+<title>Ayabot · B站直播间机器人 | 免费开源的弹幕/礼物/盲盒/上舰统计工具</title>
+<meta name="description" content="Ayabot 是一个开源的 B站直播间机器人：礼物 / 盲盒 / 上舰统计、弹幕关键词与 AI 回复、多房间管理，Windows 单文件 exe 即开即用。永久免费，数据存在本地 SQLite，随时导出。">
+<meta name="keywords" content="Ayabot,B站直播间机器人,B站弹幕机器人,直播礼物统计,盲盒统计,大航海统计,上舰记录,弹幕回复机器人,B站直播助手,开源直播机器人">
+<meta name="robots" content="index,follow,max-image-preview:large">
 <meta name="theme-color" content="#0b1020">
+<link rel="canonical" href="https://ayabot.jianke-yu.online/">
 <meta property="og:title" content="Ayabot · B站直播间机器人">
 <meta property="og:description" content="礼物 / 盲盒 / 上舰统计，弹幕关键词与 AI 回复，多房间管理。开源免费，Windows 单文件即开即用。">
 <meta property="og:type" content="website">
+<meta property="og:url" content="https://ayabot.jianke-yu.online/">
 <meta property="og:image" content="https://ayabot.jianke-yu.online/assets/icon-512.png">
+<meta property="og:image:width" content="512">
+<meta property="og:image:height" content="512">
 <meta property="og:site_name" content="Ayabot">
+<meta property="og:locale" content="zh_CN">
 <meta name="twitter:card" content="summary">
+<!-- 结构化数据：搜索引擎据此判断这是个免费开源的 Windows 软件 -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Ayabot",
+  "alternateName": "Ayabot B站直播间机器人",
+  "applicationCategory": "MultimediaApplication",
+  "operatingSystem": "Windows 10, Windows 11, Linux (Docker)",
+  "description": "免费开源的 B站直播间机器人：礼物 / 盲盒 / 大航海（上舰）统计、弹幕关键词与 AI 回复、自动欢迎与感谢、定时消息、多房间管理，数据保存在本地 SQLite。",
+  "url": "https://ayabot.jianke-yu.online/",
+  "downloadUrl": "https://gitee.com/yujianke100/Ayabot/releases/download/latest/Ayabot-latest.exe",
+  "inLanguage": "zh-CN",
+  "isAccessibleForFree": true,
+  "license": "https://www.gnu.org/licenses/gpl-3.0.html",
+  "softwareVersion": "1.2.5",
+  "author": { "@type": "Person", "name": "yujianke100", "url": "https://github.com/yujianke100" },
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" },
+  "sameAs": ["https://github.com/yujianke100/Ayabot", "https://gitee.com/yujianke100/Ayabot"]
+}
+</script>
 <link rel="icon" href="assets/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="assets/icon-32.png">
 <link rel="icon" type="image/png" sizes="192x192" href="assets/icon-192.png">
@@ -47,7 +75,8 @@
   .btn-light:hover{background:#f3f4f7}
 
   /* ── nav ── */
-  header{position:sticky;top:0;z-index:50;backdrop-filter:saturate(160%) blur(14px);
+  /* 吸顶交给外层 .topbar，header 自身不再 sticky（避免与 Star 条相互算 offset 留缝） */
+  header{position:relative;z-index:1;backdrop-filter:saturate(160%) blur(14px);
          background:rgba(11,16,32,.96);border-bottom:1px solid rgba(255,255,255,.08)}
   .nav{display:flex;align-items:center;gap:20px;height:64px}
   .brand{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:.2px;color:#fff;font-size:18px}
@@ -113,17 +142,23 @@
         border-radius:8px;padding:3px 9px;font-size:11.5px;cursor:pointer}
   .copy:hover{background:rgba(255,255,255,.18)}
 
-  /* ── 顶部 Star 引导条：常驻悬浮（滚动到任何位置都看得见） ── */
-  .starstrip{position:fixed;inset:0 0 auto 0;z-index:80;
-             display:flex;align-items:center;justify-content:center;gap:12px;
-             padding:10px 18px;color:#fff;font-size:13.5px;line-height:1.45;
+  /* ── 顶部悬浮区：Star 条 + 导航栏包在同一个 sticky 容器里 ── */
+  /* 之前用 fixed + JS 量高度做 body 留白，四舍五入会留下零点几像素的缝，
+     现在放进一个 sticky 容器，二者天然贴合，也不再需要给 body 留白。 */
+  .topbar{position:sticky;top:0;z-index:80}
+  .starstrip{display:flex;align-items:center;justify-content:center;gap:12px;
+             padding:10px 42px 10px 18px;color:#fff;font-size:13.5px;line-height:1.45;
              background:linear-gradient(96deg,#3a1229,#191c3a 48%,#082432);
              border-bottom:1px solid rgba(255,255,255,.1);
-             box-shadow:0 6px 18px -12px rgba(0,0,0,.9)}
-  body{padding-top:var(--strip-h,48px)}   /* 悬浮条占位，避免盖住内容 */
-  header{top:var(--strip-h,48px)}         /* 导航栏吸在悬浮条下面 */
-  /* 锚点跳转要让开悬浮条 + 导航栏，否则标题被压在底下 */
-  section[id],div[id]{scroll-margin-top:calc(var(--strip-h,48px) + 76px)}
+             position:relative}
+  .starstrip[hidden]{display:none}
+  .ss-close{position:absolute;right:8px;top:50%;transform:translateY(-50%);
+            width:26px;height:26px;display:grid;place-items:center;border-radius:50%;
+            color:rgba(255,255,255,.62);background:transparent;border:0;cursor:pointer;
+            font-size:17px;line-height:1;transition:.15s background,.15s color}
+  .ss-close:hover{background:rgba(255,255,255,.14);color:#fff}
+  /* 锚点跳转要让开悬浮区 + 导航栏，否则标题被压在底下 */
+  section[id],div[id]{scroll-margin-top:calc(var(--top-h,110px) + 10px)}
   .ss-main{display:flex;align-items:center;gap:12px;min-width:0;color:inherit}
   .ss-coffee{flex:none;display:inline-flex;align-items:center;gap:6px;
              padding:6px 14px;border-radius:999px;font-weight:600;font-size:13px;
@@ -242,7 +277,8 @@
 </head>
 <body>
 
-<div class="starstrip" role="region" aria-label="支持 Ayabot">
+<div class="topbar" id="topbar">
+<div class="starstrip" id="starstrip" role="region" aria-label="支持 Ayabot">
   <a class="ss-main" href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener"
      aria-label="去 GitHub 给 Ayabot 点个 Star">
     <span class="ss-ico">⭐</span>
@@ -255,6 +291,7 @@
   <a class="ss-coffee" href="#support" aria-label="请作者喝杯咖啡">
     <span class="ss-cico">☕</span><span class="ss-ctxt">请作者喝杯咖啡</span>
   </a>
+  <button class="ss-close" id="ssClose" type="button" aria-label="关闭这条提示" title="关闭（不再显示）">×</button>
 </div>
 
 <header>
@@ -270,6 +307,7 @@
     <a class="gh" href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener">GitHub ↗</a>
   </div>
 </header>
+</div><!-- /topbar -->
 
 <div class="hero" id="top">
   <div class="wrap">
@@ -574,18 +612,31 @@ docker run -d --name ayabot -p 19810:19810 \
 </footer>
 
 <script>
-// ── 悬浮 Star 条的高度交给 CSS 变量，body 留白与导航栏吸顶位置都跟着它走 ──
-const starStrip = document.querySelector('.starstrip');
-function syncStripHeight() {
-  if (!starStrip) return;
-  const h = Math.round(starStrip.getBoundingClientRect().height);
-  document.documentElement.style.setProperty('--strip-h', h + 'px');
+// ── 顶部悬浮区高度：给锚点跳转留出空间（不再用于 body 留白，结构上已贴合） ──
+const topbarEl = document.getElementById('topbar');
+const starStrip = document.getElementById('starstrip');
+const ssClose = document.getElementById('ssClose');
+const SS_HIDE_KEY = 'ayabot_starstrip_hidden';
+
+function syncTopHeight() {
+  const h = topbarEl ? Math.ceil(topbarEl.getBoundingClientRect().height) : 0;
+  document.documentElement.style.setProperty('--top-h', h + 'px');
 }
-syncStripHeight();
-addEventListener('resize', syncStripHeight);
-addEventListener('orientationchange', () => setTimeout(syncStripHeight, 150));
-// 字体加载完高度可能变，再量一次
-if (document.fonts && document.fonts.ready) document.fonts.ready.then(syncStripHeight);
+
+// 记住用户关过（localStorage 失效时最多每次再出现一次，不影响使用）
+function hideStrip(remember) {
+  if (!starStrip) return;
+  starStrip.hidden = true;
+  if (remember) { try { localStorage.setItem(SS_HIDE_KEY, '1'); } catch (e) {} }
+  syncTopHeight();
+}
+try { if (localStorage.getItem(SS_HIDE_KEY) === '1') hideStrip(false); } catch (e) {}
+if (ssClose) ssClose.addEventListener('click', () => hideStrip(true));
+
+syncTopHeight();
+addEventListener('resize', syncTopHeight);
+addEventListener('orientationchange', () => setTimeout(syncTopHeight, 150));
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(syncTopHeight);
 
 // ── 下载线路：存在性用 API 验（CORS 可用），速度用 no-cors 计时 ──────────
 // 为什么分开：Gitee 的 releases/download 是 302 跳转，且跳转响应没有
