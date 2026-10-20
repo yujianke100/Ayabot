@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ayabot · B站直播间机器人</title>
+<meta name="description" content="Ayabot 是一个开源的 B站直播间机器人：礼物 / 盲盒 / 上舰统计、弹幕关键词与 AI 回复、多房间管理，Windows 单文件 exe 即开即用。">
+<meta name="theme-color" content="#0b1020">
+<meta property="og:title" content="Ayabot · B站直播间机器人">
+<meta property="og:description" content="礼物 / 盲盒 / 上舰统计，弹幕关键词与 AI 回复，多房间管理。开源免费，Windows 单文件即开即用。">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>">
+<style>
+  :root{
+    --pink:#fb7299; --pink-2:#ff9db8; --blue:#00a1d6; --blue-2:#4cc7f0;
+    --ink:#0b1020; --ink-2:#151b33; --text:#1f2438; --muted:#6b7280;
+    --line:rgba(15,23,42,.08); --card:#fff; --bg:#f7f8fb;
+    --radius:16px; --max:1120px;
+    --shadow:0 1px 2px rgba(15,23,42,.04), 0 8px 24px -12px rgba(15,23,42,.18);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    line-height:1.65; -webkit-font-smoothing:antialiased;
+  }
+  a{color:inherit;text-decoration:none}
+  code,pre,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+  .wrap{max-width:var(--max);margin:0 auto;padding:0 24px}
+  .btn{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:12px 22px;font-weight:600;font-size:15px;
+       border:1px solid transparent;cursor:pointer;transition:.18s transform,.18s box-shadow,.18s background}
+  .btn:active{transform:translateY(1px)}
+  .btn-primary{background:linear-gradient(135deg,var(--pink),#ff5c8a);color:#fff;box-shadow:0 10px 24px -10px rgba(251,114,153,.9)}
+  .btn-primary:hover{box-shadow:0 14px 30px -10px rgba(251,114,153,1)}
+  .btn-ghost{background:rgba(255,255,255,.08);color:#fff;border-color:rgba(255,255,255,.24)}
+  .btn-ghost:hover{background:rgba(255,255,255,.14)}
+  .btn-light{background:#fff;color:var(--text);border-color:var(--line)}
+  .btn-light:hover{background:#f3f4f7}
+
+  /* ── nav ── */
+  header{position:sticky;top:0;z-index:50;backdrop-filter:saturate(160%) blur(14px);
+         background:rgba(11,16,32,.96);border-bottom:1px solid rgba(255,255,255,.08)}
+  .nav{display:flex;align-items:center;gap:20px;height:64px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:.2px;color:#fff;font-size:18px}
+  .brand .dot{width:26px;height:26px;border-radius:9px;display:grid;place-items:center;
+              background:linear-gradient(135deg,var(--pink),var(--blue));font-size:15px}
+  .nav nav{display:flex;gap:18px;margin-left:auto;font-size:14px}
+  .nav nav a{color:rgba(255,255,255,.72)}
+  .nav nav a:hover{color:#fff}
+  .nav .gh{color:#fff;font-size:14px;display:flex;align-items:center;gap:6px}
+  @media(max-width:760px){ .nav nav{display:none} }
+
+  /* ── hero ── */
+  .hero{position:relative;overflow:hidden;background:var(--ink);color:#fff;padding:76px 0 96px}
+  .hero::before,.hero::after{content:"";position:absolute;border-radius:50%;filter:blur(70px);opacity:.5;pointer-events:none}
+  .hero::before{width:520px;height:520px;background:radial-gradient(circle,#fb7299,transparent 65%);top:-220px;left:-120px}
+  .hero::after{width:560px;height:560px;background:radial-gradient(circle,#00a1d6,transparent 65%);bottom:-300px;right:-160px}
+  .hero .wrap{position:relative;z-index:1}
+  .chip{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:#ffd7e2;
+        background:rgba(251,114,153,.14);border:1px solid rgba(251,114,153,.35);
+        padding:5px 12px;border-radius:999px;margin-bottom:22px}
+  .chip b{color:#fff;font-weight:700}
+  h1{font-size:clamp(32px,5vw,54px);line-height:1.15;margin:0 0 18px;font-weight:800;letter-spacing:-.5px}
+  h1 .grad{background:linear-gradient(100deg,#fff 10%,#ffb3c9 45%,#7fd8f5 90%);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .lead{font-size:clamp(15px,1.6vw,18px);color:rgba(255,255,255,.76);max-width:660px;margin:0 0 30px}
+  .cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:34px}
+  .cta small{color:rgba(255,255,255,.5);font-size:12.5px}
+  .facts{display:flex;flex-wrap:wrap;gap:26px;padding-top:22px;border-top:1px solid rgba(255,255,255,.1)}
+  .fact b{display:block;font-size:20px;color:#fff}
+  .fact span{font-size:12.5px;color:rgba(255,255,255,.55)}
+
+  /* ── sections ── */
+  section{padding:72px 0}
+  section.alt{background:#fff;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+  .shead{max-width:720px;margin-bottom:38px}
+  .shead h2{font-size:clamp(23px,3vw,32px);margin:0 0 10px;letter-spacing:-.3px}
+  .shead p{color:var(--muted);margin:0;font-size:15px}
+  .grid{display:grid;gap:18px}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  .g2{grid-template-columns:repeat(2,1fr)}
+  @media(max-width:980px){ .g3{grid-template-columns:repeat(2,1fr)} }
+  @media(max-width:680px){ .g3,.g2{grid-template-columns:1fr} }
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:22px;box-shadow:var(--shadow)}
+  .card h3{margin:12px 0 8px;font-size:16.5px}
+  .card p{margin:0;color:var(--muted);font-size:14.2px}
+  .ico{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;
+       background:linear-gradient(135deg,rgba(251,114,153,.14),rgba(0,161,214,.14));font-size:19px}
+
+  /* ── steps ── */
+  .steps{counter-reset:s;display:grid;gap:16px}
+  .step{display:grid;grid-template-columns:44px 1fr;gap:16px;background:#fff;border:1px solid var(--line);
+        border-radius:var(--radius);padding:20px;box-shadow:var(--shadow)}
+  .step::before{counter-increment:s;content:counter(s);width:36px;height:36px;border-radius:50%;
+        display:grid;place-items:center;font-weight:700;color:#fff;
+        background:linear-gradient(135deg,var(--pink),var(--blue))}
+  .step h3{margin:2px 0 6px;font-size:16px}
+  .step p{margin:0 0 10px;color:var(--muted);font-size:14.2px}
+
+  pre{position:relative;background:var(--ink-2);color:#d7e0f4;border-radius:12px;padding:14px 16px;
+      overflow:auto;font-size:13px;line-height:1.6;margin:0}
+  pre .c{color:#7c89ab}
+  .copy{position:absolute;top:8px;right:8px;background:rgba(255,255,255,.1);color:#cfd8ee;border:1px solid rgba(255,255,255,.16);
+        border-radius:8px;padding:3px 9px;font-size:11.5px;cursor:pointer}
+  .copy:hover{background:rgba(255,255,255,.18)}
+
+  /* ── download ── */
+  .dl{display:grid;grid-template-columns:1.15fr .85fr;gap:18px}
+  @media(max-width:860px){ .dl{grid-template-columns:1fr} }
+  .dl-main{background:linear-gradient(150deg,#141a33,#0b1020);color:#fff;border-radius:20px;padding:28px;
+           border:1px solid rgba(255,255,255,.1);position:relative;overflow:hidden}
+  .dl-main::after{content:"";position:absolute;width:280px;height:280px;border-radius:50%;right:-120px;top:-120px;
+                  background:radial-gradient(circle,rgba(251,114,153,.5),transparent 65%);filter:blur(30px)}
+  .dl-main h3{margin:0 0 6px;font-size:20px;position:relative}
+  .dl-main p{color:rgba(255,255,255,.66);margin:0 0 20px;font-size:14px;position:relative}
+  .dl-main .cta{position:relative;margin-bottom:8px}
+  .kv{font-size:12.5px;color:rgba(255,255,255,.5)}
+  .list{background:#fff;border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}
+  .list h4{margin:0 0 12px;font-size:14px;color:var(--muted);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+  .list a,.list span{display:flex;justify-content:space-between;gap:10px;padding:9px 0;
+        border-bottom:1px dashed var(--line);font-size:14px}
+  .list a:hover{color:var(--pink)}
+  .list .t{color:var(--muted);font-size:12.5px}
+  .list > div:last-child a,.list > div:last-child span{border-bottom:0}
+
+  /* ── faq ── */
+  details{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:12px;box-shadow:var(--shadow)}
+  details summary{cursor:pointer;font-weight:600;font-size:15px;list-style:none}
+  details summary::-webkit-details-marker{display:none}
+  details summary::before{content:"＋";color:var(--pink);margin-right:8px;font-weight:700}
+  details[open] summary::before{content:"－"}
+  details p{color:var(--muted);font-size:14.2px;margin:10px 0 0}
+  details code{background:#f2f4f8;padding:1px 6px;border-radius:6px;font-size:12.8px;color:#334}
+
+  footer{background:var(--ink);color:rgba(255,255,255,.6);padding:34px 0;font-size:13.5px}
+  footer .wrap{display:flex;flex-wrap:wrap;gap:14px;align-items:center;justify-content:space-between}
+  footer a{color:rgba(255,255,255,.78)}
+  footer a:hover{color:#fff}
+  .pill{display:inline-block;font-size:11.5px;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.1);color:#fff}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="#top"><span class="dot">🎯</span> Ayabot</a>
+    <nav>
+      <a href="#features">功能</a>
+      <a href="#start">快速开始</a>
+      <a href="#download">下载</a>
+      <a href="#faq">常见问题</a>
+    </nav>
+    <a class="gh" href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</header>
+
+<div class="hero" id="top">
+  <div class="wrap">
+    <div class="chip">开源免费 · GPL-3.0 · <b id="verChip">最新版本</b></div>
+    <h1>把直播间的<span class="grad">礼物和弹幕</span><br>都管起来</h1>
+    <p class="lead">
+      Ayabot 是一个跑在你自己电脑上的 B站直播间机器人。自动感谢礼物、统计盲盒与上舰、
+      按关键词或 AI 回复弹幕，数据全部存在本地 SQLite 里，随时导出。
+    </p>
+    <div class="cta">
+      <a class="btn btn-primary" id="dlPrimary" href="https://gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe">⬇︎ 下载 Windows 版</a>
+      <a class="btn btn-ghost" href="#start">看怎么部署</a>
+      <small>单文件 exe，不用装 Python · 国内加速线路</small>
+    </div>
+    <div class="facts">
+      <div class="fact"><b>3</b><span>统计维度：礼物 / 盲盒 / 上舰</span></div>
+      <div class="fact"><b>1 个 exe</b><span>Windows 双击即用</span></div>
+      <div class="fact"><b>多房间</b><span>一个后台管多个直播间</span></div>
+      <div class="fact"><b>本地存储</b><span>SQLite，不上传云端</span></div>
+    </div>
+  </div>
+</div>
+
+<section id="features">
+  <div class="wrap">
+    <div class="shead">
+      <h2>该记的都替你记了</h2>
+      <p>礼物、盲盒、大航海（上舰）、弹幕，全部落库并可按日 / 按月统计。</p>
+    </div>
+    <div class="grid g3">
+      <div class="card">
+        <div class="ico">🎁</div>
+        <h3>礼物与盲盒统计</h3>
+        <p>兼容 B站新版 SEND_GIFT_V2 协议，盲盒按原价 / 实得分别记账，盈亏一眼看清。</p>
+      </div>
+      <div class="card">
+        <div class="ico">🚢</div>
+        <h3>上舰（大航海）记录</h3>
+        <p>自动识别舰长 / 提督 / 总督与开通月数，按实付电池计价，并记住每个舰长。</p>
+      </div>
+      <div class="card">
+        <div class="ico">💬</div>
+        <h3>弹幕关键词回复</h3>
+        <p>支持包含 / 精确匹配、免 # 指令、冷却与去重，避免刷屏被 B站风控。</p>
+      </div>
+      <div class="card">
+        <div class="ico">🤖</div>
+        <h3>AI 回复</h3>
+        <p>接任意 OpenAI 兼容接口（含魔搭等免费额度），按唤醒词或关键词触发。</p>
+      </div>
+      <div class="card">
+        <div class="ico">📊</div>
+        <h3>排行与导出</h3>
+        <p>送礼排行榜、月度报表、精美导出图，还有完整的弹幕记录检索。</p>
+      </div>
+      <div class="card">
+        <div class="ico">🛟</div>
+        <h3>挂了会自己爬起来</h3>
+        <p>心跳巡检、断线重连、登录失效引导重新扫码，不用盯着屏幕。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="start" class="alt">
+  <div class="wrap">
+    <div class="shead">
+      <h2>三步跑起来</h2>
+      <p>Windows 用户下载 exe 就好；服务器上也可以用 Docker 或直接跑源码。</p>
+    </div>
+    <div class="steps">
+      <div class="step">
+        <div>
+          <h3>下载并启动</h3>
+          <p>下载 <code>Ayabot-latest.exe</code>，双击运行。首次会被 Windows 提示「无法验证发布者」，点「仍要运行」即可（之后不会再弹）。</p>
+          <a class="btn btn-light" href="#download">前往下载</a>
+        </div>
+      </div>
+      <div class="step">
+        <div>
+          <h3>扫码登录 B站账号</h3>
+          <p>托盘图标右键 →「打开管理后台」，默认地址 <code>http://localhost:19810</code>。进入「用户管理 → B站账号」用手机 B站 App 扫码。</p>
+        </div>
+      </div>
+      <div class="step">
+        <div>
+          <h3>新建房间并启动</h3>
+          <p>「房间管理 → 新建房间」填主播 UID 和直播间号，选好功能开关后点「启动」。之后每次开机都会自动恢复。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="download">
+  <div class="wrap">
+    <div class="shead">
+      <h2>下载</h2>
+      <p>国内直连 GitHub 常失败，下面的按钮默认走加速线路；也可以用 Docker。</p>
+    </div>
+    <div class="dl">
+      <div class="dl-main">
+        <h3>Windows · 单文件 exe</h3>
+        <p>约 38 MB，内置 Web 管理后台与运行环境，不需要安装 Python。</p>
+        <div class="cta">
+          <a class="btn btn-primary" id="dlMain" href="https://gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe">⬇︎ 下载（国内加速）</a>
+          <a class="btn btn-ghost" href="https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe" rel="noopener">GitHub 直连</a>
+        </div>
+        <div class="kv" id="dlMeta">永远指向最新版 · 更新后数据在 %LOCALAPPDATA%\Ayabot，不会丢</div>
+      </div>
+      <div class="list">
+        <h4>其他方式</h4>
+        <div>
+          <a href="https://github.com/yujianke100/Ayabot/releases" target="_blank" rel="noopener">历史版本 / 更新日志 <span class="t">Releases ↗</span></a>
+        </div>
+        <div>
+          <a href="https://github.com/yujianke100/ayabot/pkgs/container/ayabot" target="_blank" rel="noopener">Docker 镜像 <span class="t">ghcr.io ↗</span></a>
+        </div>
+        <div>
+          <a href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener">源码 <span class="t">GPL-3.0</span></a>
+        </div>
+      </div>
+    </div>
+
+    <h3 style="margin:34px 0 12px;font-size:16px">Docker 部署</h3>
+    <pre><button class="copy" data-copy="#dockercmd">复制</button><span id="dockercmd"><span class="c"># 拉取镜像（GitHub Container Registry）</span>
+docker pull ghcr.io/yujianke100/ayabot:latest
+
+<span class="c"># 启动：把配置和房间数据挂到本机</span>
+docker run -d --name ayabot -p 19810:19810 \
+  -v ~/ayabot/data:/app/data \
+  -v ~/ayabot/rooms:/app/rooms \
+  -v ~/ayabot/accounts:/app/accounts \
+  --restart unless-stopped ghcr.io/yujianke100/ayabot:latest</span></pre>
+    <p style="color:var(--muted);font-size:13.5px;margin-top:12px">
+      国内拉不动 ghcr 时，可以用 <code>docker.mirrors.ustc.edu.cn/ghcr.io/...</code> 之类的镜像站，
+      或直接用 Docker Hub：<code>yujianke100/ayabot:latest</code>。
+    </p>
+  </div>
+</section>
+
+<section id="faq" class="alt">
+  <div class="wrap">
+    <div class="shead">
+      <h2>常见问题</h2>
+      <p>这些是用户反馈最多的问题，都已经在新版本里处理。</p>
+    </div>
+
+    <details>
+      <summary>打开软件提示「无法验证发布者，你确定要运行此软件吗？」</summary>
+      <p>这是 Windows 对「从网上下载、没有数字签名」的程序的例行提示。点「运行」即可，
+         程序启动后会清除自己的下载标记，之后不再提示；也可以手动右键 exe → 属性 → 勾选「解除锁定」。</p>
+    </details>
+
+    <details>
+      <summary>提示「登录已失效，需要重新扫码」</summary>
+      <p>B站登录凭证有有效期。后台顶部会出现红色提示，点「重新登录」跳到扫码入口，
+         扫完会自动恢复运行，不需要重启软件。</p>
+    </details>
+
+    <details>
+      <summary>礼物统计一直是 0</summary>
+      <p>3 个版本之前 B站把礼物事件换成了新的二进制协议（SEND_GIFT_V2），旧版本收不到任何礼物数据。
+         请更新到最新版；历史数据无法补回，需要从上舰 / 礼物后台人工核对。</p>
+    </details>
+
+    <details>
+      <summary>关闭软件后房间没有自动启动</summary>
+      <p>最新版已修复：房间的期望状态记在 <code>data/desired_states.json</code>，
+         软件启动后会自动按上次状态拉起房间。如果你还在旧版本，需要手动升一次。</p>
+    </details>
+
+    <details>
+      <summary>检查更新很慢 / 一直转圈</summary>
+      <p>旧版本的更新检查是串行访问 GitHub 的，国内经常要等十几秒甚至失败。
+         新版本改为并发向国内镜像取版本号并测速下载线路，通常 1 秒内出结果，结果还会缓存。</p>
+    </details>
+
+    <details>
+      <summary>数据和配置存在哪里？</summary>
+      <p>Windows：<code>%LOCALAPPDATA%\Ayabot\</code>；Docker：挂载出来的 <code>data</code> / <code>rooms</code> / <code>accounts</code> 目录。
+         统计数据库是标准 SQLite 文件，可以直接用工具打开或备份。</p>
+    </details>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <a class="brand" href="#top" style="font-size:16px"><span class="dot">🎯</span> Ayabot</a>
+      <div style="margin-top:8px">B站直播间机器人 · 开源免费 · <span id="footVer">v1.2.2</span></div>
+    </div>
+    <div style="display:flex;gap:18px;flex-wrap:wrap">
+      <a href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/yujianke100/Ayabot/releases" target="_blank" rel="noopener">更新日志</a>
+      <a href="https://github.com/yujianke100/Ayabot/issues" target="_blank" rel="noopener">问题反馈</a>
+      <a href="https://github.com/yujianke100/Ayabot/blob/main/SIGNING.md" target="_blank" rel="noopener">签名策略</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+// 版本号：与仓库 VERSION 同步（部署时生成 version.json），失败就保留静态兜底
+fetch('version.json', { cache: 'no-store' })
+  .then(r => (r.ok ? r.json() : null))
+  .then(v => {
+    if (!v || !v.version) return;
+    const tag = 'v' + v.version;
+    const chip = document.getElementById('verChip');
+    const foot = document.getElementById('footVer');
+    if (chip) chip.textContent = '最新 ' + tag;
+    if (foot) foot.textContent = tag;
+    if (v.size_mb) {
+      const meta = document.getElementById('dlMeta');
+      if (meta) meta.textContent = '永远指向最新版 · ' + v.size_mb + ' MB · 数据在 %LOCALAPPDATA%\\Ayabot，不会丢';
+    }
+  })
+  .catch(() => {});
+
+// 复制按钮
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.copy');
+  if (!btn) return;
+  const el = document.querySelector(btn.dataset.copy);
+  if (!el) return;
+  const text = el.innerText.replace(/^\s*#.*$/gm, m => m); // 保留注释
+  navigator.clipboard.writeText(text).then(() => {
+    const old = btn.textContent;
+    btn.textContent = '已复制';
+    setTimeout(() => { btn.textContent = old; }, 1400);
+  }).catch(() => {});
+});
+</script>
+</body>
+</html>

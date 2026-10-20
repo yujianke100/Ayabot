@@ -14,7 +14,7 @@
 **完全免费**的超轻量 B 站直播间弹幕机器人。签到抽签、盲盒统计、AI 对话、自动欢迎/感谢、定时消息、Web 后台管理，一应俱全。
 开箱即用，小白友好。纯 Python 跨平台，无需 systemd / sudo。
 
-版本更新日志详见 [GitHub Releases](https://github.com/yujianke100/ayabot/releases)。
+🌐 **产品主页（国内可直连）**：<https://ayabot.jianke-yu.online>　·　版本更新日志详见 [GitHub Releases](https://github.com/yujianke100/ayabot/releases)。
 
 ---
 
