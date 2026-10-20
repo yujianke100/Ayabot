@@ -106,6 +106,12 @@ def ensure_release(token: str, owner: str, repo: str, tag: str, name: str,
     existing = get_release_by_tag(token, owner, repo, tag)
     if existing:
         print(f"  发行版 {tag} 已存在 (id={existing['id']})，复用")
+        # 重发同版本时（例如重打 tag）说明也会变，顺手同步一下，
+        # 否则 Gitee 上的介绍会一直停在第一次发布时的内容
+        if body and (existing.get("body") or "").strip() != body.strip():
+            code, _ = _req("PATCH", f"/repos/{owner}/{repo}/releases/{existing['id']}", token,
+                           body={"tag_name": tag, "name": name, "body": body})
+            print(f"    更新发行说明 HTTP {code}")
         return existing
     code, data = _req("POST", f"/repos/{owner}/{repo}/releases", token, body={
         "tag_name": tag,
