@@ -129,6 +129,46 @@ jobs:
             dist/Ayabot-latest.exe
           generate_release_notes: true
 
+  # ── Gitee 发行版（国内下载线路；未配置 GITEE_TOKEN 时整个 job 跳过） ──
+  gitee:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: Ayabot-${{ github.ref_name }}
+          path: dist
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 发布到 Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_OWNER: ${{ secrets.GITEE_OWNER }}
+          GITEE_REPO: ${{ secrets.GITEE_REPO }}
+          GITEE_TARGET: ${{ secrets.GITEE_TARGET }}
+        run: |
+          if [ -z "$GITEE_TOKEN" ]; then
+            echo "未配置 GITEE_TOKEN，跳过 Gitee 发布。"
+            echo "配置方法见 docs/gitee-release.md"
+            exit 0
+          fi
+          EXE="$(ls dist/Ayabot-v*.exe | head -1)"
+          echo "上传: $EXE"
+          python scripts/publish_gitee.py \
+            --version "${{ github.ref_name }}" \
+            --exe "$EXE" \
+            --owner "${GITEE_OWNER:-yujianke100}" \
+            --repo "${GITEE_REPO:-Ayabot}" \
+            --target "${GITEE_TARGET:-master}"
+
   # ── SignPath Foundation 签名（未配置 SIGNPATH_* 时整个 job 跳过） ──
   sign:
     needs: build

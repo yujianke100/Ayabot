@@ -221,7 +221,7 @@
       按关键词或 AI 回复弹幕，数据全部存在本地 SQLite 里，随时导出。
     </p>
     <div class="cta">
-      <a class="btn btn-primary" id="dlPrimary" href="https://gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe">⬇︎ 下载 Windows 版</a>
+      <a class="btn btn-primary" id="dlPrimary" href="https://gitee.com/yujianke100/Ayabot/releases/download/latest/Ayabot-latest.exe">⬇︎ 下载 Windows 版</a>
       <a class="btn btn-ghost" href="#start">看怎么部署</a>
       <small>单文件 exe，不用装 Python · 国内加速线路</small>
     </div>
@@ -336,20 +336,21 @@
   <div class="wrap">
     <div class="shead">
       <h2>下载</h2>
-      <p>页面打开后会<b>在你自己的网络里</b>给每条线路测一次速，按你实测最快的线路给下载按钮。测速只发 HEAD 请求，不耗流量。</p>
+      <p>打开本页时会<b>在你自己的网络里</b>给每条线路测一次速（只发 HEAD，不耗流量），
+         下载按钮自动指向你这边最快的线路。国内通常是 Gitee（走它自己的国内 CDN）。</p>
     </div>
     <div class="dl">
       <div class="dl-main">
         <h3>Windows · 单文件 exe</h3>
         <p>约 <span id="dlSize">38</span> MB，内置 Web 管理后台与运行环境，不需要安装 Python。</p>
         <div class="cta">
-          <a class="btn btn-primary" id="dlMain" href="https://gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe" rel="noopener">⬇︎ 下载 Windows 版</a>
+          <a class="btn btn-primary" id="dlMain" href="https://gitee.com/yujianke100/Ayabot/releases/download/latest/Ayabot-latest.exe" rel="noopener">⬇︎ 下载 Windows 版</a>
           <button class="btn btn-ghost" id="dlRetest" type="button">重新测速</button>
         </div>
         <div class="kv" id="dlMeta">正在测速…　·　更新后数据在 %LOCALAPPDATA%\Ayabot，不会丢</div>
         <div class="mirrors" id="mirrors" aria-live="polite">
           <div class="mrow" data-lane="auto">
-            <span class="mname">gh-proxy.com</span>
+            <span class="mname">Gitee（国内 CDN）</span>
             <span class="mbar"><i></i></span>
             <span class="mms">测速中…</span>
           </div>
@@ -360,6 +361,9 @@
       </div>
       <div class="list">
         <h4>其他方式</h4>
+        <div>
+          <a href="https://gitee.com/yujianke100/Ayabot/releases" target="_blank" rel="noopener">国内下载（Gitee） <span class="t">国内 CDN ↗</span></a>
+        </div>
         <div>
           <a href="https://github.com/yujianke100/Ayabot/releases" target="_blank" rel="noopener">历史版本 / 更新日志 <span class="t">Releases ↗</span></a>
         </div>
@@ -483,6 +487,13 @@ docker run -d --name ayabot -p 19810:19810 \
     </details>
 
     <details>
+      <summary>下载线路是怎么来的？会不会哪天失效？</summary>
+      <p>安装包只发布在 GitHub Release 和 Gitee 发行版两处（都是免费托管，不占用开发者自己的服务器带宽），
+         其余列表里的是第三方 GitHub 加速站。加速站偶尔会挂，所以页面每次打开都实测一遍，
+         挂了的那条会自动排到最后并标「不通」；Gitee 与 GitHub 是官方托管，长期可用。</p>
+    </details>
+
+    <details>
       <summary>数据和配置存在哪里？</summary>
       <p>Windows：<code>%LOCALAPPDATA%\Ayabot\</code>；Docker：挂载出来的 <code>data</code> / <code>rooms</code> / <code>accounts</code> 目录。
          统计数据库是标准 SQLite 文件，可以直接用工具打开或备份。</p>
@@ -509,6 +520,8 @@ docker run -d --name ayabot -p 19810:19810 \
 <script>
 // ── 版本号 / 包大小 / 校验值 ───────────────────────────────
 const LANES = [
+  // Gitee 发行版：走国内 CDN，不占任何一方自建带宽，国内通常最快
+  { id: 'gitee', name: 'Gitee（国内 CDN）', url: 'https://gitee.com/yujianke100/Ayabot/releases/download/latest/Ayabot-latest.exe' },
   { id: 'ghp',   name: 'gh-proxy.com',      url: 'https://gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
   { id: 'hk',    name: 'hk.gh-proxy.com',   url: 'https://hk.gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
   { id: 'gpnet', name: 'ghproxy.net',       url: 'https://ghproxy.net/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
@@ -536,20 +549,46 @@ function paintRows(results) {
     row.innerHTML =
       '<span class="mname">' + r.name + '</span>' +
       '<span class="mbar"><i style="width:' + pct + '%"></i></span>' +
-      '<span class="mms">' + (r.ok ? r.ms + ' ms' : '不通') + '</span>';
+      '<span class="mms">' + (r.ok ? (r.verified ? r.ms + ' ms' : '? ' + r.ms + ' ms') : '不通') + '</span>';
     mirrors.appendChild(row);
   });
 }
 
-// 只发 HEAD 拿「首字节时间」；跨域读不到内容，但计时可用。不耗下载流量。
-function probe(lane) {
+// 先按 CORS 模式发 HEAD，能读到真实状态码（Gitee 与多数加速站都回 access-control-allow-origin: *）。
+// 读不到时退回 no-cors「不透明」探测 —— 只能证明连得上，证明不了文件在（404 也算连得上），
+// 所以这种结果标成「未验证」，排序时排在已确认可用的线路之后。
+// 两种方式都只取响应头，不下载文件本体。
+async function probe(lane) {
   const t0 = performance.now();
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 6000);
-  return fetch(lane.url, { method: 'HEAD', mode: 'no-cors', cache: 'no-store', signal: ctl.signal })
-    .then(() => ({ ...lane, ok: true, ms: Math.round(performance.now() - t0) }))
-    .catch(() => ({ ...lane, ok: false, ms: 99999 }))
-    .finally(() => clearTimeout(timer));
+  try {
+    let resp;
+    try {
+      resp = await fetch(lane.url, { method: 'HEAD', mode: 'cors', cache: 'no-store', signal: ctl.signal });
+    } catch {
+      // 有的站点不允许 HEAD，用 Range 取 1 字节的 GET 代替
+      resp = await fetch(lane.url, {
+        method: 'GET', mode: 'cors', cache: 'no-store', signal: ctl.signal,
+        headers: { Range: 'bytes=0-0' },
+      });
+    }
+    const ms = Math.round(performance.now() - t0);
+    const ok = resp.status < 400;
+    return { ...lane, ok, verified: true, status: resp.status, ms: ok ? ms : 99999 };
+  } catch {
+    try {
+      const ctl2 = new AbortController();
+      const t2 = setTimeout(() => ctl2.abort(), 6000);
+      await fetch(lane.url, { method: 'HEAD', mode: 'no-cors', cache: 'no-store', signal: ctl2.signal });
+      clearTimeout(t2);
+      return { ...lane, ok: true, verified: false, status: 0, ms: Math.round(performance.now() - t0) };
+    } catch {
+      return { ...lane, ok: false, verified: false, status: 0, ms: 99999 };
+    }
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function runSpeedTest() {
@@ -562,20 +601,21 @@ async function runSpeedTest() {
   const timeout = new Promise(res => setTimeout(() => res(LANES.map(l => ({ ...l, ok: false, ms: 99999 }))), 7000));
   const results = await Promise.race([Promise.all(LANES.map(probe)), timeout]);
 
-  results.sort((a, b) => (a.ok === b.ok ? a.ms - b.ms : a.ok ? -1 : 1));
-  bestLane = results.find(r => r.ok) || FALLBACK;
+  const rank = r => (r.ok ? (r.verified ? 0 : 1) : 2);
+  results.sort((a, b) => (rank(a) === rank(b) ? a.ms - b.ms : rank(a) - rank(b)));
+  bestLane = results.find(r => r.ok && r.verified) || results.find(r => r.ok) || FALLBACK;
   paintRows(results);
 
   dlMain.href = bestLane.url;                      // 同源线路走相对路径，跨域走绝对地址
   const live = results.find(r => r.ok);
   dlMeta.textContent = live
     ? '已选最快的线路：' + bestLane.name + '（' + bestLane.ms + ' ms）· 其它线路可手动换'
-    : '线路都没测通（可能被网络限制），按钮指向 GitHub 直连，建议挂代理或用 Docker';
+    : '线路都没测通（可能被网络限制），按钮指向 Gitee，建议挂代理或用 Docker';
 }
 
 document.getElementById('dlRetest').addEventListener('click', runSpeedTest);
-// 兜底：测速没跑完就点下载，走默认的 gh-proxy（实测最快且免费）
-dlMain.addEventListener('click', () => { if (!bestLane) dlMain.href = 'https://gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe'; });
+// 兜底：测速没跑完就点下载，走 Gitee（国内 CDN，实测最快）
+dlMain.addEventListener('click', () => { if (!bestLane) dlMain.href = 'https://gitee.com/yujianke100/Ayabot/releases/download/latest/Ayabot-latest.exe'; });
 
 fetch('version.json', { cache: 'no-store' })
   .then(r => (r.ok ? r.json() : null))

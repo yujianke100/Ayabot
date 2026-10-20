@@ -1724,7 +1724,9 @@ _META_SOURCES: tuple[tuple[str, str], ...] = (
     ("hk.gh-proxy.com", "https://hk.gh-proxy.com/"),
     ("GitHub", ""),
 )
-# 安装包下载候选：国内加速站在前，GitHub 直连垫底（仅作兜底展示）
+# 安装包下载候选：国内线路在前，GitHub 直连垫底（仅作兜底展示）
+# Gitee 走它自己的国内 CDN（foruda.gitee.com），实测约 2 MB/s，是最稳的一条。
+_GITEE_REPO = "yujianke100/Ayabot"   # Gitee 上的仓库路径（owner/repo），需与密钥一致
 _DOWNLOAD_SOURCES: tuple[tuple[str, str], ...] = (
     ("gh-proxy.com", "https://gh-proxy.com/"),
     ("hk.gh-proxy.com", "https://hk.gh-proxy.com/"),
@@ -1742,6 +1744,8 @@ _TAG_SOURCES: tuple[tuple[str, str], ...] = (
     ("ghproxy.net", "https://ghproxy.net/"),
     ("GitHub", ""),
 )
+# Gitee 的发行版 API（公开：无需 token，也不吃 GitHub 那 60 次/小时的限流）
+_GITEE_LATEST_API = f"https://gitee.com/api/v5/repos/{_GITEE_REPO}/releases/latest"
 
 # ── 时间预算 ──────────────────────────────────────────────
 # 国内直连 api.github.com / objects.githubusercontent.com 经常挂死到超时，
@@ -1814,7 +1818,28 @@ def _release_urls(latest: str) -> dict[str, str]:
     return {
         "page": f"https://github.com/{_UPDATE_REPO}/releases/tag/{tag}",
         "asset": f"https://github.com/{_UPDATE_REPO}/releases/download/{tag}/{_UPDATE_ASSET}",
+        # Gitee 上一版一发行版，附件名固定；这里拼的是「版本无关」的 latest 别名地址
+        "gitee": f"https://gitee.com/{_GITEE_REPO}/releases/download/latest/{_UPDATE_ASSET}",
+        "gitee_tag": f"https://gitee.com/{_GITEE_REPO}/releases/download/{tag}/{_UPDATE_ASSET}",
     }
+
+
+def _download_lanes(asset_url: str, version: str | None = None) -> list[tuple[str, str]]:
+    """按「国内优先、GitHub 直连最后」排好的 (线路名, 完整地址) 列表。
+
+    Gitee 用 latest 别名（固定地址，不怕版本号变化）；下面还会追加一条按 tag 拼的，
+    以防 latest 别名没建成功但版本发行版在。
+    """
+    tag = f"v{version}" if version and not str(version).startswith("v") else str(version or "")
+    lanes: list[tuple[str, str]] = [
+        ("gitee", f"https://gitee.com/{_GITEE_REPO}/releases/download/latest/{_UPDATE_ASSET}"),
+    ]
+    if tag:
+        lanes.append(
+            ("gitee (tag)", f"https://gitee.com/{_GITEE_REPO}/releases/download/{tag}/{_UPDATE_ASSET}")
+        )
+    lanes += [(name, prefix + asset_url) for name, prefix in _DOWNLOAD_SOURCES]
+    return lanes
 
 
 async def _fetch_release_meta(
@@ -1873,6 +1898,25 @@ async def _fetch_latest_tag(
     return match.group(1), name
 
 
+async def _fetch_gitee_tag(session: aiohttp.ClientSession) -> tuple[Optional[str], str]:
+    """从 Gitee 的发行版 API 取最新版本号（公开、免 token、不吃 GitHub 限流）。"""
+    try:
+        async with session.get(
+            _GITEE_LATEST_API, timeout=aiohttp.ClientTimeout(total=_META_ATTEMPT_TIMEOUT)
+        ) as resp:
+            if resp.status != 200:
+                return None, "gitee"
+            raw = await resp.read()
+        data = json.loads(raw)
+        tag = str((data or {}).get("tag_name") or "").strip()
+        if not tag or tag == "latest":      # 别名发行版不代表版本号
+            return None, "gitee"
+        return tag, "gitee"
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("gitee tag failed: %s", exc)
+        return None, "gitee"
+
+
 async def _fetch_tag_race(
     session: aiohttp.ClientSession,
 ) -> tuple[Optional[str], str, int]:
@@ -1893,6 +1937,7 @@ async def _fetch_tag_race(
         asyncio.create_task(attempt(n, p, _META_STAGGER if not p else 0.0))
         for n, p in _TAG_SOURCES
     ]
+    tasks.append(asyncio.create_task(_fetch_gitee_tag(session)))
     try:
         for fut in asyncio.as_completed(tasks, timeout=_TAG_BUDGET):
             try:
@@ -1971,7 +2016,7 @@ async def _probe_one(
 
 
 async def _probe_all(
-    session: aiohttp.ClientSession, asset_url: str, expected_size: int = 0
+    session: aiohttp.ClientSession, lanes: list[tuple[str, str]], expected_size: int = 0
 ) -> list[dict[str, Any]]:
     """并发探测全部下载线路，拿到第一条可用线路后再等一小段就收工。
 
@@ -1980,10 +2025,10 @@ async def _probe_all(
     """
     tasks = {
         asyncio.create_task(
-            _probe_one(session, name, prefix + asset_url, expected_size,
-                       _PROBE_GRACE if not prefix else 0.0)
-        ): (name, prefix + asset_url)
-        for name, prefix in _DOWNLOAD_SOURCES
+            _probe_one(session, name, url, expected_size,
+                       _PROBE_GRACE if name == "GitHub" else 0.0)
+        ): (name, url)
+        for name, url in lanes
     }
     results: list[dict[str, Any]] = []
     pending = set(tasks)
@@ -2104,7 +2149,9 @@ async def _compute_update_payload() -> dict:
             latest = tag.lstrip("vV")
             meta_source, meta_ms = tag_source, tag_ms
             urls = _release_urls(latest)
-            probe_task = asyncio.create_task(_probe_all(session, urls["asset"]))
+            probe_task = asyncio.create_task(
+                _probe_all(session, _download_lanes(urls["asset"], latest))
+            )
             try:
                 meta = await asyncio.wait_for(meta_task, timeout=_META_EXTRA)
             except Exception:  # noqa: BLE001  超时或失败都不影响主流程
@@ -2115,8 +2162,9 @@ async def _compute_update_payload() -> dict:
             # 版本号拿不到时退回完整元数据（还能从 assets 里读到版本）
             meta = await meta_task
             if meta is None:
-                urls = _release_urls(get_version().lstrip("v"))
-                probes = await _probe_all(session, urls["asset"])
+                cur_ver = get_version().lstrip("v")
+                urls = _release_urls(cur_ver)
+                probes = await _probe_all(session, _download_lanes(urls["asset"], cur_ver))
                 return {
                     "ok": False,
                     "error": "无法获取版本信息（直连与镜像均失败）",
@@ -2128,7 +2176,7 @@ async def _compute_update_payload() -> dict:
             latest = str(meta.get("tag_name") or "").lstrip("vV")
             meta_source, meta_ms = tag_source or "GitHub", tag_ms
             urls = _release_urls(latest)
-            probes = await _probe_all(session, urls["asset"])
+            probes = await _probe_all(session, _download_lanes(urls["asset"], latest))
 
         # 从 release 元数据里取资产真实大小，用来识别镜像缓存的旧文件
         expected_size = 0
