@@ -36,7 +36,7 @@ CI 会在打 tag 后自动把 exe 传到 Gitee（`.github/workflows/build-exe.ym
 | `GITEE_TOKEN` | 上一步的令牌 | ✅ |
 | `GITEE_OWNER` | 你的 Gitee 用户名/个性地址，例如 `yujianke100` | 建议 |
 | `GITEE_REPO` | 仓库路径，例如 `Ayabot` | 建议 |
-| `GITEE_TARGET` | 发行版指向的分支，Gitee 上要存在，通常是 `master` | 建议 |
+| `GITEE_TARGET` | 发行版指向的分支。**可以留空**：脚本会自动读仓库默认分支（Gitee 新仓库常常是 `main` 而不是 `master`） | 可选 |
 
 不填 owner/repo 时脚本默认用 `yujianke100/Ayabot`。
 

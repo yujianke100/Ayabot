@@ -162,12 +162,11 @@ jobs:
           fi
           EXE="$(ls dist/Ayabot-v*.exe | head -1)"
           echo "上传: $EXE"
-          python scripts/publish_gitee.py \
-            --version "${{ github.ref_name }}" \
-            --exe "$EXE" \
-            --owner "${GITEE_OWNER:-yujianke100}" \
-            --repo "${GITEE_REPO:-Ayabot}" \
-            --target "${GITEE_TARGET:-master}"
+          ARGS=(--version "${{ github.ref_name }}" --exe "$EXE"
+                --owner "${GITEE_OWNER:-yujianke100}" --repo "${GITEE_REPO:-Ayabot}")
+          # 没显式指定分支时让脚本自动探测仓库默认分支（Gitee 新仓库可能是 main）
+          if [ -n "${GITEE_TARGET:-}" ]; then ARGS+=(--target "$GITEE_TARGET"); fi
+          python scripts/publish_gitee.py "${ARGS[@]}"
 
   # ── SignPath Foundation 签名（未配置 SIGNPATH_* 时整个 job 跳过） ──
   sign:

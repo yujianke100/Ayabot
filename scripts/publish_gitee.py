@@ -82,6 +82,16 @@ def _req(method: str, path: str, token: str, *, body: dict | None = None,
             return exc.code, raw
 
 
+def default_branch(token: str, owner: str, repo: str) -> str:
+    """取仓库的默认分支。Gitee 上新仓库可能是 master，也可能是 main —— 硬编码会创建发行版失败。"""
+    code, data = _req("GET", f"/repos/{owner}/{repo}", token)
+    if code == 200 and isinstance(data, dict):
+        branch = str(data.get("default_branch") or "").strip()
+        if branch:
+            return branch
+    return "master"
+
+
 def get_release_by_tag(token: str, owner: str, repo: str, tag: str) -> dict | None:
     code, data = _req("GET", f"/repos/{owner}/{repo}/releases/tags/{tag}", token)
     if code == 200 and isinstance(data, dict):
@@ -165,8 +175,8 @@ def main() -> int:
     ap.add_argument("--notes-file", default="", help="发行说明 Markdown（可选）")
     ap.add_argument("--owner", default=os.environ.get("GITEE_OWNER", "yujianke100"))
     ap.add_argument("--repo", default=os.environ.get("GITEE_REPO", "Ayabot"))
-    ap.add_argument("--target", default=os.environ.get("GITEE_TARGET", "master"),
-                    help="发行版指向的分支（Gitee 上要存在）")
+    ap.add_argument("--target", default=os.environ.get("GITEE_TARGET", ""),
+                    help="发行版指向的分支；留空则自动用仓库默认分支")
     ap.add_argument("--keep", type=int, default=4, help="保留最近几个版本的附件（不含 latest）")
     ap.add_argument("--no-latest-alias", action="store_true",
                     help="不维护 latest 别名发行版（域名/页面就别用固定地址了）")
@@ -191,8 +201,9 @@ def main() -> int:
             notes = notes[:20000] + "\n\n…（完整说明见 GitHub Release）"
 
     if not args.prune_only:
-        print(f"发布到 Gitee: {args.owner}/{args.repo} {tag}")
-        rel = ensure_release(token, args.owner, args.repo, tag, tag, notes, args.target)
+        target = args.target or default_branch(token, args.owner, args.repo)
+        print(f"发布到 Gitee: {args.owner}/{args.repo} {tag}（分支 {target}）")
+        rel = ensure_release(token, args.owner, args.repo, tag, tag, notes, target)
         _replace_asset(token, args.owner, args.repo, rel, exe)
 
         if not args.no_latest_alias:
@@ -200,7 +211,7 @@ def main() -> int:
             print("维护 latest 别名发行版（固定下载地址）")
             alias = ensure_release(
                 token, args.owner, args.repo, "latest", "最新版本",
-                f"始终指向最新版（当前 {tag}）。历史版本见各版本发行版。", args.target,
+                f"始终指向最新版（当前 {tag}）。历史版本见各版本发行版。", target,
             )
             _replace_asset(token, args.owner, args.repo, alias, exe)
 
