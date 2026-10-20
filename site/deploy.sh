@@ -43,7 +43,6 @@ scp "$SRC"/assets/favicon.ico "$HOST:$DEST/favicon.ico"
 ssh "$HOST" "chown -R homepage:homepage $DEST && ls -l $DEST $DEST/assets | head -24"
 
 # 静态文件改动不需要 reload nginx（root 未变）；只有改 vhost 才需要
-
-# 顺手触发一次国内镜像同步（服务器上 cron 每天也会跑，这里保证发完版立刻就有）
-ssh "$HOST" "/usr/local/bin/ayabot-mirror-sync.sh || true"
+#
+# 注意：主机带宽要留给别的项目，官网不托管 exe。下载一律走 GitHub Release 与各家加速站。
 echo "done -> https://ayabot.jianke-yu.online/"

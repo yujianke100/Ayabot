@@ -343,13 +343,13 @@
         <h3>Windows · 单文件 exe</h3>
         <p>约 <span id="dlSize">38</span> MB，内置 Web 管理后台与运行环境，不需要安装 Python。</p>
         <div class="cta">
-          <a class="btn btn-primary" id="dlMain" href="download/Ayabot-latest.exe" rel="noopener">⬇︎ 下载 Windows 版</a>
+          <a class="btn btn-primary" id="dlMain" href="https://gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe" rel="noopener">⬇︎ 下载 Windows 版</a>
           <button class="btn btn-ghost" id="dlRetest" type="button">重新测速</button>
         </div>
         <div class="kv" id="dlMeta">正在测速…　·　更新后数据在 %LOCALAPPDATA%\Ayabot，不会丢</div>
         <div class="mirrors" id="mirrors" aria-live="polite">
           <div class="mrow" data-lane="auto">
-            <span class="mname">本站（腾讯云上海）</span>
+            <span class="mname">gh-proxy.com</span>
             <span class="mbar"><i></i></span>
             <span class="mms">测速中…</span>
           </div>
@@ -370,7 +370,7 @@
           <a href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener">源码 <span class="t">GPL-3.0</span></a>
         </div>
         <div>
-          <span>校验值（SHA-256）<span class="t mono" id="dlSha" style="font-size:11px">加载中…</span></span>
+          <span>校验值 <span class="t mono" id="dlSha" style="font-size:11px">见 Release 页</span></span>
         </div>
       </div>
     </div>
@@ -477,7 +477,7 @@ docker run -d --name ayabot -p 19810:19810 \
     <details>
       <summary>下载很慢怎么办？</summary>
       <p>页面会先在你本机给每条线路测速（只发 HEAD，不耗流量），然后按你实测最快的线路给下载按钮。
-         也可以点「重新测速」再试一次。本站（腾讯云上海）通常最快；如果整页都显示「不通」，
+         也可以点「重新测速」再试一次。如果整页都显示「不通」，
          说明当前网络把 GitHub 及其加速站都限住了，可以用 Docker 镜像。
          校验值在下载卡右侧，下完可以核对 <code>sha256</code>。</p>
     </details>
@@ -509,7 +509,6 @@ docker run -d --name ayabot -p 19810:19810 \
 <script>
 // ── 版本号 / 包大小 / 校验值 ───────────────────────────────
 const LANES = [
-  { id: 'self',  name: '本站（腾讯云上海）', url: 'download/Ayabot-latest.exe', self: true },
   { id: 'ghp',   name: 'gh-proxy.com',      url: 'https://gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
   { id: 'hk',    name: 'hk.gh-proxy.com',   url: 'https://hk.gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
   { id: 'gpnet', name: 'ghproxy.net',       url: 'https://ghproxy.net/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
@@ -575,8 +574,8 @@ async function runSpeedTest() {
 }
 
 document.getElementById('dlRetest').addEventListener('click', runSpeedTest);
-// 兜底：测速没跑完就点下载，直接走本站（同源，最不容易失败）
-dlMain.addEventListener('click', () => { if (!bestLane) dlMain.href = 'download/Ayabot-latest.exe'; });
+// 兜底：测速没跑完就点下载，走默认的 gh-proxy（实测最快且免费）
+dlMain.addEventListener('click', () => { if (!bestLane) dlMain.href = 'https://gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe'; });
 
 fetch('version.json', { cache: 'no-store' })
   .then(r => (r.ok ? r.json() : null))
@@ -593,18 +592,6 @@ fetch('version.json', { cache: 'no-store' })
     }
   })
   .catch(() => {});
-
-// 校验值（同源取，避免跨域）：服务端在 download/ 旁边放 sha256.txt
-fetch('download/sha256.txt', { cache: 'no-store' })
-  .then(r => (r.ok ? r.text() : null))
-  .then(t => {
-    const el = document.getElementById('dlSha');
-    if (!el) return;
-    if (!t) { el.textContent = '—'; return; }
-    el.textContent = t.trim().split(/\s+/)[0].slice(0, 16) + '…';
-    el.title = t.trim();
-  })
-  .catch(() => { const el = document.getElementById('dlSha'); if (el) el.textContent = '—'; });
 
 // 打赏码放大
 const lb = document.getElementById('lightbox');
