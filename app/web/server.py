@@ -1745,7 +1745,11 @@ _TAG_SOURCES: tuple[tuple[str, str], ...] = (
     ("GitHub", ""),
 )
 # Gitee 的发行版 API（公开：无需 token，也不吃 GitHub 那 60 次/小时的限流）
-_GITEE_LATEST_API = f"https://gitee.com/api/v5/repos/{_GITEE_REPO}/releases/latest"
+# 注意：不能用 /releases/latest —— 那条会返回我们自己建的 `latest` 别名发行版
+# （tag_name 字面就是 "latest"），拿不到真实版本号。改用列表接口再挑版本号最大的那个。
+_GITEE_RELEASES_API = f"https://gitee.com/api/v5/repos/{_GITEE_REPO}/releases?per_page=20"
+# 真实版本标签的形态（排除 latest 别名发行版）
+_VERSION_TAG_RE = re.compile(r"^v?\d+(?:\.\d+)*$")
 
 # ── 时间预算 ──────────────────────────────────────────────
 # 国内直连 api.github.com / objects.githubusercontent.com 经常挂死到超时，
@@ -1899,19 +1903,32 @@ async def _fetch_latest_tag(
 
 
 async def _fetch_gitee_tag(session: aiohttp.ClientSession) -> tuple[Optional[str], str]:
-    """从 Gitee 的发行版 API 取最新版本号（公开、免 token、不吃 GitHub 限流）。"""
+    """从 Gitee 的发行版 API 取最新版本号（公开、免 token、不吃 GitHub 限流）。
+
+    走列表接口而不是 /releases/latest：后者会返回我们自己维护的 `latest` 别名
+    （tag_name 字面是 "latest"），不是真实版本号。列表里同时有别名和真实版本，
+    所以按「版本号最大」挑，不看创建时间（重发旧版本时创建时间会更新）。
+    """
     try:
         async with session.get(
-            _GITEE_LATEST_API, timeout=aiohttp.ClientTimeout(total=_META_ATTEMPT_TIMEOUT)
+            _GITEE_RELEASES_API, timeout=aiohttp.ClientTimeout(total=_META_ATTEMPT_TIMEOUT)
         ) as resp:
             if resp.status != 200:
                 return None, "gitee"
             raw = await resp.read()
         data = json.loads(raw)
-        tag = str((data or {}).get("tag_name") or "").strip()
-        if not tag or tag == "latest":      # 别名发行版不代表版本号
+        if not isinstance(data, list):
             return None, "gitee"
-        return tag, "gitee"
+        best: Optional[str] = None
+        best_key: tuple[int, ...] = ()
+        for rel in data:
+            tag = str((rel or {}).get("tag_name") or "").strip()
+            if not _is_version_tag(tag):
+                continue
+            key = _version_tuple(tag)
+            if key > best_key:
+                best, best_key = tag, key
+        return best, "gitee"
     except Exception as exc:  # noqa: BLE001
         logger.debug("gitee tag failed: %s", exc)
         return None, "gitee"
@@ -2078,6 +2095,15 @@ def _version_tuple(text: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
+def _is_version_tag(tag: str) -> bool:
+    """`v1.2.3` / `1.2.3` 这类真实版本标签。
+
+    Gitee 上还有我们自己维护的 `latest` 别名发行版，它不是版本号，必须排除，
+    否则会拿 "latest" 当版本号去拼下载地址。
+    """
+    return bool(_VERSION_TAG_RE.match(str(tag or "").strip()))
+
+
 @app.get("/api/update/check")
 async def api_update_check(force: int = 0):
     """检查更新，并探测国内加速镜像可用性。
@@ -2222,10 +2248,13 @@ async def _compute_update_payload() -> dict:
         recommended = next((d for d in downloads if d["ok"]), None)
     if recommended is None and meta_source:
         # 探测全部超时，但版本号是从某条镜像拿到的 —— 该镜像的下载地址通常也能用
-        prefix = dict(_META_SOURCES).get(meta_source, "")
+        if meta_source == "gitee":
+            rec_url = urls.get("gitee") or urls["asset"]
+        else:
+            rec_url = dict(_META_SOURCES).get(meta_source, "") + urls["asset"]
         recommended = {
             "name": meta_source,
-            "url": prefix + urls["asset"],
+            "url": rec_url,
             "ok": True,
             "untested": True,
             "stale": False,

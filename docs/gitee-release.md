@@ -1,10 +1,38 @@
-# Gitee 国内下载线路（由 GitHub Actions 自动发布）
+# Gitee 国内下载线路
 
 国内直连 GitHub Release 经常失败，第三方加速站时好时坏。Gitee 的**发行版附件**走它自己的国内 CDN
 （`foruda.gitee.com`），实测约 2 MB/s，且**不占用任何自建服务器的带宽**。
 
-CI 会在打 tag 后自动把 exe 传到 Gitee（`.github/workflows/build-exe.yml` 的 `gitee` job），
-用的是 `scripts/publish_gitee.py`。没配置 token 时这个 job 直接跳过，不影响发版。
+## 为什么不用 jsDelivr
+
+实测 + 查文档，两条硬限制，走不通：
+
+1. **单文件上限 20 MB**（GitHub 源）。官方文档原文：
+   > Packages larger than 150 MB or single files larger than 20 MB (in the case of GitHub) are not supported by default.
+   —— <https://www.jsdelivr.com/documentation#id-Publishing-packages>
+
+   exe 约 **38 MB**，直接超限。
+2. **jsDelivr 只服务「仓库里提交过的文件」**，不是 Release 附件。要让它发 exe，就得把 38 MB
+   二进制提交进 git 并打 tag —— 每版仓库 +38 MB 且永久留在历史里（GitHub 单文件还有 100 MB 上限），
+   对源码仓库是很差的实践。
+
+另外本机（中国移动杭州家宽）实测：`cdn.jsdelivr.net` 直接连不上（curl `code=000`），只有
+`fastly.jsdelivr.net` / `gcore.jsdelivr.net` 通（1.2–1.7 s）。国内对主域名的可达性本来就不稳定，
+不适合当主下载线路。
+
+> jsDelivr 官方有「custom CDN hosting」可托管二进制（Windows 可执行文件），但需要发邮件申请
+> <d@jsdelivr.com>，不该作为当前方案——Gitee 现成可用。
+
+## 谁上传（关键：不占服务器带宽）
+
+| 方式 | 能否用 | 耗时 | 说明 |
+|---|---|---|---|
+| **GitHub Actions 直接传** | ❌ | 10 分钟起还不成功 | runner 在境外，向 gitee.com 发两个小 GET 就花 10 分钟，传 38 MB 直接 `write operation timed out` |
+| **本机 / 任意国内电脑（推荐）** | ✅ | 约 20–60 秒 | 只消耗本机上行 38 MB/版 |
+| **国内服务器（不采用）** | ✅ 但不该用 | 约 20 秒 | 会吃掉服务器的出网流量，用户明确要求留给别的项目 |
+
+`build-exe.yml` 的 `gitee` job 默认**关闭**（要试就把仓库变量 `GITEE_CI_UPLOAD` 设为 `1`），
+避免每次发版都卡十分钟再报红。
 
 ## 一次性配置（约 5 分钟）
 
@@ -27,37 +55,37 @@ CI 会在打 tag 后自动把 exe 传到 Gitee（`.github/workflows/build-exe.ym
 - 权限勾选 **projects**（仓库读写）即可，其它可全选或不选
 - 生成后立刻复制（只显示一次）
 
-### 3. 配到 GitHub 仓库
-
-仓库 **Settings → Secrets and variables → Actions → New repository secret**：
-
-| Secret | 值 | 必填 |
-|---|---|---|
-| `GITEE_TOKEN` | 上一步的令牌 | ✅ |
-| `GITEE_OWNER` | 你的 Gitee 用户名/个性地址，例如 `yujianke100` | 建议 |
-| `GITEE_REPO` | 仓库路径，例如 `Ayabot` | 建议 |
-| `GITEE_TARGET` | 发行版指向的分支。**可以留空**：脚本会自动读仓库默认分支（Gitee 新仓库常常是 `main` 而不是 `master`） | 可选 |
-
-不填 owner/repo 时脚本默认用 `yujianke100/Ayabot`。
-
-### 4. 验证
-
-打一个 patch 版本（或直接重跑 workflow）后，看 GitHub Actions 里 `gitee` job 的日志：
-
-```
-发布到 Gitee: yujianke100/Ayabot v1.2.3
-  创建发行版 v1.2.3 (id=xxxx)
-  上传 Ayabot-latest.exe (38.0 MB) ...
-维护 latest 别名发行版（固定下载地址）
-  已上传 (id=xxxx)
-完成：https://gitee.com/yujianke100/Ayabot/releases/download/v1.2.3/Ayabot-latest.exe
-```
-
-然后命令行验证（应返回 302 → `foruda.gitee.com`）：
+### 3. 把令牌放到本机（不要让令牌进 git）
 
 ```bash
-curl -sI "https://gitee.com/yujianke100/Ayabot/releases/download/latest/Ayabot-latest.exe" | head -3
+# 本机执行一次
+printf '%s' '你的Gitee令牌' > ~/.gitee-token
+chmod 600 ~/.gitee-token
 ```
+
+脚本的令牌优先级：`--token` 参数 > `GITEE_TOKEN` 环境变量 > `~/.gitee-token`。
+
+### 4. 验证「令牌和权限对不对」（不传大文件）
+
+```bash
+python scripts/publish_gitee.py --probe
+```
+
+会建一个临时发行版、传 1 KB、读回确认、再删掉；输出 `PROBE OK` 即代表通。
+
+## 每次发版后：两条命令
+
+```bash
+# 1) 从 GitHub Release 拉刚发布的 exe（走加速站，不占自己的带宽）
+curl -fL -o /tmp/ayabot.exe \
+  https://gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/download/v1.2.3/Ayabot-latest.exe
+
+# 2) 传到 Gitee（约 20–60 秒）
+python scripts/publish_gitee.py --version 1.2.3 --exe /tmp/ayabot.exe
+```
+
+脚本会：建/复用 `v<版本>` 发行版 → 上传 exe → 把 `latest` 别名发行版的附件换成这一版 →
+按 `--keep 4` 轮换旧版本附件。全程只需要 Gitee token，不碰自有服务器。
 
 ## 下载地址（发布后长期稳定）
 
@@ -101,10 +129,11 @@ App 内的更新检查用 `v<版本>` 那条（它已经知道版本号），官
 - 附件上传是 `multipart/form-data`，字段名固定 `file`，`access_token` 也走表单字段而不是 header。
 - 同一发行版内附件不能重名：脚本先 `DELETE` 同名附件再上传。
 
-## 本地手动发布（可选）
+## 想用 CI 上传时（可选）
 
-```bash
-export GITEE_TOKEN=xxxx
-python scripts/publish_gitee.py --version 1.2.3 --exe dist/Ayabot-v1.2.3.exe \
-    --notes-file RELEASE.md --owner yujianke100 --repo Ayabot
-```
+仓库 Settings → Secrets 加 `GITEE_TOKEN`（`GITEE_OWNER` / `GITEE_REPO` / `GITEE_TARGET` 可选），
+再把仓库 **Variables** `GITEE_CI_UPLOAD` 设为 `1`，tag 发版时才会跑 `gitee` job。
+另外可以手动触发「Gitee 补发」工作流（`gitee-republish.yml`），勾 `probe` 只做连通性验证。
+
+两条路都受同一个网络问题限制：runner 在境外，成功率取决于当时 Gitee 的国际线路。
+

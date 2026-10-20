@@ -129,10 +129,16 @@ jobs:
             dist/Ayabot-latest.exe
           generate_release_notes: true
 
-  # ── Gitee 发行版（国内下载线路；未配置 GITEE_TOKEN 时整个 job 跳过） ──
+  # ── Gitee 发行版（国内下载线路） ──
+  #
+  # 默认关闭：实测从 GitHub runner（境外）向 gitee.com 传 38MB 会 write timeout，
+  # 连两个小 GET 都要 10 分钟，放进 tag 流程只会拖慢发版并报红。
+  # 国内下载线路改由「国内机器」同步：服务器 cron 跑 /usr/local/bin/ayabot-gitee-sync.sh，
+  # 或本地一条命令（见 docs/gitee-release.md）。
+  # 想在这个 workflow 里试，把仓库变量 GITEE_CI_UPLOAD 设为 1。
   gitee:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') && vars.GITEE_CI_UPLOAD == '1'
     runs-on: ubuntu-latest
     permissions:
       contents: read
