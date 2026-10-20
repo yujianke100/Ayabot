@@ -22,6 +22,7 @@ import argparse
 import http.client
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.error
@@ -207,6 +208,27 @@ def upload(token: str, owner: str, repo: str, release_id: int, exe: Path,
     raise SystemExit(f"上传附件失败（已重试 {attempts} 次）：{last_err}")
 
 
+def _sync_repo(args, token: str) -> int:
+    """把本地分支 + tag 推到 Gitee（逻辑都在 sync_gitee_repo.py，避免两份实现）。"""
+    script = Path(__file__).resolve().parent / "sync_gitee_repo.py"
+    print("同步源码仓库到 Gitee …")
+    cmd = [
+        sys.executable, str(script),
+        "--owner", args.owner, "--repo", args.repo,
+    ]
+    if getattr(args, "target", ""):
+        cmd += ["--branch", args.target]
+    try:
+        r = subprocess.run(cmd, timeout=900)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  同步仓库失败（不影响安装包发布）: {exc}")
+        return 0
+    if r.returncode != 0:
+        # 仓库同步失败不能拖累发布结果：包已经传上去了
+        print("  同步仓库未完成（不影响安装包发布）")
+    return 0
+
+
 def rotate(token: str, owner: str, repo: str, keep: int) -> None:
     """删除旧版本的附件，避免超过单仓库 1G 的附件上限。"""
     code, releases = _req("GET", f"/repos/{owner}/{repo}/releases?per_page=100", token)
@@ -280,6 +302,10 @@ def main() -> int:
                     help="不维护 latest 别名发行版（域名/页面就别用固定地址了）")
     ap.add_argument("--prune-only", action="store_true")
     ap.add_argument("--probe", action="store_true", help="只做最小验证（1KB 文件），不发布")
+    ap.add_argument("--no-sync-repo", action="store_true",
+                    help="发布后不把源码仓库同步到 Gitee（默认会同步）")
+    ap.add_argument("--sync-repo-only", action="store_true",
+                    help="只同步源码仓库，不发安装包")
     args = ap.parse_args()
 
     token = os.environ.get("GITEE_TOKEN", "").strip()
@@ -300,6 +326,9 @@ def main() -> int:
         target = args.target or default_branch(token, args.owner, args.repo)
         print(f"探测 Gitee 权限：{args.owner}/{args.repo}（分支 {target}）")
         return probe(token, args.owner, args.repo, target)
+
+    if args.sync_repo_only:
+        return _sync_repo(args, token)
 
     if not args.version:
         raise SystemExit("缺少 --version")
@@ -340,6 +369,11 @@ def main() -> int:
     rotate(token, args.owner, args.repo, args.keep)
     print(f"完成：https://gitee.com/{args.owner}/{args.repo}/releases/download/{tag}/{ASSET_NAME}")
     print(f"固定：https://gitee.com/{args.owner}/{args.repo}/releases/download/latest/{ASSET_NAME}")
+
+    # 安装包发完了，再把源码仓库也推一遍：Gitee 上的代码原来靠「仓库镜像」拉，
+    # 受 GitHub 可达性影响会落后，出现「包是新的、代码还是旧的」。这里直接推，不靠镜像。
+    if not args.no_sync_repo:
+        _sync_repo(args, token)
     return 0
 
 
