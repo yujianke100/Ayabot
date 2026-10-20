@@ -15,15 +15,19 @@ import tempfile
 
 from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
 
-# 本次 v1.2.0 应有的关键代码特征
+# 关键代码特征（累积：v1.2.0 的修复 + v1.2.1 的修复，防止老代码换版本号重发）
 EXPECTED_MODULES = ("app.gift_v2",)
 EXPECTED_STRINGS = {
     "app.bot": ("SEND_GIFT_V2", "record_guard_event", "USER_TOAST_MSG_V2",
                 "bot_status.json", "_recent_guards"),
     "app.storage": ("guard_events", "record_guard_event"),
     "app.web.server": ("/api/update/check", "desired_states.json", "上舰记录", "魔搭",
-                       "/guards"),
+                       "/guards",
+                       # v1.2.1: 删除自身下载标记 + 僵尸任务/无心跳恢复
+                       "_bootstrap_desired_from_heartbeats", "疑似僵尸任务"),
     "app.auth": ("auth_status.json", "needs_login"),
+    # v1.2.1: 自动清 MOTW（托盘启动时；入口脚本在 CArchive 顶层，不在 PYZ 里）
+    "tray_win": ("Zone.Identifier", "_unblock_self"),
 }
 
 
@@ -66,13 +70,22 @@ def main(exe_path: str) -> int:
     import marshal as _m  # noqa: F401
 
     for mod, needles in EXPECTED_STRINGS.items():
-        if mod not in names:
+        consts: set[str] = set()
+        if mod in names:
+            code = pyz.extract(mod)
+            walk_consts(code, consts)
+        elif mod in arch.toc:
+            # 入口脚本（tray_win.py）不在 PYZ 里，是 CArchive 顶层的 marshalled code
+            import marshal
+
+            raw = arch.extract(mod)
+            if isinstance(raw, tuple):
+                raw = raw[1]
+            walk_consts(marshal.loads(raw), consts)
+        else:
             failures.append(f"缺少模块 {mod}")
             print(f"  MISS 模块 {mod}")
             continue
-        code = pyz.extract(mod)
-        consts: set[str] = set()
-        walk_consts(code, consts)
         for needle in needles:
             ok = any(needle in c for c in consts)
             print(f"  {'OK ' if ok else 'MISS'} {mod} 含 {needle!r}")
