@@ -31,8 +31,12 @@ EXPECTED_STRINGS = {
                        # v1.2.3: 国内线路走 Gitee 发行版
                        "_fetch_gitee_tag", "_download_lanes", "_GITEE_RELEASES_API",
                        # v1.2.4: 用发行版列表按版本号挑最新（/releases/latest 是 latest 别名）
-                       "_is_version_tag", "_VERSION_TAG_RE"),
+                       "_is_version_tag", "_VERSION_TAG_RE",
+                       # v1.2.5: AI 页的魔搭一键填入 + 新建房间走新的模板查找
+                       "applyModelScope", "find_template_config", "write_default_config"),
     "app.auth": ("auth_status.json", "needs_login"),
+    # v1.2.5: 新建房间不再依赖根目录模板（多路径查找 + 内置默认值兜底）
+    "app.config": ("find_template_config", "write_default_config"),
     # v1.2.1: 自动清 MOTW（托盘启动时；入口脚本在 CArchive 顶层，不在 PYZ 里）
     "tray_win": ("Zone.Identifier", "_unblock_self"),
 }
