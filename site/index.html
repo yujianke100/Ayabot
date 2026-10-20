@@ -113,11 +113,25 @@
         border-radius:8px;padding:3px 9px;font-size:11.5px;cursor:pointer}
   .copy:hover{background:rgba(255,255,255,.18)}
 
-  /* ── 顶部 Star 引导条（在 header 之上，最先被看到） ── */
-  .starstrip{display:flex;align-items:center;justify-content:center;gap:12px;
+  /* ── 顶部 Star 引导条：常驻悬浮（滚动到任何位置都看得见） ── */
+  .starstrip{position:fixed;inset:0 0 auto 0;z-index:80;
+             display:flex;align-items:center;justify-content:center;gap:12px;
              padding:10px 18px;color:#fff;font-size:13.5px;line-height:1.45;
              background:linear-gradient(96deg,#3a1229,#191c3a 48%,#082432);
-             border-bottom:1px solid rgba(255,255,255,.1)}
+             border-bottom:1px solid rgba(255,255,255,.1);
+             box-shadow:0 6px 18px -12px rgba(0,0,0,.9)}
+  body{padding-top:var(--strip-h,48px)}   /* 悬浮条占位，避免盖住内容 */
+  header{top:var(--strip-h,48px)}         /* 导航栏吸在悬浮条下面 */
+  /* 锚点跳转要让开悬浮条 + 导航栏，否则标题被压在底下 */
+  section[id],div[id]{scroll-margin-top:calc(var(--strip-h,48px) + 76px)}
+  .ss-main{display:flex;align-items:center;gap:12px;min-width:0;color:inherit}
+  .ss-coffee{flex:none;display:inline-flex;align-items:center;gap:6px;
+             padding:6px 14px;border-radius:999px;font-weight:600;font-size:13px;
+             color:#ffe6b8;background:rgba(255,255,255,.09);
+             border:1px solid rgba(255,214,140,.38);white-space:nowrap;
+             transition:.18s background,.18s border-color}
+  .ss-coffee:hover{background:rgba(255,214,140,.18);border-color:rgba(255,214,140,.7)}
+  .ss-cico{font-size:14px}
   .starstrip:hover .ss-btn{transform:translateY(-1px);box-shadow:0 10px 22px -10px rgba(251,114,153,1)}
   .ss-ico{font-size:16px;filter:drop-shadow(0 0 8px rgba(255,208,120,.55))}
   .ss-txt{display:flex;flex-direction:column;min-width:0}
@@ -128,11 +142,17 @@
           padding:6px 15px;border-radius:999px;font-weight:700;font-size:13px;white-space:nowrap;
           transition:.18s transform,.18s box-shadow}
   @media(max-width:720px){
-    .starstrip{gap:9px;padding:9px 14px;font-size:12.5px}
+    .starstrip{gap:8px;padding:8px 10px;font-size:12.5px}
     .ss-long{display:none}
     .ss-short{display:inline}
     .ss-sub{display:none}
-    .ss-btn{padding:5px 11px;font-size:12px}
+    .ss-main{gap:8px}
+    .ss-btn{padding:5px 10px;font-size:12px}
+    .ss-coffee{padding:5px 9px;font-size:12px;gap:4px}
+    .ss-ctxt{display:none}      /* 手机只留 ☕ 图标，省地方 */
+  }
+  @media(max-width:360px){
+    .ss-ico{display:none}       /* 极窄屏再省一格 */
   }
 
   /* ── 封面图（现在放在 hero 里，紧跟主标题区） ── */
@@ -222,15 +242,20 @@
 </head>
 <body>
 
-<a class="starstrip" href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener"
-   aria-label="去 GitHub 给 Ayabot 点个 Star">
-  <span class="ss-ico">⭐</span>
-  <span class="ss-txt">
-    <b><span class="ss-long">如果 Ayabot 帮你省了点事，可以给个 Star 吗？</span><span class="ss-short">喜欢的话，点个 Star 支持一下</span></b>
-    <span class="ss-sub">完全免费、没有付费墙。Star 越多，越多主播能搜到它（也是申请免费代码签名证书的硬指标）</span>
-  </span>
-  <span class="ss-btn">去点 Star ↗</span>
-</a>
+<div class="starstrip" role="region" aria-label="支持 Ayabot">
+  <a class="ss-main" href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener"
+     aria-label="去 GitHub 给 Ayabot 点个 Star">
+    <span class="ss-ico">⭐</span>
+    <span class="ss-txt">
+      <b><span class="ss-long">如果 Ayabot 帮你省了点事，可以给个 Star 吗？</span><span class="ss-short">喜欢的话，点个 Star 支持一下</span></b>
+      <span class="ss-sub">完全免费、没有付费墙。Star 越多，越多主播能搜到它</span>
+    </span>
+    <span class="ss-btn">去点 Star ↗</span>
+  </a>
+  <a class="ss-coffee" href="#support" aria-label="请作者喝杯咖啡">
+    <span class="ss-cico">☕</span><span class="ss-ctxt">请作者喝杯咖啡</span>
+  </a>
+</div>
 
 <header>
   <div class="wrap nav">
@@ -242,7 +267,7 @@
       <a href="#support">支持</a>
       <a href="#faq">常见问题</a>
     </nav>
-    <a class="gh" href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener">⭐ Star</a>
+    <a class="gh" href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener">GitHub ↗</a>
   </div>
 </header>
 
@@ -250,6 +275,14 @@
   <div class="wrap">
     <div class="chip">开源免费 · GPL-3.0 · <b id="verChip">最新版本</b></div>
     <h1>把直播间的<span class="grad">礼物和弹幕</span><br>都管起来</h1>
+
+    <!-- 封面紧跟主标题（先给画面，再给说明和按钮） -->
+    <figure class="cover">
+      <img src="assets/cover.webp" srcset="assets/cover-sm.webp 760w, assets/cover.webp 1440w"
+           sizes="(max-width:760px) 92vw, 1120px" width="1440" height="1080"
+           alt="Ayabot：B站直播间机器人，免费开源、极致轻量、全平台覆盖" loading="eager" decoding="async">
+    </figure>
+
     <p class="lead">
       Ayabot 是一个跑在你自己电脑上的 B站直播间机器人。自动感谢礼物、统计盲盒与上舰、
       按关键词或 AI 回复弹幕，数据全部存在本地 SQLite 里，随时导出。
@@ -259,13 +292,6 @@
       <a class="btn btn-ghost" href="#start">看怎么部署</a>
       <small>单文件 exe，不用装 Python · 国内加速线路</small>
     </div>
-
-    <!-- 封面紧跟主标题区（原来单独一节，视觉上被割断了） -->
-    <figure class="cover">
-      <img src="assets/cover.webp" srcset="assets/cover-sm.webp 760w, assets/cover.webp 1440w"
-           sizes="(max-width:760px) 92vw, 1120px" width="1440" height="1080"
-           alt="Ayabot：B站直播间机器人，免费开源、极致轻量、全平台覆盖" loading="eager" decoding="async">
-    </figure>
 
     <div class="facts">
       <div class="fact"><b>3</b><span>统计维度：礼物 / 盲盒 / 上舰</span></div>
@@ -438,8 +464,7 @@ docker run -d --name ayabot -p 19810:19810 \
         <h3>⭐ 去 GitHub 点个 Star</h3>
         <p>
           最有用的一件事，比打赏还管用：Star 数上去，更多主播能搜到这个项目，
-          也更容易被开源社区认可（我们正在申请免费的代码签名证书，Star 数是硬指标之一）。
-          顺手点个 Watch 就能收到新版本通知。
+          也更容易被开源社区认可。顺手点个 Watch 就能收到新版本通知。
         </p>
         <div class="cta">
           <a class="btn btn-primary" href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener">⭐ 去点 Star</a>
@@ -549,6 +574,19 @@ docker run -d --name ayabot -p 19810:19810 \
 </footer>
 
 <script>
+// ── 悬浮 Star 条的高度交给 CSS 变量，body 留白与导航栏吸顶位置都跟着它走 ──
+const starStrip = document.querySelector('.starstrip');
+function syncStripHeight() {
+  if (!starStrip) return;
+  const h = Math.round(starStrip.getBoundingClientRect().height);
+  document.documentElement.style.setProperty('--strip-h', h + 'px');
+}
+syncStripHeight();
+addEventListener('resize', syncStripHeight);
+addEventListener('orientationchange', () => setTimeout(syncStripHeight, 150));
+// 字体加载完高度可能变，再量一次
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(syncStripHeight);
+
 // ── 下载线路：存在性用 API 验（CORS 可用），速度用 no-cors 计时 ──────────
 // 为什么分开：Gitee 的 releases/download 是 302 跳转，且跳转响应没有
 // Access-Control-Allow-Origin，浏览器在 cors 模式下会直接拒绝读状态码。

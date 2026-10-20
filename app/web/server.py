@@ -4440,14 +4440,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
 <!-- ══════ 主界面 ══════ -->
 <div v-if="loggedIn">
-<header class="mb-4 sm:mb-6 flex items-center bg-white p-3 sm:p-4 rounded-xl shadow-sm gap-2">
+<header class="mb-4 sm:mb-6 flex flex-wrap items-center bg-white p-3 sm:p-4 rounded-xl shadow-sm gap-2">
     <h1 class="text-base sm:text-xl font-bold text-blue-600 flex-shrink-0 flex items-center gap-1.5"><img src="/icon-192.png" alt="Ayabot" class="w-5 h-5 sm:w-6 sm:h-6 rounded-md flex-shrink-0">Ayabot</h1>
     <div class="flex-1 min-w-0"></div>
-    <div class="flex items-center gap-1 sm:gap-4 text-xs sm:text-sm overflow-x-auto no-scrollbar mr-1 sm:mr-2">
-        <button @click="tab='rooms'" :class="tab==='rooms'?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">🏠 房间管理</button>
-        <button v-if="userRole === 'admin'" @click="tab='global'" :class="tab==='global'?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">⚙️ 全局配置</button>
-        <button v-if="userRole === 'admin'" @click="tab='users'" :class="tab==='users'?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">👥 用户管理</button>
-        <button @click="tab='help'"  :class="tab==='help' ?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">帮助</button>
+    <div class="flex items-center gap-2 text-xs sm:text-sm sm:order-none order-last w-full sm:w-auto mt-1.5 sm:mt-0
+                pt-1.5 sm:pt-0 border-t border-gray-100 sm:border-0 sm:justify-end mr-0 sm:mr-2">
+        <button @click="tab='rooms'" :class="tab==='rooms'?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1.5 py-1.5 sm:px-0 sm:py-0">🏠 房间管理</button>
+        <button v-if="userRole === 'admin'" @click="tab='global'" :class="tab==='global'?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1.5 py-1.5 sm:px-0 sm:py-0">⚙️ 全局配置</button>
+        <button v-if="userRole === 'admin'" @click="tab='users'" :class="tab==='users'?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1.5 py-1.5 sm:px-0 sm:py-0">👥 用户管理</button>
+        <button @click="tab='help'"  :class="tab==='help' ?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1.5 py-1.5 sm:px-0 sm:py-0">帮助</button>
     </div>
     <!-- 新版本提醒（启动静默检查到更新，管理员可见） -->
     <button v-if="updateNotice && userRole === 'admin'" @click="openUpdateNotice()"
@@ -4567,16 +4568,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <template v-else>暂无可用房间。</template>
             </div>
             <div v-for="r in rooms" :key="r.room_id"
-                 class="border rounded-lg p-4 flex items-center justify-between cursor-pointer hover:shadow-md transition"
+                 class="border rounded-lg p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 cursor-pointer hover:shadow-md transition"
                  :class="r.status==='running' ? 'border-green-300 bg-green-50' : 'border-gray-200'"
                  @click="selectRoom(r)">
-                <div class="flex-1">
-                    <div class="flex items-center gap-2">
-                        <span class="w-2 h-2 rounded-full inline-block"
+                <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <span class="w-2 h-2 rounded-full inline-block shrink-0"
                               :class="r.status==='running' ? 'bg-green-500' : 'bg-gray-400'"></span>
                         <span class="font-bold text-sm">{{ r.room_name || ('#'+r.room_id) }}</span>
                         <span v-if="r.room_name" class="text-xs text-gray-400">#{{ r.room_id }}</span>
-                        <span class="text-xs text-gray-400 ml-1">UID: {{ r.anchor_uid }}</span>
+                        <span class="text-xs text-gray-400 ml-1 break-all">UID: {{ r.anchor_uid }}</span>
                     </div>
                     <div class="text-xs text-gray-500 mt-1 flex gap-3 flex-wrap items-center">
                         <span>状态: {{ r.status === 'running' ? '🟢 运行中' : '⏹️ 已停止' }}</span>
@@ -4591,18 +4592,18 @@ INDEX_HTML = r"""<!DOCTYPE html>
                         </span>
                     </div>
                 </div>
-                <div class="flex gap-2 items-center" @click.stop>
+                <div class="flex gap-2 items-center flex-wrap sm:flex-nowrap shrink-0" @click.stop>
                     <button v-if="r.status !== 'running'"
                             @click="startRoom(r.room_id)"
                             :disabled="startingRooms.has(r.room_id)"
-                            class="bg-green-500 hover:bg-green-600 disabled:bg-green-300 text-white px-3 py-1 rounded text-xs"
+                            class="bg-green-500 hover:bg-green-600 disabled:bg-green-300 text-white px-4 py-2 sm:py-1 rounded text-xs whitespace-nowrap"
                             v-show="userRole === 'admin'">{{ startingRooms.has(r.room_id) ? '启动中...' : '启动' }}</button>
                     <button v-if="r.status === 'running'"
                             @click="stopRoom(r.room_id)"
-                            class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-xs"
+                            class="bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 sm:py-1 rounded text-xs whitespace-nowrap"
                             v-show="userRole === 'admin'">停止</button>
                     <button @click="deleteRoom(r.room_id, r.room_id)"
-                            class="bg-red-100 hover:bg-red-200 text-red-600 px-2.5 py-1.5 rounded text-xs font-medium"
+                            class="bg-red-100 hover:bg-red-200 text-red-600 px-4 py-2 sm:py-1 rounded text-xs font-medium whitespace-nowrap"
                             v-show="userRole === 'admin'">删除</button>
                 </div>
             </div>
@@ -4611,9 +4612,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     <!-- ── 房间详情 ── -->
     <div v-else>
-        <div class="mb-4">
+        <div class="mb-3 sm:mb-4">
             <button @click="goBackRoomList()"
-                    class="text-blue-500 hover:text-blue-700 text-sm">&larr; 返回房间列表</button>
+                    class="text-blue-500 hover:text-blue-700 text-sm inline-flex items-center gap-1 px-2 py-2 -ml-2 rounded-lg active:bg-blue-50">&larr; 返回房间列表</button>
         </div>
 
         <!-- 登录失效引导（凭证不可用时引导重新扫码，而不是报错） -->
@@ -4641,42 +4642,43 @@ INDEX_HTML = r"""<!DOCTYPE html>
             ⚠️ 机器人刚刚异常退出（{{ selectedRoom.crash_info?.reason }}<span v-if="selectedRoom.crash_info?.exit_code !== null && selectedRoom.crash_info?.exit_code !== undefined">，退出码 {{ selectedRoom.crash_info.exit_code }}</span>），守护进程已自动重启。
         </div>
 
-        <!-- 房间信息头 -->
-        <div class="bg-white p-4 rounded-xl shadow-sm mb-4 flex items-center justify-between">
-            <div>
-                <h2 class="text-lg font-bold">📺
+        <!-- 房间信息头（手机竖排，避免标题被按钮挤成竖排文字） -->
+        <div class="bg-white p-4 rounded-xl shadow-sm mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div class="min-w-0">
+                <h2 class="text-lg font-bold flex items-center flex-wrap gap-1">
+                    📺
                     <template v-if="editingRoomName">
-                        <input type="text" v-model="roomNameEdit" class="border p-1 rounded text-sm w-40" @keyup.enter="saveRoomName" @keyup.escape="editingRoomName=false">
-                        <button @click="saveRoomName" class="text-blue-500 text-xs ml-1">保存</button>
-                        <button @click="editingRoomName=false" class="text-gray-400 text-xs ml-1">取消</button>
+                        <input type="text" v-model="roomNameEdit" class="border p-1 rounded text-sm w-32 sm:w-40" @keyup.enter="saveRoomName" @keyup.escape="editingRoomName=false">
+                        <button @click="saveRoomName" class="text-blue-500 text-xs px-2 py-1">保存</button>
+                        <button @click="editingRoomName=false" class="text-gray-400 text-xs px-2 py-1">取消</button>
                     </template>
                     <template v-else>
-                        {{ selectedRoom.room_name || ('房间 #'+selectedRoom.room_id) }}
-                        <button v-show="userRole === 'admin'" @click="startEditRoomName" class="text-gray-400 hover:text-blue-500 text-xs ml-1">✏️</button>
+                        <span class="break-all">{{ selectedRoom.room_name || ('房间 #'+selectedRoom.room_id) }}</span>
+                        <button v-show="userRole === 'admin'" @click="startEditRoomName" class="text-gray-400 hover:text-blue-500 text-sm px-1.5 py-1" title="改房间名">✏️</button>
                     </template>
                 </h2>
-                <div class="text-xs text-gray-500 mt-1">
+                <div class="text-xs text-gray-500 mt-1 break-all">
                     主播 UID: {{ selectedRoom.anchor_uid }}
                     | 状态: {{ selectedRoom.status === 'running' ? '🟢 运行中' : '⏹️ 已停止' }}
                 </div>
             </div>
-            <div class="flex items-center gap-2 flex-wrap" v-show="userRole === 'admin'">
-                <span class="text-xs text-gray-500">B站账号:</span>
-                <select v-model="selectedRoomAccount" class="border p-1 rounded text-sm">
+            <div class="flex items-center gap-2 flex-wrap shrink-0" v-show="userRole === 'admin'">
+                <span class="text-xs text-gray-500 whitespace-nowrap">B站账号:</span>
+                <select v-model="selectedRoomAccount" class="border p-1.5 rounded text-sm flex-1 sm:flex-none min-w-0 max-w-[150px] sm:max-w-none">
                     <option value="">不关联</option>
                     <option v-for="a in accounts" :key="a.uid" :value="a.uid">{{ a.nickname || 'UID:'+a.uid }}</option>
                 </select>
-                <button @click="assignAccountToRoom" class="bg-blue-500 hover:bg-blue-600 text-white px-2 py-0.5 rounded text-xs">保存</button>
-                <button @click="assignAccountAndRestart" class="bg-green-600 hover:bg-green-700 text-white px-2 py-0.5 rounded text-xs" :disabled="accountRestarting">{{ accountRestarting ? '重启中...' : '保存并重启' }}</button>
+                <button @click="assignAccountToRoom" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-2 sm:py-1 rounded text-xs whitespace-nowrap">保存</button>
+                <button @click="assignAccountAndRestart" class="bg-green-600 hover:bg-green-700 text-white px-3 py-2 sm:py-1 rounded text-xs whitespace-nowrap" :disabled="accountRestarting">{{ accountRestarting ? '重启中...' : '保存并重启' }}</button>
                 <span v-if="accountAssignMsg" class="text-xs" :class="accountAssignOk ? 'text-green-600' : 'text-red-500'">{{ accountAssignMsg }}</span>
             </div>
         </div>
 
-        <!-- 子导航 -->
-        <div class="flex gap-1 mb-4 text-sm bg-white rounded-xl shadow-sm p-1">
+        <!-- 子导航：手机横向滚动，不折成竖排文字 -->
+        <div class="flex gap-1 mb-4 text-sm bg-white rounded-xl shadow-sm p-1 overflow-x-auto no-scrollbar">
             <button v-for="st in roomSubTabs" :key="st.key"
                     @click="selectRoomSubTab(st.key)"
-                    class="px-4 py-2 rounded-lg transition"
+                    class="px-3 sm:px-4 py-2 rounded-lg transition whitespace-nowrap shrink-0"
                     :class="roomSubTab === st.key ? 'bg-blue-500 text-white' : 'text-gray-600 hover:bg-gray-100'">
                 {{ st.label }}
             </button>
@@ -4685,15 +4687,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <!-- 送礼排行 -->
         <div v-if="roomSubTab==='ranking'" class="grid grid-cols-1 gap-6">
             <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm">
-                <div class="flex flex-wrap gap-2 mb-3">
-                    <input type="date" v-model="rStart" class="border p-2 rounded text-sm flex-1 min-w-0">
-                    <input type="date" v-model="rEnd"   class="border p-2 rounded text-sm flex-1 min-w-0">
-                    <select v-model="rType" class="border p-2 rounded text-sm">
+                <div class="grid grid-cols-2 sm:flex sm:flex-wrap gap-2 mb-3">
+                    <input type="date" v-model="rStart" class="border p-2 rounded text-sm w-full sm:flex-1 sm:min-w-0">
+                    <input type="date" v-model="rEnd"   class="border p-2 rounded text-sm w-full sm:flex-1 sm:min-w-0">
+                    <select v-model="rType" class="border p-2 rounded text-sm w-full sm:w-auto">
                         <option value="all">全部</option>
                         <option value="gift">一般礼物</option>
                         <option value="blindbox">盲盒</option>
                     </select>
-                    <button @click="loadRanking" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">查询</button>
+                    <button @click="loadRanking" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm w-full sm:w-auto">查询</button>
                 </div>
                 <div v-if="errRanking" class="text-red-500 text-sm mb-2">{{ errRanking }}</div>
                 <div class="overflow-y-auto max-h-[520px]" v-if="ranking.length">
@@ -5756,13 +5758,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <!-- Bot 日志 -->
         <div v-if="roomSubTab==='log'" class="max-w-full sm:max-w-4xl mx-auto">
             <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm space-y-4">
-                <div class="flex items-center justify-between">
-                    <h2 class="text-lg font-bold">📋 Bot 日志</h2>
-                    <div class="flex items-center gap-2">
-                        <span class="text-xs text-gray-400">日志级别在「机器人配置」中修改，重启后生效</span>
-                        <button @click="clearBotLog" class="bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded text-sm">清空</button>
-                        <button @click="downloadUrl('/api/rooms/'+selectedRoom.room_id+'/log/export', 'bot_'+selectedRoom.room_id+'.log')" class="bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded text-sm">📤 导出</button>
-                        <button @click="loadBotLog" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">刷新</button>
+                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                    <h2 class="text-lg font-bold whitespace-nowrap">📋 Bot 日志</h2>
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <span class="text-xs text-gray-400 w-full sm:w-auto sm:mr-1">日志级别在「机器人配置」中修改，重启后生效</span>
+                        <button @click="clearBotLog" class="bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded text-sm whitespace-nowrap">清空</button>
+                        <button @click="downloadUrl('/api/rooms/'+selectedRoom.room_id+'/log/export', 'bot_'+selectedRoom.room_id+'.log')" class="bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded text-sm whitespace-nowrap">📤 导出</button>
+                        <button @click="loadBotLog" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm whitespace-nowrap">刷新</button>
                     </div>
                 </div>
                 <div ref="logContainer" class="bg-gray-900 text-green-300 p-4 rounded text-xs font-mono max-h-[600px] overflow-y-auto whitespace-pre-wrap" v-html="botLogContent"></div>
