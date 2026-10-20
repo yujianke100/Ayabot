@@ -14,10 +14,16 @@ DEST="/home/homepage/ayabot"
 SRC="$(cd "$(dirname "$0")" && pwd)"
 
 # 版本号与安装包大小写进 version.json（页面用它显示「最新 vX.Y.Z」）
-ver="$(sed -n '1p' "$SRC/../VERSION" | tr -d '\r' | sed 's/^\xef\xbb\xbf//' | tr -d '[:space:]')"
-size_bytes="$(curl -sIL --max-time 20 \
-  https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe \
-  | tr -d '\r' | awk 'tolower($1)=="content-length:"{v=$2} END{print v}')"
+# 优先按「线上实际最新的 Release」取值，避免主页写着还没发布的版本号；
+# 取不到（GitHub 不通）时退回仓库里的 VERSION。
+api='https://api.github.com/repos/yujianke100/Ayabot/releases/latest'
+meta="$(curl -sL --max-time 15 "https://gh-proxy.com/$api" 2>/dev/null || true)"
+ver="$(printf '%s' "$meta" | grep -o '"tag_name"[^,]*' | head -1 | sed 's/.*"v\?\([0-9][^"]*\)".*/\1/')"
+size_bytes="$(printf '%s' "$meta" | grep -o '"size":[0-9]*' | head -1 | grep -o '[0-9]*')"
+if [ -z "$ver" ]; then
+  ver="$(sed -n '1p' "$SRC/../VERSION" | tr -d '\r' | sed 's/^\xef\xbb\xbf//' | tr -d '[:space:]')"
+  echo "（取不到线上版本，退回本地 VERSION=$ver）"
+fi
 size_mb="$(python3 -c "print(round(${size_bytes:-0}/1048576,1))" 2>/dev/null || echo 0)"
 
 cat > "$SRC/version.json" <<EOF

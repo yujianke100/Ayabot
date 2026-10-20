@@ -54,9 +54,9 @@ def main() -> int:
     failures: list[str] = []
     try:
         started = time.time()
-        code, data = _get("/api/update/check")
+        code, data = _get("/api/update/check?force=1")
         elapsed = time.time() - started
-        print(f"HTTP {code} in {elapsed:.1f}s")
+        print(f"HTTP {code} in {elapsed:.2f}s（force=1 真测速）")
         print(json.dumps({k: v for k, v in data.items() if k != "changelog"}, ensure_ascii=False, indent=1)[:2200])
 
         if code != 200:
@@ -65,6 +65,35 @@ def main() -> int:
             failures.append(f"未取到版本信息: {data.get('error')}")
         if not data.get("latest"):
             failures.append("缺少 latest 版本号")
+
+        # ① 版本号必须来自国内线路（GitHub 直连国内常挂死，不能作为首选）
+        print("meta_source:", data.get("meta_source"), "| meta_ms:", data.get("meta_ms"))
+        if int(data.get("meta_ms") or 0) <= 0:
+            failures.append("缺少 meta_ms（无法判断取版本号耗时）")
+        elif int(data.get("meta_ms") or 0) > 2500:
+            failures.append(f"取版本号耗时 {data['meta_ms']}ms，超过 2.5s")
+        # 静态断言：两个候选表都必须把 GitHub 直连排在最后
+        if srv._META_SOURCES[-1][1] != "":
+            failures.append("_META_SOURCES 未把 GitHub 直连排在最后")
+        if srv._DOWNLOAD_SOURCES[-1][1] != "":
+            failures.append("_DOWNLOAD_SOURCES 未把 GitHub 直连排在最后")
+        if not any(p for _, p in srv._META_SOURCES[:-1]):
+            failures.append("_META_SOURCES 缺少国内镜像候选")
+
+        # ② 总耗时要短：旧实现串行等 GitHub 超时 + 等最慢线路，实测 10~18s
+        if elapsed > 5.0:
+            failures.append(f"检查更新耗时 {elapsed:.1f}s，超过 5s 预算")
+
+        # ③ 缓存：同样的请求第二次必须命中缓存、几乎瞬间返回
+        t2 = time.time()
+        code_c, data_c = _get("/api/update/check")
+        elapsed_c = time.time() - t2
+        print(f"缓存命中: {elapsed_c * 1000:.0f}ms cached={data_c.get('cached')}")
+        if not data_c.get("cached"):
+            failures.append("第二次请求没有命中缓存")
+        if elapsed_c > 0.5:
+            failures.append(f"缓存响应 {elapsed_c:.2f}s，应该几乎瞬时")
+
         downloads = data.get("downloads") or []
         ok_ones = [d for d in downloads if d.get("ok")]
         print("\n可用线路:", [(d["name"], d.get("ms")) for d in ok_ones])
@@ -83,6 +112,10 @@ def main() -> int:
                   "bytes=", rec.get("total_bytes"), "expected=", data.get("expected_bytes"))
             if rec.get("stale"):
                 failures.append(f"推荐了缓存旧文件的线路: {rec.get('name')}")
+            if rec.get("name") == "GitHub" and any(
+                d["name"] != "GitHub" and d.get("ok") and not d.get("stale") for d in ok_ones
+            ):
+                failures.append("有可用国内镜像时却推荐了 GitHub 直连")
             stale = [d["name"] for d in downloads if d.get("stale")]
             if stale:
                 print("检测到缓存旧版的线路:", stale)
@@ -93,7 +126,8 @@ def main() -> int:
         orig = srv.get_version_display
         srv.get_version_display = lambda: "v1.1.1"  # type: ignore[assignment]
         try:
-            code2, old_data = _get("/api/update/check")
+            srv._UPDATE_CACHE["ts"] = 0.0  # 清缓存，重新走一遍真实检查
+            code2, old_data = _get("/api/update/check?force=1")
             print("\n模拟 v1.1.1 客户端:", json.dumps(
                 {k: old_data.get(k) for k in ("ok", "current", "latest", "has_update")},
                 ensure_ascii=False))

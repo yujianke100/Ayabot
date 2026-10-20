@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -560,6 +561,8 @@ def _safe_int(val: Any) -> int:
 async def _startup():
     # 后台加载礼物缓存，不阻塞启动
     asyncio.create_task(_build_gift_cache())
+    # 后台预热「检查更新」结果（用户打开页面时秒回）
+    asyncio.create_task(_warm_update_cache())
     # 启动定期日志清理（后台线程，默认保留 3 天）
     start_periodic_log_cleanup()
     # 自动启动所有已配置的房间（Docker 部署时自动拉起）
@@ -1708,21 +1711,100 @@ async def api_user_change_password(request: Request):
 _UPDATE_REPO = "yujianke100/ayabot"
 _UPDATE_ASSET = "Ayabot-latest.exe"
 _GH_RELEASE_API = f"https://api.github.com/repos/{_UPDATE_REPO}/releases/latest"
-# 元数据（版本号）候选：直连 + 能代理 api.github.com 的加速站
+
+# ── 线路候选 ──────────────────────────────────────────────
+# 元数据（版本号）：国内优先、GitHub 直连垫底。
+# 实测（2026-10）：gh-proxy.com 250ms 可用；hk.gh-proxy.com 1.2s 可用；
+# gh-proxy.net / ghfast.top / ghproxy.net / gh.llkk.cc / ghfile.geekertao.top
+# 对 api.github.com 返回 403 或 HTML 错误页，不能用于取版本号。
 _META_SOURCES: tuple[tuple[str, str], ...] = (
-    ("GitHub", ""),
     ("gh-proxy.com", "https://gh-proxy.com/"),
-    ("gh-proxy.net", "https://gh-proxy.net/"),
+    ("hk.gh-proxy.com", "https://hk.gh-proxy.com/"),
+    ("GitHub", ""),
 )
-# 安装包下载候选：直连 + 国内加速站（2026-10 实测均可用）
+# 安装包下载候选：国内加速站在前，GitHub 直连垫底（仅作兜底展示）
 _DOWNLOAD_SOURCES: tuple[tuple[str, str], ...] = (
-    ("GitHub", ""),
     ("gh-proxy.com", "https://gh-proxy.com/"),
-    ("gh.llkk.cc", "https://gh.llkk.cc/"),
-    ("ghfile.geekertao.top", "https://ghfile.geekertao.top/"),
+    ("hk.gh-proxy.com", "https://hk.gh-proxy.com/"),
     ("ghfast.top", "https://ghfast.top/"),
     ("ghproxy.net", "https://ghproxy.net/"),
+    ("gh.llkk.cc", "https://gh.llkk.cc/"),
+    ("ghfile.geekertao.top", "https://ghfile.geekertao.top/"),
+    ("GitHub", ""),
 )
+# 取「最新版本号」的候选：用 releases/latest 的重定向，比 API 便宜也不吃限流。
+# ghproxy.net 对 API 返回 403，但重定向路径可用，所以单独列一份。
+_TAG_SOURCES: tuple[tuple[str, str], ...] = (
+    ("gh-proxy.com", "https://gh-proxy.com/"),
+    ("hk.gh-proxy.com", "https://hk.gh-proxy.com/"),
+    ("ghproxy.net", "https://ghproxy.net/"),
+    ("GitHub", ""),
+)
+
+# ── 时间预算 ──────────────────────────────────────────────
+# 国内直连 api.github.com / objects.githubusercontent.com 经常挂死到超时，
+# 旧实现按顺序试（GitHub 先）会白等 8s，再等最慢的探测 10s，用户体感 10~18s。
+# 现在：元数据并发抢答、探测到第一条可用线路后短暂宽限就收工。
+_META_ATTEMPT_TIMEOUT = 5.0   # 单个元数据源超时
+_META_BUDGET = 6.0            # 完整元数据抢答总预算
+_META_STAGGER = 1.2           # GitHub 直连延迟起跑，给国内镜像让路
+_TAG_BUDGET = 3.0             # 只取版本号的总预算（关键路径，短）
+_META_EXTRA = 1.2             # 拿到版本号后，最多再花这么久等更新说明
+_PROBE_TIMEOUT = 4.0          # 单条线路探测超时
+_PROBE_BUDGET = 4.0           # 全部探测总预算
+_PROBE_GRACE = 0.5            # 已有可用线路后，再收集候选的宽限时间
+_UPDATE_CACHE_TTL = 600.0     # 结果缓存 10 分钟（静默检查直接复用）
+
+# 排序优先级：国内镜像优先于 GitHub 直连。
+# 即使某次直连比镜像快几十毫秒也不要推荐直连 —— 国内直连时通时不通，
+# 用户点下去很可能转圈或断掉；镜像慢一点但稳。
+_LANE_PRIORITY = {"GitHub": 1}
+
+# 最近一次检查结果（进程内缓存）。静默检查每次启动/刷新都调一次接口，
+# 没有缓存就会反复测速，既慢又浪费。
+_UPDATE_CACHE: dict[str, Any] = {"ts": 0.0, "payload": None}
+
+
+async def _race_json(session: aiohttp.ClientSession, api_path: str) -> Optional[dict]:
+    """并发向各元数据源取同一个 GitHub API JSON，先到先得。
+
+    浏览器直连 api.github.com 在国内经常失败或超时，所以这类请求一律由服务端
+    经国内镜像代取。
+    """
+    async def attempt(name: str, prefix: str, delay: float) -> Optional[dict]:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        try:
+            async with session.get(
+                prefix + api_path,
+                timeout=aiohttp.ClientTimeout(total=_META_ATTEMPT_TIMEOUT),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                raw = await resp.read()
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    tasks = [
+        asyncio.create_task(attempt(n, p, _META_STAGGER if not p else 0.0))
+        for n, p in _META_SOURCES
+    ]
+    try:
+        for fut in asyncio.as_completed(tasks, timeout=_META_BUDGET):
+            try:
+                data = await fut
+            except Exception:  # noqa: BLE001
+                continue
+            if data is not None:
+                return data
+        return None
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        for t in tasks:
+            t.cancel()
 
 
 def _release_urls(latest: str) -> dict[str, str]:
@@ -1733,21 +1815,96 @@ def _release_urls(latest: str) -> dict[str, str]:
     }
 
 
-async def _fetch_release_meta(session: aiohttp.ClientSession, name: str, prefix: str) -> Optional[dict]:
-    """从直连/镜像取 latest release 元数据。"""
+async def _fetch_release_meta(
+    session: aiohttp.ClientSession, name: str, prefix: str
+) -> tuple[Optional[dict], str]:
+    """从直连/镜像取 latest release 元数据。返回 (数据, 线路名)。"""
     url = prefix + _GH_RELEASE_API
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+        async with session.get(
+            url, timeout=aiohttp.ClientTimeout(total=_META_ATTEMPT_TIMEOUT)
+        ) as resp:
             if resp.status != 200:
                 logger.debug("update meta %s -> HTTP %s", name, resp.status)
-                return None
-            data = await resp.json(content_type=None)
+                return None, name
+            raw = await resp.read()
+        try:
+            data = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            # 有的加速站出错时返回 200 + HTML 页面，不能当成功
+            logger.debug("update meta %s -> 非 JSON 响应", name)
+            return None, name
         if not isinstance(data, dict) or not data.get("tag_name"):
-            return None
-        return data
+            return None, name
+        return data, name
     except Exception as exc:  # noqa: BLE001
         logger.debug("update meta %s failed: %s", name, exc)
-        return None
+        return None, name
+
+
+async def _fetch_latest_tag(
+    session: aiohttp.ClientSession, name: str, prefix: str
+) -> tuple[Optional[str], str]:
+    """只用一次重定向拿到最新版本号，不碰 api.github.com。
+
+    `github.com/<repo>/releases/latest` 会 302 到 `/releases/tag/vX`。
+    这条路径的好处：① 不吃 API 的 60 次/小时限流；② api.github.com 被墙/限流时
+    github.com 往往还能通；③ 只要一个请求，比拉整份 release JSON 快得多。
+    """
+    url = prefix + f"https://github.com/{_UPDATE_REPO}/releases/latest"
+    try:
+        async with session.get(
+            url, allow_redirects=False,
+            timeout=aiohttp.ClientTimeout(total=_META_ATTEMPT_TIMEOUT),
+        ) as resp:
+            loc = resp.headers.get("Location") or ""
+            body = b""
+            if not loc and resp.status == 200:
+                body = await resp.read()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("latest tag %s failed: %s", name, exc)
+        return None, name
+    text = loc or body.decode("utf-8", "replace")
+    match = re.search(r"/tag/(v?[\d][\w.\-]*)", text)
+    if not match:
+        return None, name
+    return match.group(1), name
+
+
+async def _fetch_tag_race(
+    session: aiohttp.ClientSession,
+) -> tuple[Optional[str], str, int]:
+    """并发问「最新版本号」，只走 releases/latest 重定向（便宜、不吃 API 限流）。
+
+    版本号是最关键的一步：拿到它才能拼出下载地址、开始测速。
+    所以这一步用最轻的请求、只等第一条结果，不依赖 api.github.com。
+    GitHub 直连延迟 _META_STAGGER 起跑，国内镜像先说话。
+    """
+    started = time.time()
+
+    async def attempt(name: str, prefix: str, delay: float):
+        if delay > 0:
+            await asyncio.sleep(delay)
+        return await _fetch_latest_tag(session, name, prefix)
+
+    tasks = [
+        asyncio.create_task(attempt(n, p, _META_STAGGER if not p else 0.0))
+        for n, p in _TAG_SOURCES
+    ]
+    try:
+        for fut in asyncio.as_completed(tasks, timeout=_TAG_BUDGET):
+            try:
+                tag, name = await fut
+            except Exception:  # noqa: BLE001
+                continue
+            if tag:
+                return tag, name, int((time.time() - started) * 1000)
+        return None, "", int((time.time() - started) * 1000)
+    except asyncio.TimeoutError:
+        return None, "", int((time.time() - started) * 1000)
+    finally:
+        for t in tasks:
+            t.cancel()
 
 
 async def _probe_url(
@@ -1765,7 +1922,7 @@ async def _probe_url(
     started = time.time()
     try:
         async with session.get(
-            url, timeout=aiohttp.ClientTimeout(total=10),
+            url, timeout=aiohttp.ClientTimeout(total=_PROBE_TIMEOUT),
             headers={"Range": "bytes=0-0"},
         ) as resp:
             ok = resp.status < 400
@@ -1798,6 +1955,74 @@ async def _probe_url(
         }
 
 
+async def _probe_one(
+    session: aiohttp.ClientSession,
+    name: str,
+    url: str,
+    expected_size: int,
+    delay: float,
+) -> dict[str, Any]:
+    """延迟起跑的探测（GitHub 直连作为兜底，不给国内镜像抢跑）。"""
+    if delay > 0:
+        await asyncio.sleep(delay)
+    return await _probe_url(session, name, url, expected_size)
+
+
+async def _probe_all(
+    session: aiohttp.ClientSession, asset_url: str, expected_size: int = 0
+) -> list[dict[str, Any]]:
+    """并发探测全部下载线路，拿到第一条可用线路后再等一小段就收工。
+
+    不这样做的话，某条线路挂死（国内直连 GitHub 常见）会把整个请求拖到超时，
+    哪怕国内镜像 0.6s 就已经答复了。
+    """
+    tasks = {
+        asyncio.create_task(
+            _probe_one(session, name, prefix + asset_url, expected_size,
+                       _PROBE_GRACE if not prefix else 0.0)
+        ): (name, prefix + asset_url)
+        for name, prefix in _DOWNLOAD_SOURCES
+    }
+    results: list[dict[str, Any]] = []
+    pending = set(tasks)
+    grace_until: Optional[float] = None
+    hard_deadline = time.time() + _PROBE_BUDGET
+
+    def _has_good() -> bool:
+        return any(r["ok"] and not r.get("stale") for r in results)
+
+    while pending:
+        now = time.time()
+        wait = hard_deadline - now
+        if grace_until is not None:
+            wait = min(wait, grace_until - now)
+        if wait <= 0:
+            break
+        done, pending = await asyncio.wait(pending, timeout=wait, return_when=asyncio.FIRST_COMPLETED)
+        for t in done:
+            try:
+                results.append(t.result())
+            except Exception as exc:  # noqa: BLE001
+                name, url = tasks[t]
+                results.append({"name": name, "url": url, "ok": False,
+                                "stale": False, "error": str(exc)[:80], "ms": 0})
+        if _has_good() and grace_until is None:
+            grace_until = time.time() + _PROBE_GRACE
+
+    had_good = _has_good()
+    for t in pending:
+        t.cancel()
+        name, url = tasks[t]
+        results.append({
+            "name": name, "url": url, "ok": False, "stale": False,
+            # 已有可用线路就收工 → 这条只是「没来得及测」，不是「不通」
+            "skipped": had_good,
+            "error": "未测速（已有更快的可用线路）" if had_good else "超时",
+            "ms": int((time.time() - (hard_deadline - _PROBE_BUDGET)) * 1000),
+        })
+    return results
+
+
 def _version_tuple(text: str) -> tuple[int, ...]:
     parts: list[int] = []
     for chunk in str(text).lstrip("vV").split("."):
@@ -1807,73 +2032,202 @@ def _version_tuple(text: str) -> tuple[int, ...]:
 
 
 @app.get("/api/update/check")
-async def api_update_check():
+async def api_update_check(force: int = 0):
     """检查更新，并探测国内加速镜像可用性。
 
     很多国内用户直连 api.github.com / objects.githubusercontent.com 会超时，
-    因此这里由服务端（就在用户机器上跑）依次尝试直连和加速镜像，把能用的
-    下载地址按速度排好返回，前端不再需要用户自己猜哪个镜像能用。
+    因此由服务端（就在用户机器上跑）并发向国内镜像要版本号、并发探测下载线路，
+    把能用的地址按速度排好返回，前端不需要用户自己猜哪个镜像能用。
+
+    结果缓存 10 分钟：静默检查（每次打开/刷新页面都会跑）直接吃缓存，
+    只有用户手动点「检查更新」才带 force=1 强制重新测速。
+    服务启动后还会在后台预热一次，所以第一次打开页面通常也是秒回。
     """
+    started_at = time.time()
+    if not force:
+        cached = _UPDATE_CACHE.get("payload")
+        cache_age = time.time() - float(_UPDATE_CACHE.get("ts") or 0.0)
+        if cached and cache_age < _UPDATE_CACHE_TTL:
+            payload = dict(cached)
+            payload["cached"] = True
+            payload["cache_age"] = int(cache_age)
+            payload["elapsed_ms"] = int((time.time() - started_at) * 1000)
+            return payload
+
+    payload = await _compute_update_payload()
+    payload["cached"] = False
+    payload["elapsed_ms"] = int((time.time() - started_at) * 1000)
+    if payload.get("ok"):
+        _UPDATE_CACHE["ts"] = time.time()
+        _UPDATE_CACHE["payload"] = payload
+    return payload
+
+
+async def _warm_update_cache() -> None:
+    """启动时后台预热更新检查结果（失败无所谓，用户点击时会再算一次）。"""
+    try:
+        await asyncio.sleep(5)
+        if _UPDATE_CACHE.get("payload"):
+            return
+        payload = await _compute_update_payload()
+        if payload.get("ok"):
+            _UPDATE_CACHE["ts"] = time.time()
+            _UPDATE_CACHE["payload"] = payload
+            logger.info(
+                "update cache warmed: latest=%s via %s in %sms",
+                payload.get("latest"), payload.get("meta_source"), payload.get("meta_ms"),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("warm update cache failed: %s", exc)
+
+
+async def _compute_update_payload() -> dict:
+    started_at = time.time()
     current = get_version_display()
+
     meta: Optional[dict] = None
     meta_source = ""
+    meta_ms = 0
     async with aiohttp.ClientSession(
         headers={"User-Agent": "Ayabot-UpdateChecker", "Accept": "application/vnd.github+json"},
         trust_env=True,
     ) as session:
-        for name, prefix in _META_SOURCES:
-            meta = await _fetch_release_meta(session, name, prefix)
-            if meta is not None:
-                meta_source = name or "GitHub"
-                break
+        # 关键路径只有两步：① 问版本号 ② 测下载线路。
+        # 更新说明（changelog）是附赠信息，不能拖慢这两步，所以它单独跑、
+        # 只给很短的时间窗，拿不到就空着，用户点「查看更新日志」时再经镜像取。
+        latest = ""
+        tag, tag_source, tag_ms = await _fetch_tag_race(session)
+        meta_task = asyncio.create_task(_race_json(session, _GH_RELEASE_API))
+        if tag:
+            latest = tag.lstrip("vV")
+            meta_source, meta_ms = tag_source, tag_ms
+            urls = _release_urls(latest)
+            probe_task = asyncio.create_task(_probe_all(session, urls["asset"]))
+            try:
+                meta = await asyncio.wait_for(meta_task, timeout=_META_EXTRA)
+            except Exception:  # noqa: BLE001  超时或失败都不影响主流程
+                meta = None
+                meta_task.cancel()
+            probes = await probe_task
+        else:
+            # 版本号拿不到时退回完整元数据（还能从 assets 里读到版本）
+            meta = await meta_task
+            if meta is None:
+                urls = _release_urls(get_version().lstrip("v"))
+                probes = await _probe_all(session, urls["asset"])
+                return {
+                    "ok": False,
+                    "error": "无法获取版本信息（直连与镜像均失败）",
+                    "current": current,
+                    "meta_ms": tag_ms,
+                    "elapsed_ms": int((time.time() - started_at) * 1000),
+                    "downloads": sorted(probes, key=lambda p: (not p["ok"], p.get("ms", 9999))),
+                }
+            latest = str(meta.get("tag_name") or "").lstrip("vV")
+            meta_source, meta_ms = tag_source or "GitHub", tag_ms
+            urls = _release_urls(latest)
+            probes = await _probe_all(session, urls["asset"])
 
-        if meta is None:
-            # 拿不到版本号也把下载镜像探测一遍，方便用户手动下载最新版
-            urls = _release_urls(get_version().lstrip("v"))
-            probes = await asyncio.gather(*[
-                _probe_url(session, name or "GitHub", prefix + urls["asset"])
-                for name, prefix in _DOWNLOAD_SOURCES
-            ])
-            return {
-                "ok": False,
-                "error": "无法获取版本信息（直连与镜像均失败）",
-                "current": current,
-                "downloads": sorted(probes, key=lambda p: (not p["ok"], p.get("ms", 9999))),
-            }
-
-        latest = str(meta.get("tag_name") or "").lstrip("vV")
-        urls = _release_urls(latest)
         # 从 release 元数据里取资产真实大小，用来识别镜像缓存的旧文件
         expected_size = 0
         digest = ""
-        for asset in (meta.get("assets") or []):
+        for asset in (meta.get("assets") or []) if meta else []:
             if isinstance(asset, dict) and asset.get("name") == _UPDATE_ASSET:
                 expected_size = int(asset.get("size") or 0)
                 digest = str(asset.get("digest") or "")
                 break
-        probes = await asyncio.gather(*[
-            _probe_url(session, name or "GitHub", prefix + urls["asset"], expected_size)
-            for name, prefix in _DOWNLOAD_SOURCES
-        ])
-    # 可用且不是旧缓存优先，其次按延迟
-    downloads = sorted(probes, key=lambda p: (not p["ok"], bool(p.get("stale")), p.get("ms", 9999)))
+
+    if expected_size:
+        # 元数据里的真实大小是最权威的判据（probes 可能是在 meta 到达前跑的，重算一遍）
+        for p in probes:
+            p["stale"] = bool(
+                p.get("ok") and p.get("total_bytes")
+                and p["total_bytes"] != expected_size
+            )
+    else:
+        # 只拿到版本号（没拿到完整元数据）时，用各线路一致的文件大小当参照，
+        # 这样仍然能发现「某条镜像还吐着旧文件」。
+        sizes = [p["total_bytes"] for p in probes if p.get("ok") and p.get("total_bytes")]
+        if sizes:
+            expected_size = max(set(sizes), key=sizes.count)
+            for p in probes:
+                p["stale"] = bool(
+                    p.get("ok") and p.get("total_bytes")
+                    and p["total_bytes"] != expected_size
+                )
+
+    # 优先级：可用 → 非旧缓存 → 国内镜像优先于 GitHub 直连 → 延迟
+    downloads = sorted(
+        probes,
+        key=lambda p: (
+            not p["ok"],
+            bool(p.get("stale")),
+            _LANE_PRIORITY.get(p["name"], 0),
+            p.get("ms", 9999),
+        ),
+    )
     recommended = next((d for d in downloads if d["ok"] and not d.get("stale")), None)
     if recommended is None:
         # 全部线路都拿不到新文件时，至少给出可用的（并保留 stale 标记提醒用户）
-        recommended = next((d for d in downloads if d["ok"]), downloads[0])
-    return {
+        recommended = next((d for d in downloads if d["ok"]), None)
+    if recommended is None and meta_source:
+        # 探测全部超时，但版本号是从某条镜像拿到的 —— 该镜像的下载地址通常也能用
+        prefix = dict(_META_SOURCES).get(meta_source, "")
+        recommended = {
+            "name": meta_source,
+            "url": prefix + urls["asset"],
+            "ok": True,
+            "untested": True,
+            "stale": False,
+            "ms": 0,
+        }
+        downloads.insert(0, recommended)
+
+    safe_meta = meta or {}
+    payload = {
         "ok": True,
         "current": current,
         "latest": "v" + latest,
         "has_update": _version_tuple(latest) > _version_tuple(current),
         "meta_source": meta_source,
         "page_url": urls["page"],
-        "changelog": str(meta.get("body") or ""),
-        "published_at": meta.get("published_at") or "",
+        "changelog": str(safe_meta.get("body") or ""),
+        "published_at": safe_meta.get("published_at") or "",
         "expected_bytes": expected_size,
         "asset_digest": digest,
         "downloads": downloads,
         "recommended": recommended,
+        "meta_ms": meta_ms,
+        "elapsed_ms": int((time.time() - started_at) * 1000),
+        "cached": False,
+    }
+    return payload
+
+
+@app.get("/api/update/changelog")
+async def api_update_changelog(version: str = ""):
+    """取某个版本的更新说明，由服务端经国内镜像代取。
+
+    浏览器直连 api.github.com 在国内经常失败，前端原来直接 fetch 它会转圈或报错。
+    """
+    ver = version.strip().lstrip("vV")
+    headers = {"User-Agent": "Ayabot-UpdateChecker", "Accept": "application/vnd.github+json"}
+    async with aiohttp.ClientSession(headers=headers, trust_env=True) as session:
+        data: Optional[dict] = None
+        if ver:
+            data = await _race_json(
+                session, f"https://api.github.com/repos/{_UPDATE_REPO}/releases/tags/v{ver}"
+            )
+        if data is None:
+            data = await _race_json(session, _GH_RELEASE_API)
+    if not data:
+        return {"ok": False, "version": ver, "body": "", "error": "无法获取更新说明"}
+    return {
+        "ok": True,
+        "version": ver or str(data.get("tag_name") or "").lstrip("vV"),
+        "name": data.get("name") or "",
+        "body": str(data.get("body") or ""),
+        "published_at": data.get("published_at") or "",
     }
 
 
@@ -5710,6 +6064,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <div class="bg-white rounded-xl shadow-lg w-full max-w-sm mx-4 p-6 text-center space-y-4" @click.stop>
                         <div v-if="updateChecking" class="py-8">
                             <p class="text-gray-500">正在检查更新...</p>
+                            <p class="text-[11px] text-gray-400 mt-1">并发测速国内线路，通常 1 秒内完成</p>
                         </div>
                         <div v-else-if="updateError" class="py-4">
                             <p class="text-red-500 text-lg mb-2">❌ 检查失败</p>
@@ -5736,14 +6091,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                 </a>
                                 <div v-if="updateData.downloads && updateData.downloads.length > 1" class="text-left">
                                     <p class="text-[11px] text-gray-400 mb-1">
-                                        其他线路（已自动测速，✅ 可用 / ❌ 当前不通）：
+                                        其他线路（已自动测速，✅ 可用 / ⏱ 未测速 / ❌ 不通）：
                                     </p>
                                     <div class="space-y-1 max-h-56 overflow-y-auto">
                                         <a v-for="d in updateData.downloads" :key="d.name" :href="d.url" target="_blank"
                                            class="flex items-center justify-between gap-2 text-xs px-2 py-1 rounded hover:bg-gray-50"
                                            :class="d.ok && !d.stale ? 'text-gray-600' : 'text-gray-400'">
-                                            <span>{{ d.ok ? (d.stale ? '⚠️' : '✅') : '❌' }} {{ d.name === 'GitHub' ? 'GitHub 直连' : d.name }}<span v-if="d.stale" class="text-[10px] text-amber-600 ml-1">缓存旧版</span></span>
-                                            <span class="font-mono text-[10px]">{{ d.ok ? d.ms + 'ms' : (d.status || '超时') }}</span>
+                                            <span>{{ d.ok ? (d.stale ? '⚠️' : '✅') : (d.skipped ? '⏱' : '❌') }} {{ d.name === 'GitHub' ? 'GitHub 直连' : d.name }}<span v-if="d.stale" class="text-[10px] text-amber-600 ml-1">缓存旧版</span></span>
+                                            <span class="font-mono text-[10px]">{{ d.ok ? d.ms + 'ms' : (d.skipped ? '未测速' : (d.status || '超时')) }}</span>
                                         </a>
                                     </div>
                                 </div>
@@ -5758,6 +6113,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
                                     📝 查看更新日志
                                 </button>
                             </div>
+                            <p v-if="updateData" class="text-[10px] text-gray-400">
+                                线路 {{ updateData.metaSource || '未知' }} ·
+                                <template v-if="updateData.cached">缓存结果（{{ updateData.cacheAge }} 秒前测的）</template>
+                                <template v-else>耗时 {{ (updateData.elapsedMs / 1000).toFixed(1) }}s</template>
+                            </p>
                         </div>
                         <div class="pt-2">
                             <button v-if="updateData && updateData.hasUpdate" @click="ignoreUpdate"
@@ -6071,27 +6431,24 @@ createApp({
         async function viewChangelog() {
             showChangelog.value = true;
             if (!changelogContent.value) {
+                // 要看的版本：优先弹窗里查到的最新版，否则当前版本
+                const target = ((updateData.value && updateData.value.latest) ||
+                                (silentUpdate.value && silentUpdate.value.latest) || '').replace(/^v/i, '');
+                const curEl = document.querySelector('[data-ayabot-version]');
+                const current = (curEl ? curEl.getAttribute('data-ayabot-version') : '0').replace(/^v/i, '');
+                const ver = target || current;
+                changelogContent.value = '*正在加载…*';
                 try {
-                    // 从 GitHub 获取当前版本的 tag 对应的 release body
-                    const verEl = document.querySelector('[data-ayabot-version]');
-                    const current = (verEl ? verEl.getAttribute('data-ayabot-version') : '0').replace(/^v/i, '');
-                    const r = await fetch(`https://api.github.com/repos/yujianke100/ayabot/releases/tags/v${current}`, {
-                        signal: AbortSignal.timeout(8000)
+                    // 服务端经国内镜像代取（浏览器直连 api.github.com 在国内常失败）
+                    const r = await fetch(`/api/update/changelog?version=${encodeURIComponent(ver)}`, {
+                        credentials: 'include',
+                        signal: AbortSignal.timeout(15000),
                     });
-                    if (r.ok) {
-                        const j = await r.json();
-                        changelogContent.value = j.body || '*暂无更新日志*';
+                    const j = await r.json();
+                    if (j.ok && j.body) {
+                        changelogContent.value = j.body;
                     } else {
-                        // 降级：请求 releases/latest
-                        const r2 = await fetch('https://api.github.com/repos/yujianke100/ayabot/releases/latest', {
-                            signal: AbortSignal.timeout(8000)
-                        });
-                        if (r2.ok) {
-                            const j2 = await r2.json();
-                            changelogContent.value = j2.body || '*暂无更新日志*';
-                        } else {
-                            changelogContent.value = '*无法加载更新日志*';
-                        }
+                        changelogContent.value = '*无法加载更新日志*';
                     }
                 } catch(e) {
                     changelogContent.value = '*加载失败: ' + e.message + '*';
@@ -6118,38 +6475,58 @@ createApp({
                 .replace(/\n\n/g, '</p><p class="my-2">')
                 .replace(/\n/g, '<br>');
         }
+        function toUpdateData(j) {
+            return {
+                hasUpdate: !!j.has_update,
+                current: j.current,
+                latest: j.latest,
+                url: j.page_url || 'https://github.com/yujianke100/ayabot/releases',
+                changelogUrl: j.page_url || 'https://github.com/yujianke100/ayabot/releases',
+                downloads: j.downloads || [],
+                recommended: j.recommended || null,
+                metaSource: j.meta_source || '',
+                changelog: j.changelog || '',
+                elapsedMs: j.elapsed_ms || 0,
+                cached: !!j.cached,
+                cacheAge: j.cache_age || 0,
+            };
+        }
         async function checkUpdate() {
             showUpdateModal.value = true;
             updateChecking.value = true;
             updateError.value = '';
             updateData.value = null;
             try {
-                // 服务端检查：会依次尝试直连与国内加速镜像，并探测哪个下载地址可用
+                // 先取服务端缓存（通常秒回），有就先显示
                 const r = await fetch('/api/update/check', {
                     credentials: 'include',
-                    signal: AbortSignal.timeout(25000)
+                    signal: AbortSignal.timeout(20000)
                 });
                 if (!r.ok) throw new Error(`HTTP ${r.status}`);
                 const j = await r.json();
                 if (!j.ok) throw new Error(j.error || '无法获取版本信息');
-                updateData.value = {
-                    hasUpdate: !!j.has_update,
-                    current: j.current,
-                    latest: j.latest,
-                    url: j.page_url || 'https://github.com/yujianke100/ayabot/releases',
-                    changelogUrl: j.page_url || 'https://github.com/yujianke100/ayabot/releases',
-                    downloads: j.downloads || [],
-                    recommended: j.recommended || null,
-                    metaSource: j.meta_source || '',
-                    changelog: j.changelog || '',
-                };
+                updateData.value = toUpdateData(j);
+                updateChecking.value = false;
                 // 手动检查过就同步提示状态（有更新 → 亮红点；已验证最新 → 清掉）
                 if (j.has_update) {
                     updateNotice.value = j.latest;
                 } else {
                     updateNotice.value = '';
                 }
+                // 缓存超过 2 分钟，再向国内镜像实测一次（界面已经先显示了，慢了也无感）
+                if (j.cached && (j.cache_age || 0) > 120) {
+                    fetch('/api/update/check?force=1', {
+                        credentials: 'include',
+                        signal: AbortSignal.timeout(20000)
+                    }).then(r2 => (r2.ok ? r2.json() : null)).then(j2 => {
+                        if (j2 && j2.ok) {
+                            updateData.value = toUpdateData(j2);
+                            updateNotice.value = j2.has_update ? j2.latest : '';
+                        }
+                    }).catch(() => {});
+                }
             } catch(e) {
+                updateChecking.value = false;
                 // 兜底：老版本/离线环境仍直接问 GitHub
                 try {
                     const r2 = await fetch('https://api.github.com/repos/yujianke100/ayabot/releases/latest', {
@@ -6187,25 +6564,16 @@ createApp({
         async function silentCheckUpdate() {
             if (userRole.value !== 'admin') return;   // 只有管理员能更新，普通用户不打扰
             try {
+                // 不带 force：服务端 10 分钟内的结果直接复用，打开/刷新页面几乎立刻有结果
                 const r = await fetch('/api/update/check', {
                     credentials: 'include',
-                    signal: AbortSignal.timeout(25000),
+                    signal: AbortSignal.timeout(20000),
                 });
                 if (!r.ok) return;
                 const j = await r.json();
                 if (!j.ok || !j.has_update) return;
                 if (j.latest && j.latest === _ignoredVersion()) return;
-                silentUpdate.value = {
-                    hasUpdate: true,
-                    current: j.current,
-                    latest: j.latest,
-                    url: j.page_url || 'https://github.com/yujianke100/ayabot/releases',
-                    changelogUrl: j.page_url || 'https://github.com/yujianke100/ayabot/releases',
-                    downloads: j.downloads || [],
-                    recommended: j.recommended || null,
-                    metaSource: j.meta_source || '',
-                    changelog: j.changelog || '',
-                };
+                silentUpdate.value = toUpdateData(j);
                 updateNotice.value = j.latest;
             } catch(e) {
                 // 网络不通就静默失败，绝不弹错误打断用户
@@ -6380,7 +6748,7 @@ createApp({
                 }
                 // 进去后静默查一次更新：有新版本就在导航栏亮提示，不弹窗打断
                 if (!window.__updateTimer) {
-                    window.__updateTimer = setTimeout(() => { silentCheckUpdate(); }, 8000);
+                    window.__updateTimer = setTimeout(() => { silentCheckUpdate(); }, 4000);
                 }
             } catch(e) { loginErr.value = '登录失败: ' + e.message; }
         }
