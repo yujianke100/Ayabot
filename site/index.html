@@ -594,7 +594,7 @@ async function runSpeedTest() {
     why: '未发布',
   });
   MIRRORS.forEach(([name, prefix]) => {
-    lanes.push({ name, url: prefix + GH_ASSET, ok: ghOk, verified: ghOk, ms: 0, why: '地址不对' });
+    lanes.push({ name, url: prefix + GH_ASSET, ok: ghOk, verified: ghOk, ms: 0, why: '版本未确认' });
   });
 
   // ② 只给「确认存在」的线路计时；确认不存在的直接标灰，避免 404 被当成最快
@@ -603,6 +603,7 @@ async function runSpeedTest() {
     const timed = await timeLane(lane.name, lane.url);
     lane.ok = timed.ok;
     lane.ms = timed.ms;
+    if (!timed.ok) lane.why = '连不上';   // 存在但这次没连上（超时/被拦），与「未发布」区分开
   }));
 
   const alive = lanes.filter(l => l.ok).sort((a, b) => a.ms - b.ms);
