@@ -183,11 +183,13 @@ async def stop_bot_in_process(room_id: str) -> bool:
         robot = holder.get("robot")
         if robot is not None:
             await robot.shutdown()
+        loop_closed = task.get_loop().is_closed()
         task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        if not loop_closed:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         await auth.stop()
     except Exception as exc:
         logger.warning("room %s in-process stop error: %s", room_id, exc)
@@ -201,7 +203,19 @@ def _inproc_is_running(room_id: str) -> bool:
     if entry is None:
         return False
     _, _, task = entry
-    return not task.done()
+    if task.done():
+        return False
+    # Task 所在的事件循环已关闭 → 它永远不会再执行。典型成因：在别的线程里
+    # new_event_loop() 之后立刻 close()（启动期自动恢复房间时的老写法）。
+    # 这种「假运行的僵尸 Task」会让上层以为房间在跑，从而跳过真正的启动。
+    loop = task.get_loop()
+    if loop.is_closed() or not loop.is_running():
+        logger.warning(
+            "room %s in-process bot 的 Task 所在事件循环已关闭，判定为未运行并清理", room_id
+        )
+        _inproc_bots.pop(room_id, None)
+        return False
+    return True
 
 
 # ── 子进程模式（常规 Python 运行） ──────────────────────────

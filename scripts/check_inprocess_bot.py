@@ -20,9 +20,31 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 SCRATCH = Path("C:/Users/shinshi/AppData/Local/hermes/cache/scratch/inproc_test")
-ROOM = "24872476"
+ROOM = "22491717"  # 会被 _pick_live_room() 覆盖成当前正在直播的房间
 CRED = ROOT / "accounts" / "3706957229722452" / "credential.json"
 RUN_SECONDS = 30
+
+
+def _pick_live_room() -> str:
+    """挑一个当前正在直播的房间（弹幕只在开播时才连，离线房间测不出连接）。"""
+    global ROOM
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            "https://api.live.bilibili.com/room/v1/room/get_user_recommend?page=1&page_size=10",
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://live.bilibili.com/"},
+        )
+        data = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+        for r in data.get("data") or []:
+            rid = str(r.get("roomid") or "")
+            if rid.isdigit():
+                ROOM = rid
+                print(f"[选房] 使用正在直播的房间 {ROOM}（{(r.get('title') or '')[:20]}）")
+                return ROOM
+    except Exception as exc:  # noqa: BLE001
+        print(f"[选房] 拉推荐房间失败，用默认 {ROOM}: {exc}")
+    return ROOM
 
 
 def build_room() -> None:
@@ -62,6 +84,7 @@ async def main() -> int:
     from app import process_manager as pm
     from app.bot import LiveRobot
 
+    _pick_live_room()
     build_room()
     pm.set_rooms_base_dir(SCRATCH)
 
@@ -109,7 +132,10 @@ async def main() -> int:
         if not hb:
             failures.append("没有生成心跳文件")
         elif not hb.get("danmaku_connected"):
-            failures.append("心跳里 danmaku_connected 不是 True（未连上弹幕）")
+            if hb.get("live"):
+                failures.append("房间在播但 danmaku_connected 不是 True（未连上弹幕）")
+            else:
+                print("[提示] 该房间当前未开播，跳弹幕连接断言")
         if hb.get("credential_status") != "ok":
             failures.append(f"心跳凭证状态异常: {hb.get('credential_status')}")
 

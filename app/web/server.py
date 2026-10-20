@@ -162,7 +162,61 @@ def _load_desired_states() -> dict[str, bool]:
     if legacy:
         _save_desired_states(legacy)
         return legacy
+    # 再退一步：托盘版会写 running_rooms.json（退出时快照），也当成期望运行
+    tray_snapshot = _load_tray_running_rooms()
+    if tray_snapshot:
+        states = {rid: True for rid in tray_snapshot}
+        _save_desired_states(states)
+        logger.info("desired states 由 running_rooms.json 迁移: %s", list(states))
+        return states
+    # 最后一层：从各房间的心跳 phase 推断（崩溃/直接关电脑的用户没有上面两个文件）
+    boot = _bootstrap_desired_from_heartbeats()
+    if boot:
+        _save_desired_states(boot)
+        logger.info("desired states 由心跳推断: %s", boot)
+        return boot
     return {}
+
+
+def _bootstrap_desired_from_heartbeats() -> dict[str, bool]:
+    """首次升级/首次运行：按心跳文件里的 phase 推断房间是否本来就该在跑。
+
+    只认 phase=running 的（用户之前确实开着）。停过的房间心跳里是 stopped，
+    不写进期望状态，避免升级后把用户主动停掉的房间拉起来。
+    """
+    states: dict[str, bool] = {}
+    try:
+        from app.config import DEFAULT_ROOMS_DIR  # noqa: PLC0415
+
+        base = Path(_ROOMS_BASE_DIR).resolve() / DEFAULT_ROOMS_DIR
+        if not base.exists():
+            return {}
+        for d in sorted(base.iterdir()):
+            hb = d / "data" / "bot_status.json"
+            if not hb.exists():
+                continue
+            try:
+                data = json.loads(hb.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(data, dict) and data.get("phase") == "running":
+                states[d.name] = True
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("bootstrap desired states failed: %s", exc)
+    return states
+
+
+def _load_tray_running_rooms() -> list[str]:
+    """读取旧托盘版退出时写的 running_rooms.json（升级迁移用）。"""
+    try:
+        p = Path(_ROOMS_BASE_DIR).resolve() / "running_rooms.json"
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return [str(x) for x in data if str(x).strip()]
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("load running_rooms.json failed: %s", exc)
+    return []
 
 
 def _save_desired_states(states: dict[str, bool]) -> None:
@@ -574,6 +628,8 @@ _CRASH_COOLDOWN = 600.0             # 超过次数后冷却 10 分钟
 
 _restart_attempts: dict[str, list[float]] = {}
 _zombie_restarts: dict[str, float] = {}
+_no_heartbeat_since: dict[str, float] = {}
+_NO_HEARTBEAT_GRACE = 120.0        # 状态 running 但从未写过心跳，宽限这么久
 
 
 def _crash_info_path(room_id: str) -> Path:
@@ -656,7 +712,25 @@ async def _supervise_once() -> None:
             heartbeat = _read_room_json(room_id, "bot_status.json")
             ts = int(heartbeat.get("ts") or 0)
             if not ts:
+                # 状态 running 但从未写过心跳：僵尸 Task（事件循环已关）或卡在启动。
+                # 旧版这里直接 continue，于是这类房间永远「看起来在跑、实际全废」。
+                first_seen = _no_heartbeat_since.setdefault(room_id, now)
+                if now - first_seen <= _NO_HEARTBEAT_GRACE:
+                    continue
+                if now - _zombie_restarts.get(room_id, 0.0) < _CRASH_COOLDOWN:
+                    continue
+                _zombie_restarts[room_id] = now
+                _write_crash_info(room_id, f"运行中但 {int(now - first_seen)}s 没有心跳（疑似僵尸任务）", None)
+                logger.warning(
+                    "supervisor: room %s 状态 running 但无心跳 %.0fs — 重启",
+                    room_id, now - first_seen,
+                )
+                try:
+                    await restart_room_async(room_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("supervisor: room %s 僵尸重启失败: %s", room_id, exc)
                 continue
+            _no_heartbeat_since.pop(room_id, None)
             stale = now - ts
             if stale <= _HEARTBEAT_STALE_SECONDS:
                 continue

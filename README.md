@@ -65,6 +65,10 @@ Ayabot.exe 单独一个文件，双击即运行
 
 > 首次启动自动从 exe 中释放默认配置。浏览器打开 `http://localhost:19810`。
 
+> **⚠️ 第一次双击提示「无法验证发布者，你确定要运行此软件吗？」**
+> 这是 Windows 对「从网上下载、没有数字签名」的 exe 的例行提示，点 **「运行」** 即可。
+> 程序启动后会自动清掉这个下载标记，**之后启动不再提示**（也可手动：右键 exe → 属性 → 勾选「解除锁定」→ 确定）。
+
 ### 🐳 用 Docker 跑（小白首选，无需 Python）
 镜像支持 **AMD64（普通 PC / 云服务器）和 ARM64（树莓派、苹果 M 系列、Oracle ARM 云）**：
 
@@ -255,8 +259,12 @@ anchor_uid: 1000000                # ← 改成主播的 UID
 
 ### 房间自动恢复
 
-Windows .exe 版退出时会保存运行中的房间列表，下次启动自动恢复。
-无需手动重新启动每个房间。
+房间的**期望运行状态**记在 `data/desired_states.json`：点「启动」就记 true，点「停止」就记 false，
+与进程是否崩掉无关。软件重启、电脑关机再开机后，WebUI 起来会按这份状态自动拉起房间，
+不需要手动一个个点启动。旧版留下的 `running_rooms.json` 会自动迁移过来。
+
+重启后没起来先看两处：`rooms/<房间号>/data/bot_status.json`（有没有心跳、`credential_status` 是什么）、
+`rooms/<房间号>/data/auth_status.json`（是不是要重新扫码）。
 
 ---
 
@@ -270,6 +278,25 @@ python scripts/build_exe.py
 ```
 
 构建产物输出在 `dist/Ayabot.exe`，约 60 MB。
+
+### 代码签名（消除「无法验证发布者」）
+
+未签名的 exe 从网上下载后，Windows 会弹「无法验证发布者，你确定要运行此软件吗？」。
+两种处理：
+
+1. **用户侧**：点「运行」即可；程序启动后会自动清掉下载标记，之后不再提示。
+2. **彻底解决**：给 exe 做 Authenticode 签名（CI 已支持，配两个 secret 即可）：
+
+| Secret | 内容 |
+|---|---|
+| `WIN_CERT_BASE64` | `.pfx` 证书文件的 base64（`base64 -w0 cert.pfx`） |
+| `WIN_CERT_PASSWORD` | 导出 pfx 时的密码 |
+
+配好后每次打 tag，CI 会在上传前用 `signtool` 签名并校验（时间戳走 DigiCert）。
+没配就跳过签名，构建照常成功。
+
+个人开发者可考虑 Certum 的开源代码签名证书（约 €40/年）或 SignPath Foundation（开源项目免费）；
+OV/EV 证书通常要求企业主体。签名后的 exe 在 SmartScreen 里会显示发布者名称，随着下载量积累告警也会消失。
 
 ### 嵌入的资源
 

@@ -543,12 +543,19 @@ _RUNNING_ROOMS_FILE = DATA_DIR / "running_rooms.json"
 
 
 def _save_running_rooms() -> None:
-    """保存当前运行中的房间 ID 列表到文件。"""
+    """把当前正在运行的房间 ID 记到 running_rooms.json（仅作历史备份/迁移线索）。
+
+    注意：**启动时不再由托盘自己恢复房间**。恢复统一交给 WebUI 进程里的
+    desired_states.json + supervisor（见 app/web/server.py 的 _auto_start_rooms），
+    因为 Bot 的 asyncio Task 必须建在 uvicorn 的事件循环上。旧实现在托盘线程里
+    新建事件循环再 close()，会留下「Task 已死但状态是 running」的僵尸，导致
+    打开软件后房间根本不启动。
+    """
     try:
         from app.process_manager import _inproc_bots, _procs
         # 冻结模式用 _inproc_bots，否则用 _procs
         running = _inproc_bots if getattr(sys, "frozen", False) else _procs
-        room_ids = list(running.keys())
+        room_ids = sorted(running.keys())
         _RUNNING_ROOMS_FILE.write_text(json.dumps(room_ids, ensure_ascii=False), encoding="utf-8")
         logger.info("saved %d running rooms: %s", len(room_ids), room_ids)
     except Exception as exc:
@@ -569,34 +576,17 @@ def _load_running_rooms() -> list[str]:
 
 
 def _restore_running_rooms() -> None:
-    """启动上次运行中的房间。"""
+    """已废弃：不再由托盘自己启动房间。
+
+    恢复统一交给 WebUI 侧的 `_auto_start_rooms()`（读 data/desired_states.json，
+    在 uvicorn 的事件循环里启动）。这里保留空实现，避免旧调用点报错。
+    """
     room_ids = _load_running_rooms()
-    if not room_ids:
-        logger.info("no rooms to restore")
-        return
-
-    def _start_rooms() -> None:
-        """在新的事件循环中异步启动房间。"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            from app.process_manager import start_room_async
-
-            async def _do_restore() -> None:
-                for room_id in room_ids:
-                    try:
-                        logger.info("auto-starting room %s...", room_id)
-                        ok = await start_room_async(room_id)
-                        logger.info("auto-start room %s: %s", room_id, "OK" if ok else "FAILED")
-                    except Exception as exc:
-                        logger.warning("auto-start room %s failed: %s", room_id, exc)
-                    await asyncio.sleep(0.5)
-
-            loop.run_until_complete(_do_restore())
-        finally:
-            loop.close()
-
-    threading.Thread(target=_start_rooms, daemon=True, name="restore-rooms").start()
+    if room_ids:
+        logger.info(
+            "running_rooms.json 里有 %d 个房间，交由 WebUI 侧的期望状态自动启动: %s",
+            len(room_ids), room_ids,
+        )
 
 
 def _create_tray_icon() -> None:
@@ -678,11 +668,39 @@ def _create_tray_icon() -> None:
     icon.run()
 
 
+def _unblock_self() -> None:
+    """去掉 exe 上的 Zone.Identifier（「下载自 Internet」标记）。
+
+    从浏览器下载的 exe 会被打上这个备用数据流，于是每次双击都弹
+    「无法验证发布者。你确定要运行此软件吗？」。用户点过第一次「运行」之后
+    我们主动清掉标记，后续启动就不再弹（和手工「右键→属性→解除锁定」等价）。
+    这只是绕开提示，不等于代码签名 —— 要彻底消除需要 Authenticode 证书。
+    """
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    try:
+        import ctypes
+
+        exe = str(Path(sys.executable))
+        stream = exe + ":Zone.Identifier"
+        if not os.path.exists(stream):
+            return
+        ok = ctypes.windll.kernel32.DeleteFileW(ctypes.c_wchar_p(stream))
+        if ok:
+            logger.info("已解除 exe 的下载标记（下次启动不再弹发布者警告）")
+        else:
+            logger.info("解除下载标记失败（err=%s），下次启动仍会提示", ctypes.get_last_error())
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("unblock self failed: %s", exc)
+
+
 def main() -> None:
     # 单实例检查
     if not _acquire_lock():
         logger.warning("another instance already running, exiting")
         return
+
+    _unblock_self()
 
     logger.info("Ayabot starting… data dir: %s", DATA_DIR)
 

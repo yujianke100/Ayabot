@@ -44,6 +44,32 @@ jobs:
       - name: Build .exe
         run: python scripts/build_exe.py --version "${{ github.ref_name }}"
 
+      # 有签名证书时才签名；没配置就跳过（exe 依然能用，只是 Windows 首次运行会提示「无法验证发布者」）
+      - name: 代码签名
+        shell: pwsh
+        env:
+          WIN_CERT_BASE64: ${{ secrets.WIN_CERT_BASE64 }}
+          WIN_CERT_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
+        run: |
+          if (-not $env:WIN_CERT_BASE64) {
+            Write-Host "未配置 WIN_CERT_BASE64，跳过签名。"
+            Write-Host "想让用户不再看到「无法验证发布者」，需要一张代码签名证书（见 README 常见问题）。"
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "ayabot.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WIN_CERT_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "找不到 signtool.exe" }
+          Get-ChildItem dist/Ayabot-v*.exe | ForEach-Object {
+            & $signtool.FullName sign /f $pfx /p $env:WIN_CERT_PASSWORD /fd SHA256 `
+              /tr http://timestamp.digicert.com /td SHA256 /d "Ayabot 直播间机器人" $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "签名失败: $($_.Name)" }
+            $sig = Get-AuthenticodeSignature $_.FullName
+            Write-Host "$($_.Name) -> $($sig.Status) / $($sig.SignerCertificate.Subject)"
+            if ($sig.Status -ne 'Valid') { throw "签名校验未通过: $($_.Name)" }
+          }
+
       - name: 复制一份固定名称的 exe（供国内镜像下载）
         run: |
           $exe = (Get-ChildItem dist/Ayabot-v*.exe | Select-Object -First 1).FullName

@@ -32,6 +32,54 @@ def _load_version() -> str:
     return ""
 
 
+def _write_version_file(ver: str, out_path: Path) -> Path | None:
+    """生成 PyInstaller 的 --version-file，让 exe 带公司/产品/版权信息。
+
+    有了它，文件属性里能看到「Ayabot / 版本 / 版权」而不是一片空白；
+    申请代码签名证书时也需要这些字段。
+    """
+    import re
+
+    nums = [int(x) for x in re.findall(r"\d+", ver)][:3] or [0, 0, 0]
+    while len(nums) < 3:
+        nums.append(0)
+    quad = (nums[0], nums[1], nums[2], 0)
+    content = f"""VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers={quad!r},
+    prodvers={quad!r},
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable('080404B0', [
+        StringStruct('CompanyName', 'Ayabot'),
+        StringStruct('FileDescription', 'Ayabot B站直播间机器人'),
+        StringStruct('FileVersion', '{ver}'),
+        StringStruct('InternalName', 'Ayabot'),
+        StringStruct('LegalCopyright', 'MIT License'),
+        StringStruct('OriginalFilename', 'Ayabot-v{ver}.exe'),
+        StringStruct('ProductName', 'Ayabot 直播间机器人'),
+        StringStruct('ProductVersion', '{ver}')
+      ])
+    ]),
+    VarFileInfo([VarStruct('Translation', [2052, 1200])])
+  ]
+)
+"""
+    try:
+        out_path.write_text(content, encoding="utf-8")
+        return out_path
+    except OSError as exc:
+        print(f"[WARN] could not write version file: {exc}")
+        return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build Ayabot Windows .exe")
     parser.add_argument("--version", default="", help="版本号, e.g. 0.1.2（默认从 VERSION 文件读取）")
@@ -50,8 +98,9 @@ def main() -> None:
     if not entry.exists():
         sys.exit(f"ERROR: entry point not found: {entry}")
 
+    # 用当前解释器的 -m PyInstaller：venv/uv 里的 pyinstaller.exe 有时是不可用的跳板
     cmd = [
-        "pyinstaller",
+        sys.executable, "-m", "PyInstaller",
         "--onefile",
         "--windowed",
         "--name", exe_name,
@@ -117,6 +166,11 @@ def main() -> None:
     example_cfg = base_dir / "config.example.yaml"
     if example_cfg.exists():
         cmd.extend(["--add-data", f"{example_cfg}{os.pathsep}."])
+
+    # exe 版本资源（文件属性里的公司/产品/版权，签名证书也依赖它）
+    ver_file_out = _write_version_file(ver, base_dir / "build_version_info.txt")
+    if ver_file_out:
+        cmd.extend(["--version-file", str(ver_file_out)])
 
     cmd.append(str(entry))
 
