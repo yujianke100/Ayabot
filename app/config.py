@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import logging
 from pathlib import Path
+import sys
 from typing import Any
 
 import yaml
@@ -713,6 +714,66 @@ def ensure_room_dirs(room_id: str | int, base_dir: str | Path | None = None) -> 
     room_dir = get_room_path(room_id, base_dir)
     (room_dir / "data").mkdir(parents=True, exist_ok=True)
     return room_dir
+
+
+def find_template_config(base_dir: str | Path | None = None) -> Path | None:
+    """找一份可用的配置模板，供「新建房间」复制。
+
+    历史问题：新建房间时只去 base_dir 下找 config.yaml / config.example.yaml，
+    一旦运行布局不同（冻结版把配置放在 %LOCALAPPDATA%\\Ayabot、从别的目录启动、
+    用户手动删过根配置），就直接报「根目录 config.yaml 不存在」而失败。
+
+    这里把搜索范围放到所有可能的位置，顺序按「越通用越优先」：
+      1. PyInstaller 解包目录（exe 里嵌的模板，最可靠）
+      2. 包根目录（源码运行时 = 仓库根）
+      3. 调用方给的 base_dir
+      4. 当前工作目录
+    """
+    cands: list[Path] = []
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        cands += [Path(meipass) / "config.example.yaml", Path(meipass) / "config.yaml"]
+
+    pkg_root = Path(__file__).resolve().parent.parent
+    cands += [pkg_root / "config.example.yaml", pkg_root / "config.yaml"]
+
+    if base_dir:
+        base = Path(base_dir).resolve()
+        cands += [base / "config.example.yaml", base / "config.yaml"]
+
+    cwd = Path.cwd()
+    cands += [cwd / "config.example.yaml", cwd / "config.yaml"]
+
+    for p in cands:
+        try:
+            if p.is_file() and p.stat().st_size > 0:
+                return p
+        except OSError:
+            continue
+    return None
+
+
+def write_default_config(dst: str | Path) -> Path:
+    """写一份最小可用的配置（找不到任何模板时的最终兜底）。
+
+    这样「新建房间」永远不会因为缺模板而失败：哪怕用户的配置文件被删了，
+    也能生成一份 load_config() 能解析的配置，其余字段全部走内置默认值。
+    （不要试图 AppConfig() 再 dump —— 它的每个子配置都是必填参数。）
+    """
+    import yaml as _yaml
+
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    data: dict[str, Any] = {
+        "room_display_id": 0,
+        "anchor_uid": 0,
+        "storage": {"sqlite_path": "data/bot.db"},
+        "auth": {"credential_store_path": "data/credential.json"},
+        "web_ui": {"port": 8000},
+    }
+    dst.write_text(_yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return dst
 
 
 def migrate_legacy_data(room_id: str | int, base_dir: str | Path | None = None) -> bool:

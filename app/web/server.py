@@ -2470,15 +2470,18 @@ async def api_create_room(request: Request):
     if cfg_path.exists():
         return JSONResponse({"error": f"房间 {room_id} 已存在"}, status_code=409)
 
-    # 从 config.example.yaml 复制模板（优先），降级到根 config.yaml
+    # 从模板复制一份配置：优先 config.example.yaml，其次任意可用的 config.yaml；
+    # 都找不到时按内置默认值生成（绝不让「新建房间」卡在这里）
     import shutil
-    root_cfg = Path(_ROOMS_BASE_DIR).resolve() / "config.yaml"
-    example_cfg = Path(_ROOMS_BASE_DIR).resolve() / "config.example.yaml"
-    src = example_cfg if example_cfg.exists() else (root_cfg if root_cfg.exists() else None)
-    if not src:
-        return JSONResponse({"error": "根目录 config.yaml 不存在"}, status_code=500)
+    from app.config import find_template_config, write_default_config
 
-    shutil.copy2(str(src), str(cfg_path))
+    src = find_template_config(_ROOMS_BASE_DIR)
+    if src:
+        shutil.copy2(str(src), str(cfg_path))
+        logger.info("新建房间 %s：配置模板取自 %s", room_id, src)
+    else:
+        write_default_config(cfg_path)
+        logger.warning("新建房间 %s：未找到任何配置模板，已按内置默认值生成", room_id)
 
     # 写入房间配置
     port = body.get("port", 8000)
@@ -4949,42 +4952,47 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <input type="password" v-model="llmApiKey" placeholder="sk-..." class="border p-2 rounded w-full text-sm mt-1">
                 </label>
 
-                <!-- 小感叹号：没有 API Key 也能用 —— 魔搭每日免费额度（点击展开） -->
-                <div class="text-xs -mt-1">
+                <!-- 没有 API Key 也能用：魔搭每日免费额度（默认就显示，别让人以为必须先买 Key） -->
+                <div class="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11px] leading-relaxed text-amber-900">
                     <div class="flex items-start gap-1.5">
-                        <button type="button" @click="showMsTip = !showMsTip"
-                                class="inline-flex items-center justify-center w-4 h-4 mt-[2px] shrink-0 rounded-full
-                                       bg-amber-400 hover:bg-amber-500 text-white text-[10px] font-bold
-                                       cursor-pointer select-none"
-                                title="魔搭 ModelScope 每天提供免费 API 调用额度，点击看怎么填">
-                            !
-                        </button>
-                        <span class="text-gray-400 leading-snug">
-                            没有 API Key？<a href="https://modelscope.cn" target="_blank"
-                                           class="text-blue-500 hover:underline">魔搭 ModelScope</a>
-                            每天提供免费调用额度
-                            <span class="text-blue-400 cursor-pointer hover:underline" @click="showMsTip = !showMsTip">
-                                {{ showMsTip ? '收起' : '（点感叹号看怎么填）' }}
-                            </span>
-                        </span>
-                    </div>
-                    <div v-if="showMsTip"
-                         class="mt-2 ml-5 rounded-lg bg-gray-800 text-white text-[11px] leading-relaxed p-3 shadow-sm">
-                        <div class="font-bold text-amber-300 mb-1">没有 API Key？可以白嫖魔搭的每日免费额度</div>
-                        <div class="text-gray-200">
-                            魔搭社区（ModelScope）每天赠送 <b>2000 次免费 API 调用</b>（部分模型另有 500 次/天），
-                            手机号注册即可领取，做直播聊天机器人日常够用。
-                        </div>
-                        <div class="mt-2 text-gray-300 space-y-0.5">
-                            <div>Base URL 填：<code class="text-amber-200">https://api-inference.modelscope.cn/v1</code></div>
-                            <div>API Key：
-                                <a href="https://modelscope.cn/my/myaccesstoken" target="_blank"
-                                   class="text-blue-300 hover:underline">modelscope.cn/my/myaccesstoken</a>
-                                新建令牌后复制
+                        <span class="shrink-0">💡</span>
+                        <div class="flex-1 min-w-0">
+                            <div class="font-semibold">没有 API Key？可以用魔搭 ModelScope 的每日免费额度</div>
+                            <div class="mt-1 text-amber-800">
+                                手机号注册即送 <b>2000 次/天</b> 的 API 调用（部分模型 500 次/天），
+                                直播聊天机器人日常够用，超出后才会开始计费。
                             </div>
-                            <div>模型名填魔搭的模型 ID，例如 <code class="text-amber-200">Qwen/Qwen2.5-7B-Instruct</code></div>
+                            <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                                <button type="button" @click="applyModelScope"
+                                        class="px-2 py-1 rounded bg-amber-500 hover:bg-amber-600 text-white font-medium cursor-pointer">
+                                    一键填入魔搭配置
+                                </button>
+                                <a href="https://modelscope.cn/my/myaccesstoken" target="_blank"
+                                   class="px-2 py-1 rounded bg-white border border-amber-300 hover:bg-amber-100">
+                                    去领 API Key ↗
+                                </a>
+                                <span class="text-amber-700">（Base URL 我帮你填好，你只要粘贴 Key）</span>
+                            </div>
+                            <div v-if="msPicked" class="mt-1.5 text-emerald-700">
+                                已填好接口格式和 Base URL（模型名保留你原来的；没填过的话我给的是 Qwen/Qwen2.5-7B-Instruct）。
+                                把领到的 Key 粘到上面的输入框，再点下面的「保存」。
+                            </div>
+                            <div class="mt-2">
+                                <span class="text-amber-700 cursor-pointer hover:underline"
+                                      @click="showMsTip = !showMsTip">
+                                    {{ showMsTip ? '收起详细说明 ▴' : '详细说明（Base URL / 模型名 / 其他免费额度）▾' }}
+                                </span>
+                            </div>
+                            <div v-if="showMsTip" class="mt-1.5 space-y-0.5 text-amber-800">
+                                <div>Base URL：<code class="bg-white px-1 rounded">https://api-inference.modelscope.cn/v1</code></div>
+                                <div>模型名：填魔搭的模型 ID，例如 <code class="bg-white px-1 rounded">Qwen/Qwen2.5-7B-Instruct</code></div>
+                                <div>接口格式保持 <b>OpenAI 格式</b>；Anthropic 格式魔搭用不了。</div>
+                                <div class="pt-1 text-amber-700">
+                                    其他可选：智谱 GLM-4-Flash（免费）、硅基流动、DeepSeek（按量计费很便宜）。
+                                    额度与规则以各家官网为准。
+                                </div>
+                            </div>
                         </div>
-                        <div class="mt-2 text-[10px] text-gray-400">额度与规则以魔搭官网为准，超出后需自行绑定付费。</div>
                     </div>
                 </div>
 
@@ -6732,9 +6740,22 @@ createApp({
         const llmProvider = ref('openai');
         const llmApiKey = ref('');
         const llmApiKeyReal = ref('');  // 真实的 API key（不掩码）
-        const showMsTip = ref(false);   // 魔搭免费额度提示是否展开
+        const showMsTip = ref(false);   // 魔搭免费额度提示：详细说明是否展开
+        const msPicked = ref(false);    // 点过「一键填入魔搭配置」
+        const MS_BASE_URL = 'https://api-inference.modelscope.cn/v1';
+        const MS_MODEL = 'Qwen/Qwen2.5-7B-Instruct';
         const llmBaseUrl = ref('');
         const llmModel = ref('');
+        // 一键把接口格式 / Base URL 填成魔搭的（用户只需要粘贴自己领的 Key）
+        // 模型名只在没填的时候才补默认值，避免覆盖用户已经配好能用的模型
+        function applyModelScope() {
+            llmProvider.value = 'openai';       // 魔搭走 OpenAI 兼容接口
+            llmBaseUrl.value = MS_BASE_URL;
+            if (!llmModel.value) {
+                llmModel.value = MS_MODEL;
+            }
+            msPicked.value = true;
+        }
         const llmWakeWord = ref('ayabot');
         const llmTemp = ref(0.7);
         const llmTopP = ref(0.9);
@@ -9069,7 +9090,7 @@ createApp({
                 danmakuRows, danmakuErr, danmakuOffset, danmakuLimit, danmakuTotal, danmakuPage,
                 loadDanmakuLog, clearDanmakuLog, fmtDanmakuTime, loadDmDates, dmToggleDate, dmExportSelected, dmCalDays, dmCalYear, dmCalMonth, dmShowCal, dmSelectedDates, dmDates, dmDatesSet, dmAsc,
                 llmEnabled, llmProvider, llmApiKey, llmBaseUrl, llmModel, llmPrompt,
-                showMsTip,
+                showMsTip, msPicked, applyModelScope,
                 llmWakeWord, llmTemp, llmTopP, llmMaxTokens,
                 llmSaveMsg, llmSaveOk, llmTestText, llmTestResp,
                 ctxEnabled, ctxMode, ctxContent, ctxMaxMsg,
