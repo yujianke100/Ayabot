@@ -166,6 +166,7 @@
   .mrow.best{color:#fff}
   .mrow.best .mms{color:#7fe0a0;font-weight:700}
   .mrow.best .mname::after{content:" ★";color:#ffd166}
+  .mrow .mnote{font-size:11px;color:#ffb3c9;margin-left:6px}
   .mrow.bad{opacity:.45}
   /* 窄屏：线路名会被截断，直接隐掉条形图，只留名字 + 毫秒 */
   @media(max-width:520px){
@@ -518,105 +519,128 @@ docker run -d --name ayabot -p 19810:19810 \
 </footer>
 
 <script>
-// ── 版本号 / 包大小 / 校验值 ───────────────────────────────
-const LANES = [
-  // Gitee 发行版：走国内 CDN，不占任何一方自建带宽，国内通常最快
-  { id: 'gitee', name: 'Gitee（国内 CDN）', url: 'https://gitee.com/yujianke100/Ayabot/releases/download/latest/Ayabot-latest.exe' },
-  { id: 'ghp',   name: 'gh-proxy.com',      url: 'https://gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
-  { id: 'hk',    name: 'hk.gh-proxy.com',   url: 'https://hk.gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
-  { id: 'gpnet', name: 'ghproxy.net',       url: 'https://ghproxy.net/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
-  { id: 'fast',  name: 'ghfast.top',        url: 'https://ghfast.top/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
-  { id: 'geek',  name: 'ghfile.geekertao.top', url: 'https://ghfile.geekertao.top/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
-  { id: 'gh',    name: 'GitHub 直连',       url: 'https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
+// ── 下载线路：存在性用 API 验（CORS 可用），速度用 no-cors 计时 ──────────
+// 为什么分开：Gitee 的 releases/download 是 302 跳转，且跳转响应没有
+// Access-Control-Allow-Origin，浏览器在 cors 模式下会直接拒绝读状态码。
+// 所以「文件到底在不在」问各自平台的 API（都带 ACAO:*），「哪条快」用 no-cors 计时。
+const GH_API = 'https://api.github.com/repos/yujianke100/Ayabot/releases/latest';
+const GH_API_VIA = 'https://gh-proxy.com/' + GH_API;
+const GITEE_ALIAS_API = 'https://gitee.com/api/v5/repos/yujianke100/Ayabot/releases/tags/latest';
+const GITEE_ASSET = 'https://gitee.com/yujianke100/Ayabot/releases/download/latest/Ayabot-latest.exe';
+
+const GH_ASSET = 'https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe';
+const MIRRORS = [
+  ['gh-proxy.com', 'https://gh-proxy.com/'],
+  ['hk.gh-proxy.com', 'https://hk.gh-proxy.com/'],
+  ['ghproxy.net', 'https://ghproxy.net/'],
+  ['ghfast.top', 'https://ghfast.top/'],
+  ['ghfile.geekertao.top', 'https://ghfile.geekertao.top/'],
+  ['GitHub 直连', ''],
 ];
-// GitHub 直连在国内时通时不通，作为最后兜底
-const FALLBACK = LANES[LANES.length - 1];
 
 const dlMain = document.getElementById('dlMain');
 const dlMeta = document.getElementById('dlMeta');
 const mirrors = document.getElementById('mirrors');
 let bestLane = null;
 
-function paintRows(results) {
-  mirrors.innerHTML = '';
-  const okMs = results.filter(r => r.ok).map(r => r.ms);
-  const minMs = okMs.length ? Math.min(...okMs) : 1;
-  const maxMs = okMs.length ? Math.max(...okMs) : 1;
-  results.forEach(r => {
-    const row = document.createElement('div');
-    row.className = 'mrow' + (r.ok ? '' : ' bad') + (r === bestLane ? ' best' : '');
-    const pct = r.ok ? Math.round(100 - 70 * (r.ms - minMs) / Math.max(maxMs - minMs, 1)) : 0;
-    row.innerHTML =
-      '<span class="mname">' + r.name + '</span>' +
-      '<span class="mbar"><i style="width:' + pct + '%"></i></span>' +
-      '<span class="mms">' + (r.ok ? (r.verified ? r.ms + ' ms' : '? ' + r.ms + ' ms') : '不通') + '</span>';
-    mirrors.appendChild(row);
-  });
+function fetchJSON(url, ms = 6000) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  return fetch(url, { signal: ctl.signal, cache: 'no-store', headers: { Accept: 'application/json' } })
+    .then(r => (r.ok ? r.json() : null))
+    .catch(() => null)
+    .finally(() => clearTimeout(timer));
 }
 
-// 先按 CORS 模式发 HEAD，能读到真实状态码（Gitee 与多数加速站都回 access-control-allow-origin: *）。
-// 读不到时退回 no-cors「不透明」探测 —— 只能证明连得上，证明不了文件在（404 也算连得上），
-// 所以这种结果标成「未验证」，排序时排在已确认可用的线路之后。
-// 两种方式都只取响应头，不下载文件本体。
-async function probe(lane) {
+// 只取响应头的计时探测（no-cors：读不到状态码，但能反映连通性与 RTT）
+function timeLane(name, url, ms = 6000) {
   const t0 = performance.now();
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 6000);
-  try {
-    let resp;
-    try {
-      resp = await fetch(lane.url, { method: 'HEAD', mode: 'cors', cache: 'no-store', signal: ctl.signal });
-    } catch {
-      // 有的站点不允许 HEAD，用 Range 取 1 字节的 GET 代替
-      resp = await fetch(lane.url, {
-        method: 'GET', mode: 'cors', cache: 'no-store', signal: ctl.signal,
-        headers: { Range: 'bytes=0-0' },
-      });
-    }
-    const ms = Math.round(performance.now() - t0);
-    const ok = resp.status < 400;
-    return { ...lane, ok, verified: true, status: resp.status, ms: ok ? ms : 99999 };
-  } catch {
-    try {
-      const ctl2 = new AbortController();
-      const t2 = setTimeout(() => ctl2.abort(), 6000);
-      await fetch(lane.url, { method: 'HEAD', mode: 'no-cors', cache: 'no-store', signal: ctl2.signal });
-      clearTimeout(t2);
-      return { ...lane, ok: true, verified: false, status: 0, ms: Math.round(performance.now() - t0) };
-    } catch {
-      return { ...lane, ok: false, verified: false, status: 0, ms: 99999 };
-    }
-  } finally {
-    clearTimeout(timer);
-  }
+  const timer = setTimeout(() => ctl.abort(), ms);
+  return fetch(url, { method: 'HEAD', mode: 'no-cors', cache: 'no-store', signal: ctl.signal })
+    .then(() => ({ name, url, ok: true, ms: Math.round(performance.now() - t0) }))
+    .catch(() => ({ name, url, ok: false, ms: 99999 }))
+    .finally(() => clearTimeout(timer));
+}
+
+function row(r) {
+  const el = document.createElement('div');
+  el.className = 'mrow' + (r.ok ? '' : ' bad');
+  el.innerHTML =
+    '<span class="mname">' + r.name + (r.note ? '<span class="mnote">' + r.note + '</span>' : '') + '</span>' +
+    '<span class="mbar"><i></i></span>' +
+    '<span class="mms">' + (r.ok ? r.ms + ' ms' : (r.why || '不通')) + '</span>';
+  return el;
 }
 
 async function runSpeedTest() {
   bestLane = null;
-  dlMeta.textContent = '正在测速…（只发 HEAD 请求，不耗流量）';
-  mirrors.innerHTML = LANES.map(l =>
-    '<div class="mrow"><span class="mname">' + l.name + '</span>' +
-    '<span class="mbar"><i></i></span><span class="mms">测速中…</span></div>').join('');
+  dlMeta.textContent = '正在确认版本与线路…';
+  mirrors.innerHTML = '';
 
-  const timeout = new Promise(res => setTimeout(() => res(LANES.map(l => ({ ...l, ok: false, ms: 99999 }))), 7000));
-  const results = await Promise.race([Promise.all(LANES.map(probe)), timeout]);
+  // ① 版本号 + 各平台是否有对应发行版（并发，谁先回用谁）
+  const [gh, giteeRel] = await Promise.all([
+    fetchJSON(GH_API_VIA).then(v => v || fetchJSON(GH_API)),
+    fetchJSON(GITEE_ALIAS_API),
+  ]);
+  const ghOk = !!(gh && gh.tag_name);
+  const giteeOk = !!(giteeRel && (giteeRel.id || giteeRel.tag_name));
 
-  const rank = r => (r.ok ? (r.verified ? 0 : 1) : 2);
-  results.sort((a, b) => (rank(a) === rank(b) ? a.ms - b.ms : rank(a) - rank(b)));
-  bestLane = results.find(r => r.ok && r.verified) || results.find(r => r.ok) || FALLBACK;
-  paintRows(results);
+  const lanes = [];
+  lanes.push({
+    name: 'Gitee（国内 CDN）', url: GITEE_ASSET,
+    ok: giteeOk, verified: giteeOk, ms: 0,
+    note: giteeOk ? '' : ' 未启用',
+    why: '未发布',
+  });
+  MIRRORS.forEach(([name, prefix]) => {
+    lanes.push({ name, url: prefix + GH_ASSET, ok: ghOk, verified: ghOk, ms: 0, why: '地址不对' });
+  });
 
-  dlMain.href = bestLane.url;                      // 同源线路走相对路径，跨域走绝对地址
-  const live = results.find(r => r.ok);
-  dlMeta.textContent = live
-    ? '已选最快的线路：' + bestLane.name + '（' + bestLane.ms + ' ms）· 其它线路可手动换'
-    : '线路都没测通（可能被网络限制），按钮指向 Gitee，建议挂代理或用 Docker';
+  // ② 只给「确认存在」的线路计时；确认不存在的直接标灰，避免 404 被当成最快
+  const probeable = lanes.filter(l => l.verified);
+  await Promise.all(probeable.map(async (lane) => {
+    const timed = await timeLane(lane.name, lane.url);
+    lane.ok = timed.ok;
+    lane.ms = timed.ms;
+  }));
+
+  const alive = lanes.filter(l => l.ok).sort((a, b) => a.ms - b.ms);
+  bestLane = alive[0] || null;
+
+  // ③ 渲染：可用 → 按耗时排；不可用排后面
+  const ordered = alive.concat(lanes.filter(l => !l.ok));
+  mirrors.innerHTML = '';
+  const maxMs = alive.length ? Math.max(...alive.map(l => l.ms)) : 1;
+  ordered.forEach((l, i) => {
+    const el = row(l);
+    const bar = el.querySelector('.mbar i');
+    if (l.ok) bar.style.width = Math.max(6, Math.round(100 - 70 * (l.ms / Math.max(maxMs, 1)))) + '%';
+    if (i === 0 && l.ok) el.classList.add('best');
+    mirrors.appendChild(el);
+  });
+
+  if (bestLane) {
+    dlMain.href = bestLane.url;
+    dlMeta.textContent = '已选最快的线路：' + bestLane.name + '（' + bestLane.ms + ' ms）· 可手动换线路或重新测速';
+  } else {
+    dlMain.href = giteeOk ? GITEE_ASSET : GH_ASSET;
+    dlMeta.textContent = '线路都没测通（可能被网络限制），按钮指向默认线路；建议挂代理或用 Docker 镜像';
+  }
+  if (gh && gh.tag_name) {
+    const v = String(gh.tag_name).replace(/^v/i, '');
+    const el = document.getElementById('dlVer');
+    if (el) el.textContent = 'v' + v;
+  }
 }
 
 document.getElementById('dlRetest').addEventListener('click', runSpeedTest);
-// 兜底：测速没跑完就点下载，走 Gitee（国内 CDN，实测最快）
-dlMain.addEventListener('click', () => { if (!bestLane) dlMain.href = 'https://gitee.com/yujianke100/Ayabot/releases/download/latest/Ayabot-latest.exe'; });
+// 兜底：测速没跑完就点下载，走 Gitee（国内 CDN）
+dlMain.addEventListener('click', () => {
+  if (!bestLane) dlMain.href = GITEE_ASSET;
+});
 
+// ── 版本号 / 包大小 ───────────────────────────────────────
 fetch('version.json', { cache: 'no-store' })
   .then(r => (r.ok ? r.json() : null))
   .then(v => {
@@ -633,7 +657,7 @@ fetch('version.json', { cache: 'no-store' })
   })
   .catch(() => {});
 
-// 打赏码放大
+// ── 打赏码放大 ───────────────────────────────────────────
 const lb = document.getElementById('lightbox');
 document.querySelectorAll('.qr figure').forEach(f => {
   f.addEventListener('click', () => {
@@ -646,7 +670,7 @@ document.querySelectorAll('.qr figure').forEach(f => {
 lb.addEventListener('click', () => lb.classList.remove('on'));
 document.addEventListener('keydown', e => { if (e.key === 'Escape') lb.classList.remove('on'); });
 
-// 复制按钮
+// ── 复制按钮 ─────────────────────────────────────────────
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.copy');
   if (!btn) return;
@@ -659,7 +683,7 @@ document.addEventListener('click', (e) => {
   }).catch(() => {});
 });
 
-// 进入下载区时再测速（避免首屏就被测速拖慢）
+// ── 进入下载区再测速（避免首屏被拖慢）────────────────────
 const dlSection = document.getElementById('download');
 if ('IntersectionObserver' in window) {
   const io = new IntersectionObserver((entries) => {
@@ -669,6 +693,7 @@ if ('IntersectionObserver' in window) {
 } else {
   setTimeout(runSpeedTest, 1200);
 }
+
 </script>
 </body>
 </html>

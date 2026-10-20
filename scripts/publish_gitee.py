@@ -42,7 +42,8 @@ def _req(method: str, path: str, token: str, *, body: dict | None = None,
         boundary = "----ayabot" + uuid.uuid4().hex
         parts: list[bytes] = []
         fields = dict(body or {})
-        fields["access_token"] = token
+        if token:                       # 空 token 不能带：Gitee 会当成非法令牌返回 401
+            fields["access_token"] = token
         for k, v in fields.items():
             parts.append(
                 f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode()
@@ -57,10 +58,11 @@ def _req(method: str, path: str, token: str, *, body: dict | None = None,
         headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
     elif body is not None:
         payload = dict(body)
-        payload["access_token"] = token
+        if token:
+            payload["access_token"] = token
         data = json.dumps(payload, ensure_ascii=False).encode()
         headers["Content-Type"] = "application/json;charset=UTF-8"
-    else:
+    elif token:
         sep = "&" if "?" in path else "?"
         url = f"{url}{sep}access_token={urllib.parse.quote(token)}"
 

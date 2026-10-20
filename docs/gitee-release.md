@@ -79,6 +79,19 @@ App 内的更新检查用 `v<版本>` 那条（它已经知道版本号），官
 
 `latest` 别名不参与轮换计数，正常占用约 38 MB。
 
+## 官网是怎么用它的
+
+官网的线路列表不是写死的「谁最快」，而是：
+
+1. 先用 API 确认这条线路**真的有文件**：GitHub 走 `api.github.com/.../releases/latest`，
+   Gitee 走 `gitee.com/api/v5/repos/<owner>/<repo>/releases/tags/latest`（两者都带
+   `Access-Control-Allow-Origin: *`，浏览器能直接读状态）
+2. 再用 `mode:'no-cors'` 发 HEAD 计时（**不能**用 cors 模式测 Gitee：它的 302 跳转响应
+   没带 ACAO，浏览器会直接拒读，表现为「Failed to fetch」）
+3. 只给「确认存在」的线路计时，404 的线路标「未启用」，避免 404 因为快而被推荐
+
+所以 Gitee 仓库没建好之前，官网上它会显示「未启用 / 未发布」——这是预期行为，建好后自动变成最快那条。
+
 ## 说明与坑
 
 - **Gitee Pages 不能用来放官网**：2024 年它已全面停止服务，别在这上面花时间。官网仍放在自己的服务器上（纯静态，几十 KB）。
