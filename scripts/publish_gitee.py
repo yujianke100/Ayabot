@@ -211,7 +211,7 @@ def upload(token: str, owner: str, repo: str, release_id: int, exe: Path,
 def _sync_repo(args, token: str) -> int:
     """把本地分支 + tag 推到 Gitee（逻辑都在 sync_gitee_repo.py，避免两份实现）。"""
     script = Path(__file__).resolve().parent / "sync_gitee_repo.py"
-    print("同步源码仓库到 Gitee …")
+    print("同步源码仓库到 Gitee …", flush=True)
     cmd = [
         sys.executable, str(script),
         "--owner", args.owner, "--repo", args.repo,
