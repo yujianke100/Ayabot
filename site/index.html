@@ -244,12 +244,15 @@
   .kv{font-size:12.5px;color:rgba(255,255,255,.5)}
   /* 线路测速列表 */
   .mirrors{margin-top:16px;position:relative;display:grid;gap:7px}
-  .mrow{display:grid;grid-template-columns:1fr 84px 74px;align-items:center;gap:10px;
+  .mrow{display:grid;grid-template-columns:1fr 132px 74px;align-items:center;gap:10px;
         font-size:12.8px;color:rgba(255,255,255,.62);position:relative}
   .mrow .mname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .mrow .mbar{height:5px;border-radius:99px;background:rgba(255,255,255,.12);overflow:hidden}
+  .mrow .mbar{height:6px;border-radius:99px;background:rgba(255,255,255,.12);overflow:hidden}
+  /* 条形长度 = 延迟（越短越快），颜色跟着长度从左到右 绿→黄→红 */
   .mrow .mbar i{display:block;height:100%;width:0;border-radius:99px;
-                background:linear-gradient(90deg,#4cc7f0,#fb7299);transition:width .5s ease}
+                background-image:linear-gradient(90deg,#22c55e 0%,#84cc16 32%,#facc15 58%,#fb923c 78%,#ef4444 100%);
+                background-repeat:no-repeat;background-position:left center;
+                transition:width .45s ease,background-size .45s ease}
   .mrow .mms{text-align:right;font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,monospace}
   .mrow.best{color:#fff}
   .mrow.best .mms{color:#7fe0a0;font-weight:700}
@@ -264,6 +267,11 @@
   @keyframes laneSweep{from{background-position:120% 0}to{background-position:-120% 0}}
   .mrow:not(.measuring):not(.bad){cursor:pointer}
   .mrow:not(.measuring):not(.bad):hover .mname{color:#fff}
+  /* 图例：一条从绿到红的示意条 */
+  .mlane-legend{display:flex;align-items:center;gap:7px;margin-top:10px;font-size:11.5px;color:rgba(255,255,255,.45)}
+  .mlane-legend .lbar{flex:none;width:86px;height:5px;border-radius:99px;
+    background-image:linear-gradient(90deg,#22c55e 0%,#84cc16 32%,#facc15 58%,#fb923c 78%,#ef4444 100%)}
+  @media(max-width:520px){ .mlane-legend{display:none} }
   /* 窄屏：线路名会被截断，直接隐掉条形图，只留名字 + 毫秒 */
   @media(max-width:520px){
     .mrow{grid-template-columns:1fr 68px;gap:8px;font-size:12.4px}
@@ -467,6 +475,10 @@
             <span class="mbar"><i></i></span>
             <span class="mms">测速中…</span>
           </div>
+        </div>
+        <div class="mlane-legend" id="mlaneLegend">
+          <span class="lbar"></span>
+          <span>条形越短越快（绿→红）；点任意一行可手动选它</span>
         </div>
         <div class="kv" style="margin-top:10px">
           测速结果只在本机计算，不上报任何地方。安装包 30 多 MB，慢线路上确实要等一会儿，换条线路通常立竿见影。
@@ -909,9 +921,25 @@ function paintLane(name, patch) {
   if (row.ok) {
     row.el.classList.remove('measuring');
     row.ms.textContent = row.value + ' ms';
-    // 每测完一条就给出大致比例（3 秒作为满刻度），不用等全部结束才有条形
-    row.bar.style.width = Math.max(8, Math.round(100 - 70 * Math.min(1, row.value / 3000))) + '%';
+    repaintBars();
   }
+}
+
+// 条形长度 = 延迟占比：越短越快。
+// 刻度 = 最慢那条，但夹在 900ms–2500ms 之间：
+// 上限避免一条 4s 的坏线路把所有正常线路压成一排绿点，下限避免全都在 200ms 时全挤成短棒。
+let laneScale = 900;
+function repaintBars() {
+  const values = [...laneRows.values()].filter(r => r.state === 'ok').map(r => r.value);
+  laneScale = Math.min(2500, Math.max(900, ...(values.length ? values : [0])));
+  laneRows.forEach(row => {
+    if (row.state !== 'ok') { row.bar.style.width = '0%'; return; }
+    const pct = Math.max(6, Math.min(100, Math.round(row.value / laneScale * 100)));
+    row.bar.style.width = pct + '%';
+    // 渐变要横跨整条轨道（而不是压缩在这截填充里）：
+    // 填充宽 pct%，把背景按 100/pct 倍放大，露出的就是轨道左端那一截的绿→红。
+    row.bar.style.backgroundSize = (100 / pct * 100) + '% 100%';
+  });
 }
 
 // 每条线路独立更新：谁先回来谁先显示
@@ -974,13 +1002,8 @@ function startSpeedTest() {
 
     if (bestLane) {
       const bestRow = laneRows.get(bestLane.name);
-      if (bestRow) {
-        bestRow.el.classList.add('best');
-        const maxMs = Math.max(...alive.map(x => x.row.value), 1);
-        alive.forEach(x => {
-          x.row.bar.style.width = Math.max(6, Math.round(100 - 70 * (x.row.value / maxMs))) + '%';
-        });
-      }
+      if (bestRow) bestRow.el.classList.add('best');
+      repaintBars();
       dlMain.href = bestLane.url;
       const secs = ((performance.now() - startedAt) / 1000).toFixed(1);
       dlMeta.textContent = '已选最快的线路：' + bestLane.name + '（' + bestLane.ms + ' ms，' +
