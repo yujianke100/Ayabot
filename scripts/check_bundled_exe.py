@@ -23,8 +23,11 @@ EXPECTED_STRINGS = {
     "app.storage": ("guard_events", "record_guard_event"),
     "app.web.server": ("/api/update/check", "desired_states.json", "上舰记录", "魔搭",
                        "/guards",
-                       # v1.2.1: 删除自身下载标记 + 僵尸任务/无心跳恢复
-                       "_bootstrap_desired_from_heartbeats", "疑似僵尸任务"),
+                       # v1.2.1: 僵尸任务/无心跳恢复 + 期望状态迁移
+                       "_bootstrap_desired_from_heartbeats", "疑似僵尸任务",
+                       # v1.2.2: 更新检查提速（版本号抢答 / 缓存预热 / 代理取更新说明）
+                       "_fetch_tag_race", "_warm_update_cache", "/api/update/changelog",
+                       "_LANE_PRIORITY", "_probe_all"),
     "app.auth": ("auth_status.json", "needs_login"),
     # v1.2.1: 自动清 MOTW（托盘启动时；入口脚本在 CArchive 顶层，不在 PYZ 里）
     "tray_win": ("Zone.Identifier", "_unblock_self"),
