@@ -147,16 +147,23 @@
      现在放进一个 sticky 容器，二者天然贴合，也不再需要给 body 留白。 */
   .topbar{position:sticky;top:0;z-index:80}
   .starstrip{display:flex;align-items:center;justify-content:center;gap:12px;
-             padding:10px 42px 10px 18px;color:#fff;font-size:13.5px;line-height:1.45;
+             padding:10px 96px 10px 18px;color:#fff;font-size:13.5px;line-height:1.45;
              background:linear-gradient(96deg,#3a1229,#191c3a 48%,#082432);
              border-bottom:1px solid rgba(255,255,255,.1);
              position:relative}
   .starstrip[hidden]{display:none}
-  .ss-close{position:absolute;right:8px;top:50%;transform:translateY(-50%);
-            width:26px;height:26px;display:grid;place-items:center;border-radius:50%;
-            color:rgba(255,255,255,.62);background:transparent;border:0;cursor:pointer;
-            font-size:17px;line-height:1;transition:.15s background,.15s color}
-  .ss-close:hover{background:rgba(255,255,255,.14);color:#fff}
+  /* 关闭按钮：做成看得见的胶囊按钮，而不是一个淡灰的小 × */
+  .ss-close{position:absolute;right:10px;top:50%;transform:translateY(-50%);
+            display:inline-flex;align-items:center;gap:4px;
+            height:28px;padding:0 10px;border-radius:999px;
+            color:#fff;background:rgba(255,255,255,.16);
+            border:1px solid rgba(255,255,255,.34);cursor:pointer;
+            font-size:12px;font-weight:600;line-height:1;
+            transition:.15s background,.15s border-color,.15s transform;
+            box-shadow:0 1px 6px -2px rgba(0,0,0,.5)}
+  .ss-close:hover{background:rgba(255,255,255,.3);border-color:rgba(255,255,255,.62)}
+  .ss-close:active{transform:translateY(-50%) scale(.96)}
+  .ss-close .x{font-size:15px;line-height:1;margin-top:-1px}
   /* 锚点跳转要让开悬浮区 + 导航栏，否则标题被压在底下 */
   section[id],div[id]{scroll-margin-top:calc(var(--top-h,110px) + 10px)}
   .ss-main{display:flex;align-items:center;gap:12px;min-width:0;color:inherit}
@@ -177,7 +184,7 @@
           padding:6px 15px;border-radius:999px;font-weight:700;font-size:13px;white-space:nowrap;
           transition:.18s transform,.18s box-shadow}
   @media(max-width:720px){
-    .starstrip{gap:8px;padding:8px 10px;font-size:12.5px}
+    .starstrip{gap:8px;padding:8px 46px 8px 10px;font-size:12.5px}
     .ss-long{display:none}
     .ss-short{display:inline}
     .ss-sub{display:none}
@@ -185,6 +192,9 @@
     .ss-btn{padding:5px 10px;font-size:12px}
     .ss-coffee{padding:5px 9px;font-size:12px;gap:4px}
     .ss-ctxt{display:none}      /* 手机只留 ☕ 图标，省地方 */
+    .ss-clabel{display:none}    /* 手机上关闭按钮只留 × */
+    .ss-close{width:28px;height:28px;padding:0;justify-content:center;right:8px;font-size:14px}
+    .ss-txt b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   }
   @media(max-width:360px){
     .ss-ico{display:none}       /* 极窄屏再省一格 */
@@ -283,7 +293,7 @@
      aria-label="去 GitHub 给 Ayabot 点个 Star">
     <span class="ss-ico">⭐</span>
     <span class="ss-txt">
-      <b><span class="ss-long">如果 Ayabot 帮你省了点事，可以给个 Star 吗？</span><span class="ss-short">喜欢的话，点个 Star 支持一下</span></b>
+      <b><span class="ss-long">如果 Ayabot 帮你省了点事，可以给个 Star 吗？</span><span class="ss-short">点个 Star 支持一下</span></b>
       <span class="ss-sub">完全免费、没有付费墙。Star 越多，越多主播能搜到它</span>
     </span>
     <span class="ss-btn">去点 Star ↗</span>
@@ -291,7 +301,7 @@
   <a class="ss-coffee" href="#support" aria-label="请作者喝杯咖啡">
     <span class="ss-cico">☕</span><span class="ss-ctxt">请作者喝杯咖啡</span>
   </a>
-  <button class="ss-close" id="ssClose" type="button" aria-label="关闭这条提示" title="关闭（不再显示）">×</button>
+  <button class="ss-close" id="ssClose" type="button" aria-label="今天不再显示这条提示" title="今天不再显示"><span class="x">×</span><span class="ss-clabel">今天不再显示</span></button>
 </div>
 
 <header>
@@ -616,22 +626,37 @@ docker run -d --name ayabot -p 19810:19810 \
 const topbarEl = document.getElementById('topbar');
 const starStrip = document.getElementById('starstrip');
 const ssClose = document.getElementById('ssClose');
-const SS_HIDE_KEY = 'ayabot_starstrip_hidden';
+const SS_HIDE_KEY = 'ayabot_starstrip_hidden_on';
 
 function syncTopHeight() {
   const h = topbarEl ? Math.ceil(topbarEl.getBoundingClientRect().height) : 0;
   document.documentElement.style.setProperty('--top-h', h + 'px');
 }
 
-// 记住用户关过（localStorage 失效时最多每次再出现一次，不影响使用）
+// 本地日期（YYYY-MM-DD，按访客自己的时区算，不要用 UTC 否则跨时区会差一天）
+function todayKey() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// 关闭只记「今天」：存日期而不是 true，第二天 compare 不上就自动恢复显示
 function hideStrip(remember) {
   if (!starStrip) return;
   starStrip.hidden = true;
-  if (remember) { try { localStorage.setItem(SS_HIDE_KEY, '1'); } catch (e) {} }
+  if (remember) { try { localStorage.setItem(SS_HIDE_KEY, todayKey()); } catch (e) {} }
   syncTopHeight();
 }
-try { if (localStorage.getItem(SS_HIDE_KEY) === '1') hideStrip(false); } catch (e) {}
+try { if (localStorage.getItem(SS_HIDE_KEY) === todayKey()) hideStrip(false); } catch (e) {}
 if (ssClose) ssClose.addEventListener('click', () => hideStrip(true));
+
+// 标签页开着跨过零点的情况：回到页面时再比一次日期，过期就恢复显示
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !starStrip || !starStrip.hidden) return;
+  let saved = null;
+  try { saved = localStorage.getItem(SS_HIDE_KEY); } catch (e) {}
+  if (saved && saved !== todayKey()) { starStrip.hidden = false; syncTopHeight(); }
+});
 
 syncTopHeight();
 addEventListener('resize', syncTopHeight);
