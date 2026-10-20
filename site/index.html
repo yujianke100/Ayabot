@@ -167,6 +167,11 @@
   .mrow.best .mms{color:#7fe0a0;font-weight:700}
   .mrow.best .mname::after{content:" ★";color:#ffd166}
   .mrow.bad{opacity:.45}
+  /* 窄屏：线路名会被截断，直接隐掉条形图，只留名字 + 毫秒 */
+  @media(max-width:520px){
+    .mrow{grid-template-columns:1fr 68px;gap:8px;font-size:12.4px}
+    .mrow .mbar{display:none}
+  }
   .list{background:#fff;border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}
   .list h4{margin:0 0 12px;font-size:14px;color:var(--muted);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
   .list a,.list span{display:flex;justify-content:space-between;gap:10px;padding:9px 0;
