@@ -263,9 +263,11 @@ def main() -> int:
     ap.add_argument("--version", default="", help="版本号，可带 v 前缀（--probe 时可不填）")
     ap.add_argument("--exe", default="", help="本地 exe 路径（--probe 时可不填）")
     ap.add_argument("--notes-file", default="", help="发行说明 Markdown（可选）")
-    ap.add_argument("--owner", default=os.environ.get("GITEE_OWNER", "yujianke100"))
-    ap.add_argument("--repo", default=os.environ.get("GITEE_REPO", "Ayabot"))
-    ap.add_argument("--target", default=os.environ.get("GITEE_TARGET", ""),
+    # 注意：CI 里这些密钥「未配置」时是「已定义但为空」，用 get(k, 默认值) 会拿到空串 →
+    # 拼出 /repos//releases 这种 URL，Gitee 直接 405。必须用 `or 默认值`。
+    ap.add_argument("--owner", default=os.environ.get("GITEE_OWNER") or "yujianke100")
+    ap.add_argument("--repo", default=os.environ.get("GITEE_REPO") or "Ayabot")
+    ap.add_argument("--target", default=os.environ.get("GITEE_TARGET") or "",
                     help="发行版指向的分支；留空则自动用仓库默认分支")
     ap.add_argument("--keep", type=int, default=4, help="保留最近几个版本的附件（不含 latest）")
     ap.add_argument("--no-latest-alias", action="store_true",
