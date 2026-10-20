@@ -19,9 +19,11 @@ Gitee 的发行版附件走国内 CDN（foruda.gitee.com），实测 2 MB/s 左�
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -129,18 +131,74 @@ def list_attachments(token: str, owner: str, repo: str, release_id: int) -> list
     return []
 
 
-def upload(token: str, owner: str, repo: str, release_id: int, exe: Path) -> dict:
-    content = exe.read_bytes()
-    print(f"  上传 {exe.name} ({len(content) / 1048576:.1f} MB) ...")
-    code, data = _req(
-        "POST", f"/repos/{owner}/{repo}/releases/{release_id}/attach_files", token,
-        body={}, files={"file": (ASSET_NAME, content, "application/octet-stream")},
-        timeout=600,
-    )
-    if code not in (200, 201) or not isinstance(data, dict):
-        raise SystemExit(f"上传附件失败 (HTTP {code}): {data}")
-    print(f"  已上传 (id={data.get('id')})")
-    return data
+def upload(token: str, owner: str, repo: str, release_id: int, exe: Path,
+           attempts: int = 4, name: str = ASSET_NAME) -> dict:
+    """流式上传附件（不把 38MB 读进内存），失败自动重试。
+
+    为什么不用 urllib 一次性 send：从境外/慢链路传大文件时它会整块写，
+    一阻塞就整条失败（实测 GitHub runner → gitee.com 报 "write operation timed out"）。
+    这里用 http.client 分块发送，有进度、能重试。
+    """
+    size = exe.stat().st_size
+    print(f"  上传 {name} ({size / 1048576:.1f} MB) ...")
+    last_err = ""
+    for attempt in range(1, attempts + 1):
+        boundary = "----ayabot" + uuid.uuid4().hex
+        head = (
+            "--" + boundary + "\r\n"
+            + 'Content-Disposition: form-data; name="access_token"\r\n\r\n' + token + "\r\n"
+            + "--" + boundary + "\r\n"
+            + 'Content-Disposition: form-data; name="file"; filename="' + ASSET_NAME + '"\r\n'
+            + "Content-Type: application/octet-stream\r\n\r\n"
+        ).encode("utf-8")
+        tail = ("\r\n--" + boundary + "--\r\n").encode("utf-8")
+        conn = http.client.HTTPSConnection("gitee.com", timeout=180)
+        try:
+            conn.putrequest(
+                "POST", f"/api/v5/repos/{owner}/{repo}/releases/{release_id}/attach_files",
+                skip_accept_encoding=True,
+            )
+            conn.putheader("Content-Type", "multipart/form-data; boundary=" + boundary)
+            conn.putheader("Content-Length", str(len(head) + size + len(tail)))
+            conn.putheader("User-Agent", "Ayabot-release")
+            conn.putheader("Accept", "application/json")
+            conn.endheaders()
+            conn.send(head)
+            sent = 0
+            step = max(size // 5, 1)
+            with exe.open("rb") as fh:
+                while True:
+                    chunk = fh.read(1 << 20)
+                    if not chunk:
+                        break
+                    conn.send(chunk)
+                    sent += len(chunk)
+                    if sent // step != (sent - len(chunk)) // step:
+                        print(f"    {int(sent * 100 / size)}% ({sent / 1048576:.1f} MB)")
+            conn.send(tail)
+            resp = conn.getresponse()
+            raw = resp.read().decode("utf-8", "replace")
+            if resp.status in (200, 201):
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    data = {}
+                print(f"  已上传 (id={data.get('id')})")
+                return data
+            last_err = f"HTTP {resp.status}: {raw[:200]}"
+        except Exception as exc:  # noqa: BLE001
+            last_err = f"{type(exc).__name__}: {exc}"
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        print(f"  第 {attempt} 次上传失败：{last_err}")
+        if attempt < attempts:
+            wait = 5 * attempt
+            print(f"  {wait}s 后重试…")
+            time.sleep(wait)
+    raise SystemExit(f"上传附件失败（已重试 {attempts} 次）：{last_err}")
 
 
 def rotate(token: str, owner: str, repo: str, keep: int) -> None:
@@ -168,10 +226,42 @@ def _replace_asset(token: str, owner: str, repo: str, release: dict, exe: Path) 
     upload(token, owner, repo, release["id"], exe)
 
 
+def probe(token: str, owner: str, repo: str, target: str) -> int:
+    """最小验证：建一个临时发行版 + 上传 1KB 文件 + 读回确认 + 清理。
+
+    用来判断「令牌是否有效、权限是否够、接口是否可用」，
+    与「大文件能不能传（看链路）」分开排查。
+    """
+    tag = "probe-ci"
+    tmp = Path("probe-ci.txt")
+    tmp.write_text("ayabot probe " + uuid.uuid4().hex, encoding="utf-8")
+    print("① 建临时发行版")
+    rel = ensure_release(token, owner, repo, tag, tag, "CI 探测用，可删", target)
+    print("② 上传 1KB 文件")
+    t0 = time.time()
+    att = upload(token, owner, repo, rel["id"], tmp, attempts=1, name="probe-ci.txt")
+    print(f"   耗时 {time.time() - t0:.1f}s")
+    print("③ 读回附件列表")
+    names = [a.get("name") for a in list_attachments(token, owner, repo, rel["id"])]
+    print("   attachments:", names)
+    ok = "probe-ci.txt" in names
+    print("④ 清理")
+    if att.get("id"):
+        code, _ = _req("DELETE",
+                       f"/repos/{owner}/{repo}/releases/{rel['id']}/attach_files/{att['id']}", token)
+        print(f"   删附件 HTTP {code}")
+    code, _ = _req("DELETE", f"/repos/{owner}/{repo}/releases/{rel['id']}", token)
+    print(f"   删发行版 HTTP {code}")
+    tmp.unlink(missing_ok=True)
+    print("PROBE OK（令牌有效、可建发行版、可上传、可读回、可删除）" if ok
+          else "PROBE FAILED：上传后读不到附件")
+    return 0 if ok else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--version", required=True, help="版本号，可带 v 前缀")
-    ap.add_argument("--exe", required=True, help="本地 exe 路径")
+    ap.add_argument("--version", default="", help="版本号，可带 v 前缀（--probe 时可不填）")
+    ap.add_argument("--exe", default="", help="本地 exe 路径（--probe 时可不填）")
     ap.add_argument("--notes-file", default="", help="发行说明 Markdown（可选）")
     ap.add_argument("--owner", default=os.environ.get("GITEE_OWNER", "yujianke100"))
     ap.add_argument("--repo", default=os.environ.get("GITEE_REPO", "Ayabot"))
@@ -181,13 +271,30 @@ def main() -> int:
     ap.add_argument("--no-latest-alias", action="store_true",
                     help="不维护 latest 别名发行版（域名/页面就别用固定地址了）")
     ap.add_argument("--prune-only", action="store_true")
+    ap.add_argument("--probe", action="store_true", help="只做最小验证（1KB 文件），不发布")
     args = ap.parse_args()
 
     token = os.environ.get("GITEE_TOKEN", "").strip()
     if not token:
-        print("未设置 GITEE_TOKEN，跳过 Gitee 发布")
+        # 本地发布时免去 export：把令牌写进下面任一文件即可（建议 chmod 600）
+        for fp in (Path.home() / ".gitee-token",
+                   Path.home() / ".config" / "gitee" / "token"):
+            if fp.exists():
+                token = fp.read_text(encoding="utf-8").strip()
+                if token:
+                    print(f"（使用 {fp} 里的令牌）")
+                    break
+    if not token:
+        print("未设置 GITEE_TOKEN，也没有 ~/.gitee-token，跳过 Gitee 发布")
         return 0
 
+    if args.probe:
+        target = args.target or default_branch(token, args.owner, args.repo)
+        print(f"探测 Gitee 权限：{args.owner}/{args.repo}（分支 {target}）")
+        return probe(token, args.owner, args.repo, target)
+
+    if not args.version:
+        raise SystemExit("缺少 --version")
     ver = args.version.lstrip("v")
     tag = f"v{ver}"
     exe = Path(args.exe)

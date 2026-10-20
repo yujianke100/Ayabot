@@ -583,15 +583,21 @@ async function runSpeedTest() {
     fetchJSON(GH_API_VIA).then(v => v || fetchJSON(GH_API)),
     fetchJSON(GITEE_ALIAS_API),
   ]);
-  const ghOk = !!(gh && gh.tag_name);
-  const giteeOk = !!(giteeRel && (giteeRel.id || giteeRel.tag_name));
+  const ghOk = !!(gh && gh.tag_name)
+    && ((gh.assets || []).some(a => a && a.name === 'Ayabot-latest.exe'));
+  // Gitee 除了「发行版存在」，还必须确认附件里真的有安装包：
+  // 光有发行版（例如创建成功但上传失败）会让按钮指向一个 404。
+  const giteeAssets = (giteeRel && giteeRel.assets) || [];
+  const GITEE_ASSET_NAME = 'Ayabot-latest.exe';
+  const giteeOk = !!(giteeRel && giteeRel.id)
+    && giteeAssets.some(a => a && a.name === GITEE_ASSET_NAME);
 
   const lanes = [];
   lanes.push({
     name: 'Gitee（国内 CDN）', url: GITEE_ASSET,
     ok: giteeOk, verified: giteeOk, ms: 0,
-    note: giteeOk ? '' : ' 未启用',
-    why: '未发布',
+    note: giteeOk ? '' : ' 未就绪',
+    why: '暂无安装包',
   });
   MIRRORS.forEach(([name, prefix]) => {
     lanes.push({ name, url: prefix + GH_ASSET, ok: ghOk, verified: ghOk, ms: 0, why: '版本未确认' });

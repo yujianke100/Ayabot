@@ -11,9 +11,15 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '版本号（不带 v），例如 1.2.3'
-        required: true
+        description: '版本号（不带 v），例如 1.2.3；probe 模式可留空'
+        required: false
+        default: ''
         type: string
+      probe:
+        description: '只验证令牌/权限（上传 1KB 后清理），不发布安装包'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   republish:
@@ -29,6 +35,7 @@ jobs:
           python-version: "3.13"
 
       - name: 下载 GitHub Release 里的 exe
+        if: ${{ !inputs.probe }}
         env:
           V: ${{ inputs.version }}
         run: |
@@ -39,7 +46,19 @@ jobs:
           ls -l Ayabot-latest.exe
           echo "sha256: $(sha256sum Ayabot-latest.exe | cut -d' ' -f1)"
 
+      - name: 探测权限（1KB）
+        if: ${{ inputs.probe }}
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_OWNER: ${{ secrets.GITEE_OWNER }}
+          GITEE_REPO: ${{ secrets.GITEE_REPO }}
+          GITEE_TARGET: ${{ secrets.GITEE_TARGET }}
+        run: |
+          if [ -z "$GITEE_TOKEN" ]; then echo "::error::未配置 GITEE_TOKEN"; exit 1; fi
+          python scripts/publish_gitee.py --probe
+
       - name: 发布到 Gitee
+        if: ${{ !inputs.probe }}
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITEE_OWNER: ${{ secrets.GITEE_OWNER }}
