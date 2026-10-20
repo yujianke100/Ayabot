@@ -134,6 +134,8 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -154,6 +156,7 @@ jobs:
           GITEE_OWNER: ${{ secrets.GITEE_OWNER }}
           GITEE_REPO: ${{ secrets.GITEE_REPO }}
           GITEE_TARGET: ${{ secrets.GITEE_TARGET }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ -z "$GITEE_TOKEN" ]; then
             echo "未配置 GITEE_TOKEN，跳过 Gitee 发布。"
@@ -164,6 +167,14 @@ jobs:
           echo "上传: $EXE"
           ARGS=(--version "${{ github.ref_name }}" --exe "$EXE"
                 --owner "${GITEE_OWNER:-yujianke100}" --repo "${GITEE_REPO:-Ayabot}")
+          # 把 GitHub 的发行说明同步过去（Gitee 会拒绝空描述）
+          gh release view "${{ github.ref_name }}" --json body -q .body > gitee-notes.md 2>/dev/null || true
+          if [ -s gitee-notes.md ]; then
+            echo "已取到 GitHub 发行说明（$(wc -c < gitee-notes.md) 字节）"
+            ARGS+=(--notes-file gitee-notes.md)
+          else
+            echo "没取到 GitHub 发行说明，将使用脚本内置的默认描述"
+          fi
           # 没显式指定分支时让脚本自动探测仓库默认分支（Gitee 新仓库可能是 main）
           if [ -n "${GITEE_TARGET:-}" ]; then ARGS+=(--target "$GITEE_TARGET"); fi
           python scripts/publish_gitee.py "${ARGS[@]}"

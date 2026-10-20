@@ -196,9 +196,16 @@ def main() -> int:
 
     notes = ""
     if args.notes_file and Path(args.notes_file).exists():
-        notes = Path(args.notes_file).read_text(encoding="utf-8")
+        notes = Path(args.notes_file).read_text(encoding="utf-8").strip()
         if len(notes) > 20000:
             notes = notes[:20000] + "\n\n…（完整说明见 GitHub Release）"
+    if not notes:
+        # Gitee 强校验：描述为空会直接 400「验证失败：发行版的描述不能为空」
+        notes = (
+            f"Windows 安装包（{tag}），由 GitHub Actions 构建。\n\n"
+            f"完整更新说明见 GitHub Release：\n"
+            f"https://github.com/yujianke100/Ayabot/releases/tag/{tag}"
+        )
 
     if not args.prune_only:
         target = args.target or default_branch(token, args.owner, args.repo)
