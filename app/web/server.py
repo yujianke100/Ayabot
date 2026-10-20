@@ -779,9 +779,11 @@ def _get_current_role(request: Request) -> tuple[str, str, list]:
 async def _auth_middleware(request: Request, call_next):
     client_ip = request.client.host if request.client else "unknown"
 
-    # Allow login page, auth endpoint, and image proxy without rate limit or auth
+    # Allow login page, auth endpoint, image proxy, and static icons without auth
     path = request.url.path
-    if path in ("/", "/api/login", "/favicon.ico") or path.startswith("/api/external/") or path.startswith("/api/proxy_image"):
+    if (path in ("/", "/api/login", "/favicon.ico", "/icon-192.png")
+            or path.startswith("/api/external/")
+            or path.startswith("/api/proxy_image")):
         return await call_next(request)
 
     if _rate_limited(client_ip):
@@ -4212,7 +4214,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ayabot 直播间机器人</title>
-<link rel="icon" href="/favicon.ico">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="theme-color" content="#2563eb">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
@@ -4331,7 +4336,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <!-- ══════ 登录页 ══════ -->
 <div v-if="!loggedIn" class="flex items-center justify-center min-h-[80vh] px-4">
     <div class="bg-white p-6 sm:p-8 rounded-xl shadow-md w-full max-w-sm">
-        <h1 class="text-xl font-bold text-center text-blue-600 mb-6">Ayabot 管理后台</h1>
+        <h1 class="text-xl font-bold text-center text-blue-600 mb-6 flex items-center justify-center gap-2"><img src="/icon-192.png" alt="" class="w-7 h-7 rounded-lg">Ayabot 管理后台</h1>
         <div class="space-y-4">
             <input v-model="loginUser" placeholder="账号" class="border p-2 rounded w-full text-sm" @keyup.enter="doLogin">
             <input v-model="loginPass" type="password" placeholder="密码" class="border p-2 rounded w-full text-sm" @keyup.enter="doLogin">
@@ -4356,7 +4361,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <!-- ══════ 主界面 ══════ -->
 <div v-if="loggedIn">
 <header class="mb-4 sm:mb-6 flex items-center bg-white p-3 sm:p-4 rounded-xl shadow-sm gap-2">
-    <h1 class="text-base sm:text-xl font-bold text-blue-600 flex-shrink-0">🎯 Ayabot</h1>
+    <h1 class="text-base sm:text-xl font-bold text-blue-600 flex-shrink-0 flex items-center gap-1.5"><img src="/icon-192.png" alt="Ayabot" class="w-5 h-5 sm:w-6 sm:h-6 rounded-md flex-shrink-0">Ayabot</h1>
     <div class="flex-1 min-w-0"></div>
     <div class="flex items-center gap-1 sm:gap-4 text-xs sm:text-sm overflow-x-auto no-scrollbar mr-1 sm:mr-2">
         <button @click="tab='rooms'" :class="tab==='rooms'?'text-blue-600 font-bold border-b-2 border-blue-600':''" class="whitespace-nowrap px-1 sm:px-0">🏠 房间管理</button>
@@ -9054,9 +9059,24 @@ async def index():
 
 @app.get("/favicon.ico")
 async def favicon():
-    favicon_path = Path(__file__).resolve().parent.parent.parent / "figs" / "icon.png"
-    if favicon_path.exists():
-        return FastResponse(content=favicon_path.read_bytes(), media_type="image/x-icon")
+    """站点图标 = 软件图标（figs/favicon.ico，随 exe 一起打包）。"""
+    for name, media in (("favicon.ico", "image/x-icon"), ("icon-web.png", "image/png"),
+                        ("icon.png", "image/png")):
+        path = _figs_path(name)
+        if path is not None and path.exists():
+            return FastResponse(content=path.read_bytes(), media_type=media,
+                                headers={"Cache-Control": "public, max-age=86400"})
+    return Response(status_code=204)
+
+
+@app.get("/icon-192.png")
+async def web_icon_192():
+    """导航栏 / iOS 添加到主屏用的图标。"""
+    for name in ("icon-web.png", "icon.png"):
+        path = _figs_path(name)
+        if path is not None and path.exists():
+            return FastResponse(content=path.read_bytes(), media_type="image/png",
+                                headers={"Cache-Control": "public, max-age=86400"})
     return Response(status_code=204)
 
 

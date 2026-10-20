@@ -1,0 +1,13 @@
+{
+  "name": "Ayabot · B站直播间机器人",
+  "short_name": "Ayabot",
+  "description": "礼物 / 盲盒 / 上舰统计，弹幕关键词与 AI 回复。开源免费。",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1020",
+  "theme_color": "#0b1020",
+  "icons": [
+    { "src": "assets/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

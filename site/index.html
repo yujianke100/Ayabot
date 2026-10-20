@@ -9,7 +9,15 @@
 <meta property="og:title" content="Ayabot · B站直播间机器人">
 <meta property="og:description" content="礼物 / 盲盒 / 上舰统计，弹幕关键词与 AI 回复，多房间管理。开源免费，Windows 单文件即开即用。">
 <meta property="og:type" content="website">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>">
+<meta property="og:image" content="https://ayabot.jianke-yu.online/assets/icon-512.png">
+<meta property="og:site_name" content="Ayabot">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="assets/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/icon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="assets/icon-192.png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<meta name="application-name" content="Ayabot">
+<link rel="manifest" href="site.webmanifest">
 <style>
   :root{
     --pink:#fb7299; --pink-2:#ff9db8; --blue:#00a1d6; --blue-2:#4cc7f0;
@@ -43,8 +51,8 @@
          background:rgba(11,16,32,.96);border-bottom:1px solid rgba(255,255,255,.08)}
   .nav{display:flex;align-items:center;gap:20px;height:64px}
   .brand{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:.2px;color:#fff;font-size:18px}
-  .brand .dot{width:26px;height:26px;border-radius:9px;display:grid;place-items:center;
-              background:linear-gradient(135deg,var(--pink),var(--blue));font-size:15px}
+  .brand .brandico{width:26px;height:26px;border-radius:8px;display:block;
+                   box-shadow:0 0 0 1px rgba(255,255,255,.14)}
   .nav nav{display:flex;gap:18px;margin-left:auto;font-size:14px}
   .nav nav a{color:rgba(255,255,255,.72)}
   .nav nav a:hover{color:#fff}
@@ -104,7 +112,38 @@
         border-radius:8px;padding:3px 9px;font-size:11.5px;cursor:pointer}
   .copy:hover{background:rgba(255,255,255,.18)}
 
-  /* ── download ── */
+  /* ── 封面图 ── */
+  .banner{background:var(--ink);padding:0 0 76px}
+  .cover{position:relative;margin:0;border-radius:20px;overflow:hidden;
+         border:1px solid rgba(255,255,255,.12);
+         box-shadow:0 30px 80px -40px rgba(251,114,153,.55), 0 0 0 1px rgba(0,0,0,.4)}
+  .cover::after{content:"";position:absolute;inset:0;pointer-events:none;
+                background:linear-gradient(180deg,rgba(11,16,32,0) 72%,rgba(11,16,32,.35))}
+  .cover img{display:block;width:100%;height:auto}
+
+  /* ── 支持 / 打赏 ── */
+  .support{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
+  @media(max-width:820px){ .support{grid-template-columns:1fr} }
+  .star{background:linear-gradient(150deg,#141a33,#0b1020);color:#fff;border-radius:20px;padding:28px;
+        border:1px solid rgba(255,255,255,.1);position:relative;overflow:hidden}
+  .star::after{content:"";position:absolute;width:260px;height:260px;border-radius:50%;right:-110px;bottom:-130px;
+               background:radial-gradient(circle,rgba(0,161,214,.45),transparent 65%);filter:blur(30px)}
+  .star h3{margin:0 0 8px;font-size:20px;position:relative}
+  .star p{color:rgba(255,255,255,.66);margin:0 0 20px;font-size:14.3px;line-height:1.75;position:relative}
+  .star .cta{position:relative;gap:10px}
+  .coffee{background:#fff;border:1px solid var(--line);border-radius:20px;padding:24px;box-shadow:var(--shadow)}
+  .coffee h3{margin:0 0 8px;font-size:18px}
+  .coffee p{color:var(--muted);font-size:14.2px;margin:0 0 18px}
+  .qr{display:flex;gap:16px;flex-wrap:wrap}
+  .qr figure{margin:0;flex:1 1 150px;max-width:190px;cursor:zoom-in}
+  .qr img{width:100%;height:186px;object-fit:contain;display:block;border-radius:12px;border:1px solid var(--line);background:#fff}
+  .qr figcaption{text-align:center;font-size:12.5px;color:var(--muted);margin-top:7px}
+  .lightbox{position:fixed;inset:0;background:rgba(6,10,22,.86);display:none;place-items:center;z-index:100;padding:24px}
+  .lightbox.on{display:grid}
+  .lightbox img{max-width:min(88vw,420px);max-height:82vh;border-radius:16px;background:#fff}
+  .lightbox p{color:rgba(255,255,255,.7);text-align:center;font-size:13px;margin:14px 0 0}
+
+  /* ── 下载 ── */
   .dl{display:grid;grid-template-columns:1.15fr .85fr;gap:18px}
   @media(max-width:860px){ .dl{grid-template-columns:1fr} }
   .dl-main{background:linear-gradient(150deg,#141a33,#0b1020);color:#fff;border-radius:20px;padding:28px;
@@ -115,6 +154,19 @@
   .dl-main p{color:rgba(255,255,255,.66);margin:0 0 20px;font-size:14px;position:relative}
   .dl-main .cta{position:relative;margin-bottom:8px}
   .kv{font-size:12.5px;color:rgba(255,255,255,.5)}
+  /* 线路测速列表 */
+  .mirrors{margin-top:16px;position:relative;display:grid;gap:7px}
+  .mrow{display:grid;grid-template-columns:1fr 84px 74px;align-items:center;gap:10px;
+        font-size:12.8px;color:rgba(255,255,255,.62);position:relative}
+  .mrow .mname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mrow .mbar{height:5px;border-radius:99px;background:rgba(255,255,255,.12);overflow:hidden}
+  .mrow .mbar i{display:block;height:100%;width:0;border-radius:99px;
+                background:linear-gradient(90deg,#4cc7f0,#fb7299);transition:width .5s ease}
+  .mrow .mms{text-align:right;font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,monospace}
+  .mrow.best{color:#fff}
+  .mrow.best .mms{color:#7fe0a0;font-weight:700}
+  .mrow.best .mname::after{content:" ★";color:#ffd166}
+  .mrow.bad{opacity:.45}
   .list{background:#fff;border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}
   .list h4{margin:0 0 12px;font-size:14px;color:var(--muted);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
   .list a,.list span{display:flex;justify-content:space-between;gap:10px;padding:9px 0;
@@ -143,11 +195,12 @@
 
 <header>
   <div class="wrap nav">
-    <a class="brand" href="#top"><span class="dot">🎯</span> Ayabot</a>
+    <a class="brand" href="#top"><img class="brandico" src="assets/icon-32.png" alt="" width="26" height="26"> Ayabot</a>
     <nav>
       <a href="#features">功能</a>
       <a href="#start">快速开始</a>
       <a href="#download">下载</a>
+      <a href="#support">支持</a>
       <a href="#faq">常见问题</a>
     </nav>
     <a class="gh" href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener">GitHub ↗</a>
@@ -175,6 +228,18 @@
     </div>
   </div>
 </div>
+
+<!-- ── 产品封面 ── -->
+<div class="banner">
+  <div class="wrap">
+    <figure class="cover">
+      <img src="assets/cover.webp" srcset="assets/cover-sm.webp 760w, assets/cover.webp 1440w"
+           sizes="(max-width:760px) 92vw, 1120px" width="1440" height="1080"
+           alt="Ayabot：B站直播间机器人，免费开源、极致轻量、全平台覆盖" loading="eager" decoding="async">
+    </figure>
+  </div>
+</div>
+
 
 <section id="features">
   <div class="wrap">
@@ -266,24 +331,26 @@
   <div class="wrap">
     <div class="shead">
       <h2>下载</h2>
-      <p>国内直连 GitHub 常失败，下面的按钮默认走加速线路；也可以用 Docker。</p>
+      <p>页面打开后会<b>在你自己的网络里</b>给每条线路测一次速，按你实测最快的线路给下载按钮。测速只发 HEAD 请求，不耗流量。</p>
     </div>
     <div class="dl">
       <div class="dl-main">
         <h3>Windows · 单文件 exe</h3>
-        <p>约 38 MB，内置 Web 管理后台与运行环境，不需要安装 Python。</p>
+        <p>约 <span id="dlSize">38</span> MB，内置 Web 管理后台与运行环境，不需要安装 Python。</p>
         <div class="cta">
-          <a class="btn btn-primary" id="dlMain" href="https://gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe">⬇︎ 下载（国内加速）</a>
-          <a class="btn btn-ghost" href="https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe" rel="noopener">GitHub 直连</a>
+          <a class="btn btn-primary" id="dlMain" href="download/Ayabot-latest.exe" rel="noopener">⬇︎ 下载 Windows 版</a>
+          <button class="btn btn-ghost" id="dlRetest" type="button">重新测速</button>
         </div>
-        <div class="kv" id="dlMeta">永远指向最新版 · 更新后数据在 %LOCALAPPDATA%\Ayabot，不会丢</div>
-        <div class="kv" style="margin-top:10px;line-height:2">
-          线路慢就换一条：
-          <a href="https://ghproxy.net/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe" style="color:#ffc2d2;text-decoration:underline">ghproxy.net</a>
-          ·
-          <a href="https://ghfast.top/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe" style="color:#ffc2d2;text-decoration:underline">ghfast.top</a>
-          ·
-          <a href="https://ghfile.geekertao.top/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe" style="color:#ffc2d2;text-decoration:underline">geekertao</a>
+        <div class="kv" id="dlMeta">正在测速…　·　更新后数据在 %LOCALAPPDATA%\Ayabot，不会丢</div>
+        <div class="mirrors" id="mirrors" aria-live="polite">
+          <div class="mrow" data-lane="auto">
+            <span class="mname">本站（腾讯云上海）</span>
+            <span class="mbar"><i></i></span>
+            <span class="mms">测速中…</span>
+          </div>
+        </div>
+        <div class="kv" style="margin-top:10px">
+          测速结果只在本机计算，不上报任何地方。安装包 30 多 MB，慢线路上确实要等一会儿，换条线路通常立竿见影。
         </div>
       </div>
       <div class="list">
@@ -296,6 +363,9 @@
         </div>
         <div>
           <a href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener">源码 <span class="t">GPL-3.0</span></a>
+        </div>
+        <div>
+          <span>校验值（SHA-256）<span class="t mono" id="dlSha" style="font-size:11px">加载中…</span></span>
         </div>
       </div>
     </div>
@@ -317,7 +387,52 @@ docker run -d --name ayabot -p 19810:19810 \
   </div>
 </section>
 
-<section id="faq" class="alt">
+<section id="support" class="alt">
+  <div class="wrap">
+    <div class="shead">
+      <h2>喜欢的话，帮我两件小事</h2>
+      <p>项目完全免费、没有付费墙，也没有限制。能一直更新下去，靠的是有人用、有人说。</p>
+    </div>
+    <div class="support">
+      <div class="star">
+        <h3>⭐ 去 GitHub 点个 Star</h3>
+        <p>
+          最有用的一件事，比打赏还管用：Star 数上去，更多主播能搜到这个项目，
+          也更容易被开源社区认可（我们正在申请免费的代码签名证书，Star 数是硬指标之一）。
+          顺手点个 Watch 就能收到新版本通知。
+        </p>
+        <div class="cta">
+          <a class="btn btn-primary" href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener">⭐ 去点 Star</a>
+          <a class="btn btn-ghost" href="https://github.com/yujianke100/Ayabot/issues/new" target="_blank" rel="noopener">反馈问题</a>
+        </div>
+      </div>
+      <div class="coffee">
+        <h3>☕ 请我喝杯咖啡</h3>
+        <p>纯自愿，不影响任何功能。点二维码可以放大，扫码即可（支付宝 / 微信）。</p>
+        <div class="qr">
+          <figure data-full="assets/alipay.webp" data-name="支付宝">
+            <img src="assets/alipay.webp" alt="支付宝收款码" loading="lazy" width="420" height="630">
+            <figcaption>支付宝</figcaption>
+          </figure>
+          <figure data-full="assets/wechat.webp" data-name="微信">
+            <img src="assets/wechat.webp" alt="微信收款码" loading="lazy" width="420" height="573">
+            <figcaption>微信</figcaption>
+          </figure>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="lightbox" id="lightbox">
+  <div>
+    <img id="lbImg" src="" alt="">
+    <p id="lbName"></p>
+    <p style="opacity:.5">点任意处关闭</p>
+  </div>
+</div>
+
+<section id="faq">
   <div class="wrap">
     <div class="shead">
       <h2>常见问题</h2>
@@ -355,6 +470,14 @@ docker run -d --name ayabot -p 19810:19810 \
     </details>
 
     <details>
+      <summary>下载很慢怎么办？</summary>
+      <p>页面会先在你本机给每条线路测速（只发 HEAD，不耗流量），然后按你实测最快的线路给下载按钮。
+         也可以点「重新测速」再试一次。本站（腾讯云上海）通常最快；如果整页都显示「不通」，
+         说明当前网络把 GitHub 及其加速站都限住了，可以用 Docker 镜像。
+         校验值在下载卡右侧，下完可以核对 <code>sha256</code>。</p>
+    </details>
+
+    <details>
       <summary>数据和配置存在哪里？</summary>
       <p>Windows：<code>%LOCALAPPDATA%\Ayabot\</code>；Docker：挂载出来的 <code>data</code> / <code>rooms</code> / <code>accounts</code> 目录。
          统计数据库是标准 SQLite 文件，可以直接用工具打开或备份。</p>
@@ -365,20 +488,91 @@ docker run -d --name ayabot -p 19810:19810 \
 <footer>
   <div class="wrap">
     <div>
-      <a class="brand" href="#top" style="font-size:16px"><span class="dot">🎯</span> Ayabot</a>
+      <a class="brand" href="#top" style="font-size:16px"><img class="brandico" src="assets/icon-32.png" alt="" width="22" height="22"> Ayabot</a>
       <div style="margin-top:8px">B站直播间机器人 · 开源免费 · <span id="footVer">v1.2.2</span></div>
     </div>
     <div style="display:flex;gap:18px;flex-wrap:wrap">
       <a href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener">GitHub</a>
       <a href="https://github.com/yujianke100/Ayabot/releases" target="_blank" rel="noopener">更新日志</a>
       <a href="https://github.com/yujianke100/Ayabot/issues" target="_blank" rel="noopener">问题反馈</a>
+      <a href="#support">请我喝咖啡</a>
       <a href="https://github.com/yujianke100/Ayabot/blob/main/SIGNING.md" target="_blank" rel="noopener">签名策略</a>
     </div>
   </div>
 </footer>
 
 <script>
-// 版本号：与仓库 VERSION 同步（部署时生成 version.json），失败就保留静态兜底
+// ── 版本号 / 包大小 / 校验值 ───────────────────────────────
+const LANES = [
+  { id: 'self',  name: '本站（腾讯云上海）', url: 'download/Ayabot-latest.exe', self: true },
+  { id: 'ghp',   name: 'gh-proxy.com',      url: 'https://gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
+  { id: 'hk',    name: 'hk.gh-proxy.com',   url: 'https://hk.gh-proxy.com/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
+  { id: 'gpnet', name: 'ghproxy.net',       url: 'https://ghproxy.net/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
+  { id: 'fast',  name: 'ghfast.top',        url: 'https://ghfast.top/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
+  { id: 'geek',  name: 'ghfile.geekertao.top', url: 'https://ghfile.geekertao.top/https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
+  { id: 'gh',    name: 'GitHub 直连',       url: 'https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe' },
+];
+// GitHub 直连在国内时通时不通，作为最后兜底
+const FALLBACK = LANES[LANES.length - 1];
+
+const dlMain = document.getElementById('dlMain');
+const dlMeta = document.getElementById('dlMeta');
+const mirrors = document.getElementById('mirrors');
+let bestLane = null;
+
+function paintRows(results) {
+  mirrors.innerHTML = '';
+  const okMs = results.filter(r => r.ok).map(r => r.ms);
+  const minMs = okMs.length ? Math.min(...okMs) : 1;
+  const maxMs = okMs.length ? Math.max(...okMs) : 1;
+  results.forEach(r => {
+    const row = document.createElement('div');
+    row.className = 'mrow' + (r.ok ? '' : ' bad') + (r === bestLane ? ' best' : '');
+    const pct = r.ok ? Math.round(100 - 70 * (r.ms - minMs) / Math.max(maxMs - minMs, 1)) : 0;
+    row.innerHTML =
+      '<span class="mname">' + r.name + '</span>' +
+      '<span class="mbar"><i style="width:' + pct + '%"></i></span>' +
+      '<span class="mms">' + (r.ok ? r.ms + ' ms' : '不通') + '</span>';
+    mirrors.appendChild(row);
+  });
+}
+
+// 只发 HEAD 拿「首字节时间」；跨域读不到内容，但计时可用。不耗下载流量。
+function probe(lane) {
+  const t0 = performance.now();
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 6000);
+  return fetch(lane.url, { method: 'HEAD', mode: 'no-cors', cache: 'no-store', signal: ctl.signal })
+    .then(() => ({ ...lane, ok: true, ms: Math.round(performance.now() - t0) }))
+    .catch(() => ({ ...lane, ok: false, ms: 99999 }))
+    .finally(() => clearTimeout(timer));
+}
+
+async function runSpeedTest() {
+  bestLane = null;
+  dlMeta.textContent = '正在测速…（只发 HEAD 请求，不耗流量）';
+  mirrors.innerHTML = LANES.map(l =>
+    '<div class="mrow"><span class="mname">' + l.name + '</span>' +
+    '<span class="mbar"><i></i></span><span class="mms">测速中…</span></div>').join('');
+
+  const timeout = new Promise(res => setTimeout(() => res(LANES.map(l => ({ ...l, ok: false, ms: 99999 }))), 7000));
+  const results = await Promise.race([Promise.all(LANES.map(probe)), timeout]);
+
+  results.sort((a, b) => (a.ok === b.ok ? a.ms - b.ms : a.ok ? -1 : 1));
+  bestLane = results.find(r => r.ok) || FALLBACK;
+  paintRows(results);
+
+  dlMain.href = bestLane.url;                      // 同源线路走相对路径，跨域走绝对地址
+  const live = results.find(r => r.ok);
+  dlMeta.textContent = live
+    ? '已选最快的线路：' + bestLane.name + '（' + bestLane.ms + ' ms）· 其它线路可手动换'
+    : '线路都没测通（可能被网络限制），按钮指向 GitHub 直连，建议挂代理或用 Docker';
+}
+
+document.getElementById('dlRetest').addEventListener('click', runSpeedTest);
+// 兜底：测速没跑完就点下载，直接走本站（同源，最不容易失败）
+dlMain.addEventListener('click', () => { if (!bestLane) dlMain.href = 'download/Ayabot-latest.exe'; });
+
 fetch('version.json', { cache: 'no-store' })
   .then(r => (r.ok ? r.json() : null))
   .then(v => {
@@ -389,11 +583,36 @@ fetch('version.json', { cache: 'no-store' })
     if (chip) chip.textContent = '最新 ' + tag;
     if (foot) foot.textContent = tag;
     if (v.size_mb) {
-      const meta = document.getElementById('dlMeta');
-      if (meta) meta.textContent = '永远指向最新版 · ' + v.size_mb + ' MB · 数据在 %LOCALAPPDATA%\\Ayabot，不会丢';
+      const sz = document.getElementById('dlSize');
+      if (sz) sz.textContent = v.size_mb;
     }
   })
   .catch(() => {});
+
+// 校验值（同源取，避免跨域）：服务端在 download/ 旁边放 sha256.txt
+fetch('download/sha256.txt', { cache: 'no-store' })
+  .then(r => (r.ok ? r.text() : null))
+  .then(t => {
+    const el = document.getElementById('dlSha');
+    if (!el) return;
+    if (!t) { el.textContent = '—'; return; }
+    el.textContent = t.trim().split(/\s+/)[0].slice(0, 16) + '…';
+    el.title = t.trim();
+  })
+  .catch(() => { const el = document.getElementById('dlSha'); if (el) el.textContent = '—'; });
+
+// 打赏码放大
+const lb = document.getElementById('lightbox');
+document.querySelectorAll('.qr figure').forEach(f => {
+  f.addEventListener('click', () => {
+    document.getElementById('lbImg').src = f.dataset.full;
+    document.getElementById('lbImg').alt = f.dataset.name + '收款码';
+    document.getElementById('lbName').textContent = f.dataset.name + ' 扫码打赏（自愿，谢谢）';
+    lb.classList.add('on');
+  });
+});
+lb.addEventListener('click', () => lb.classList.remove('on'));
+document.addEventListener('keydown', e => { if (e.key === 'Escape') lb.classList.remove('on'); });
 
 // 复制按钮
 document.addEventListener('click', (e) => {
@@ -401,13 +620,23 @@ document.addEventListener('click', (e) => {
   if (!btn) return;
   const el = document.querySelector(btn.dataset.copy);
   if (!el) return;
-  const text = el.innerText.replace(/^\s*#.*$/gm, m => m); // 保留注释
-  navigator.clipboard.writeText(text).then(() => {
+  navigator.clipboard.writeText(el.innerText).then(() => {
     const old = btn.textContent;
     btn.textContent = '已复制';
     setTimeout(() => { btn.textContent = old; }, 1400);
   }).catch(() => {});
 });
+
+// 进入下载区时再测速（避免首屏就被测速拖慢）
+const dlSection = document.getElementById('download');
+if ('IntersectionObserver' in window) {
+  const io = new IntersectionObserver((entries) => {
+    if (entries.some(e => e.isIntersecting) && !bestLane) { io.disconnect(); runSpeedTest(); }
+  }, { rootMargin: '200px' });
+  io.observe(dlSection);
+} else {
+  setTimeout(runSpeedTest, 1200);
+}
 </script>
 </body>
 </html>
