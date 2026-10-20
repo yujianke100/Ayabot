@@ -75,6 +75,7 @@
   .cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:34px}
   .cta small{color:rgba(255,255,255,.5);font-size:12.5px}
   .facts{display:flex;flex-wrap:wrap;gap:26px;padding-top:22px;border-top:1px solid rgba(255,255,255,.1)}
+  .hero .cover + .facts{margin-top:34px}
   .fact b{display:block;font-size:20px;color:#fff}
   .fact span{font-size:12.5px;color:rgba(255,255,255,.55)}
 
@@ -112,14 +113,36 @@
         border-radius:8px;padding:3px 9px;font-size:11.5px;cursor:pointer}
   .copy:hover{background:rgba(255,255,255,.18)}
 
-  /* ── 封面图 ── */
-  .banner{background:var(--ink);padding:0 0 76px}
+  /* ── 顶部 Star 引导条（在 header 之上，最先被看到） ── */
+  .starstrip{display:flex;align-items:center;justify-content:center;gap:12px;
+             padding:10px 18px;color:#fff;font-size:13.5px;line-height:1.45;
+             background:linear-gradient(96deg,#3a1229,#191c3a 48%,#082432);
+             border-bottom:1px solid rgba(255,255,255,.1)}
+  .starstrip:hover .ss-btn{transform:translateY(-1px);box-shadow:0 10px 22px -10px rgba(251,114,153,1)}
+  .ss-ico{font-size:16px;filter:drop-shadow(0 0 8px rgba(255,208,120,.55))}
+  .ss-txt{display:flex;flex-direction:column;min-width:0}
+  .ss-txt b{font-weight:700}
+  .ss-short{display:none}
+  .ss-sub{color:rgba(255,255,255,.62);font-size:12px}
+  .ss-btn{flex:none;background:linear-gradient(135deg,var(--pink),#ff5c8a);color:#fff;
+          padding:6px 15px;border-radius:999px;font-weight:700;font-size:13px;white-space:nowrap;
+          transition:.18s transform,.18s box-shadow}
+  @media(max-width:720px){
+    .starstrip{gap:9px;padding:9px 14px;font-size:12.5px}
+    .ss-long{display:none}
+    .ss-short{display:inline}
+    .ss-sub{display:none}
+    .ss-btn{padding:5px 11px;font-size:12px}
+  }
+
+  /* ── 封面图（现在放在 hero 里，紧跟主标题区） ── */
   .cover{position:relative;margin:0;border-radius:20px;overflow:hidden;
          border:1px solid rgba(255,255,255,.12);
          box-shadow:0 30px 80px -40px rgba(251,114,153,.55), 0 0 0 1px rgba(0,0,0,.4)}
   .cover::after{content:"";position:absolute;inset:0;pointer-events:none;
                 background:linear-gradient(180deg,rgba(11,16,32,0) 72%,rgba(11,16,32,.35))}
   .cover img{display:block;width:100%;height:auto}
+  .hero .cover{margin:2px 0 0}
 
   /* ── 支持 / 打赏 ── */
   .support{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
@@ -199,6 +222,16 @@
 </head>
 <body>
 
+<a class="starstrip" href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener"
+   aria-label="去 GitHub 给 Ayabot 点个 Star">
+  <span class="ss-ico">⭐</span>
+  <span class="ss-txt">
+    <b><span class="ss-long">如果 Ayabot 帮你省了点事，可以给个 Star 吗？</span><span class="ss-short">喜欢的话，点个 Star 支持一下</span></b>
+    <span class="ss-sub">完全免费、没有付费墙。Star 越多，越多主播能搜到它（也是申请免费代码签名证书的硬指标）</span>
+  </span>
+  <span class="ss-btn">去点 Star ↗</span>
+</a>
+
 <header>
   <div class="wrap nav">
     <a class="brand" href="#top"><img class="brandico" src="assets/icon-32.png" alt="" width="26" height="26"> Ayabot</a>
@@ -209,7 +242,7 @@
       <a href="#support">支持</a>
       <a href="#faq">常见问题</a>
     </nav>
-    <a class="gh" href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener">GitHub ↗</a>
+    <a class="gh" href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener">⭐ Star</a>
   </div>
 </header>
 
@@ -226,23 +259,20 @@
       <a class="btn btn-ghost" href="#start">看怎么部署</a>
       <small>单文件 exe，不用装 Python · 国内加速线路</small>
     </div>
+
+    <!-- 封面紧跟主标题区（原来单独一节，视觉上被割断了） -->
+    <figure class="cover">
+      <img src="assets/cover.webp" srcset="assets/cover-sm.webp 760w, assets/cover.webp 1440w"
+           sizes="(max-width:760px) 92vw, 1120px" width="1440" height="1080"
+           alt="Ayabot：B站直播间机器人，免费开源、极致轻量、全平台覆盖" loading="eager" decoding="async">
+    </figure>
+
     <div class="facts">
       <div class="fact"><b>3</b><span>统计维度：礼物 / 盲盒 / 上舰</span></div>
       <div class="fact"><b>1 个 exe</b><span>Windows 双击即用</span></div>
       <div class="fact"><b>多房间</b><span>一个后台管多个直播间</span></div>
       <div class="fact"><b>本地存储</b><span>SQLite，不上传云端</span></div>
     </div>
-  </div>
-</div>
-
-<!-- ── 产品封面 ── -->
-<div class="banner">
-  <div class="wrap">
-    <figure class="cover">
-      <img src="assets/cover.webp" srcset="assets/cover-sm.webp 760w, assets/cover.webp 1440w"
-           sizes="(max-width:760px) 92vw, 1120px" width="1440" height="1080"
-           alt="Ayabot：B站直播间机器人，免费开源、极致轻量、全平台覆盖" loading="eager" decoding="async">
-    </figure>
   </div>
 </div>
 
@@ -343,7 +373,7 @@
     <div class="dl">
       <div class="dl-main">
         <h3>Windows · 单文件 exe</h3>
-        <p>约 <span id="dlSize">38</span> MB，内置 Web 管理后台与运行环境，不需要安装 Python。</p>
+        <p>最新 <b id="dlVer">v1.2.x</b> · 约 <span id="dlSize">38</span> MB，内置 Web 管理后台与运行环境，不需要安装 Python。</p>
         <div class="cta">
           <a class="btn btn-primary" id="dlMain" href="https://gitee.com/yujianke100/Ayabot/releases/download/latest/Ayabot-latest.exe" rel="noopener">⬇︎ 下载 Windows 版</a>
           <button class="btn btn-ghost" id="dlRetest" type="button">重新测速</button>
@@ -506,7 +536,7 @@ docker run -d --name ayabot -p 19810:19810 \
   <div class="wrap">
     <div>
       <a class="brand" href="#top" style="font-size:16px"><img class="brandico" src="assets/icon-32.png" alt="" width="22" height="22"> Ayabot</a>
-      <div style="margin-top:8px">B站直播间机器人 · 开源免费 · <span id="footVer">v1.2.2</span></div>
+      <div style="margin-top:8px">B站直播间机器人 · 开源免费 · <span id="footVer">v1.2.x</span></div>
     </div>
     <div style="display:flex;gap:18px;flex-wrap:wrap">
       <a href="https://github.com/yujianke100/Ayabot" target="_blank" rel="noopener">GitHub</a>
@@ -525,7 +555,9 @@ docker run -d --name ayabot -p 19810:19810 \
 // 所以「文件到底在不在」问各自平台的 API（都带 ACAO:*），「哪条快」用 no-cors 计时。
 const GH_API = 'https://api.github.com/repos/yujianke100/Ayabot/releases/latest';
 const GH_API_VIA = 'https://gh-proxy.com/' + GH_API;
-const GITEE_ALIAS_API = 'https://gitee.com/api/v5/repos/yujianke100/Ayabot/releases/tags/latest';
+const GITEE_ALIAS_API = 'https://gitee.com/api/v5/repos/yujianke100/Ayabot/releases/tags/latest'; // 仅用于人工核对，代码里不再依赖（它返回的是 latest 别名）
+// 发行版列表：用来在 /releases/latest 被限流或返回别名时仍能拿到真实版本号
+const GITEE_LIST_API = 'https://gitee.com/api/v5/repos/yujianke100/Ayabot/releases?per_page=20';
 const GITEE_ASSET = 'https://gitee.com/yujianke100/Ayabot/releases/download/latest/Ayabot-latest.exe';
 
 const GH_ASSET = 'https://github.com/yujianke100/Ayabot/releases/latest/download/Ayabot-latest.exe';
@@ -551,6 +583,155 @@ function fetchJSON(url, ms = 6000) {
     .catch(() => null)
     .finally(() => clearTimeout(timer));
 }
+
+// ── 版本号：页面打开时现取，不再依赖部署时写死的 version.json ──────────────
+// 三条来源并发：GitHub 加速镜像 / GitHub 直连 / Gitee 发行版列表。谁先给出
+// 真实版本号就用谁；全都不通才回落到 version.json（构建时写入的兜底值）。
+// 这样发版后官网立刻显示新版本，不用每次重新部署静态站。
+const RE_VER = /^v?(\d+(?:\.\d+)*)$/;
+
+function verKey(t) {
+  return String(t || '').replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+}
+function verGt(a, b) {
+  const x = verKey(a), y = verKey(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] || 0) - (y[i] || 0);
+    if (d) return d > 0;
+  }
+  return false;
+}
+
+// GitHub Release JSON → 统一结构（含安装包大小与 sha256，用来显示真实体积和校验值）
+function fromGitHub(d) {
+  if (!d || !d.tag_name) return null;
+  const tag = String(d.tag_name);
+  if (!RE_VER.test(tag)) return null;
+  const assets = d.assets || [];
+  const exe = assets.find(a => a && a.name === 'Ayabot-latest.exe')
+           || assets.find(a => a && /^Ayabot-v.*\.exe$/.test(a.name));
+  return {
+    version: tag.replace(/^v/i, ''),
+    sizeBytes: exe ? Number(exe.size) || 0 : 0,
+    digest: exe && exe.digest ? String(exe.digest).replace(/^sha256:/, '') : '',
+    ghAsset: !!exe,
+    giteeAsset: null,          // GitHub 侧不知道 Gitee 有没有上传
+    source: 'GitHub',
+  };
+}
+
+// Gitee 发行版列表 → 取版本号最大的那一版（列表里还有 latest 别名，要跳过）
+function fromGitee(list) {
+  if (!Array.isArray(list)) return null;
+  let best = null;
+  list.forEach(rel => {
+    const tag = rel && rel.tag_name;
+    if (!tag || !RE_VER.test(tag)) return;
+    if (!best || verGt(tag, best.tag_name)) best = rel;
+  });
+  if (!best) return null;
+  const assets = best.assets || [];
+  return {
+    version: String(best.tag_name).replace(/^v/i, ''),
+    sizeBytes: 0,              // Gitee 不返回附件大小
+    digest: '',
+    ghAsset: null,
+    giteeAsset: assets.some(a => a && a.name === 'Ayabot-latest.exe'),
+    source: 'Gitee',
+  };
+}
+
+// 部署时写入的兜底值（只有前面全挂时才用，所以首页永远有东西可显示）
+function fromVersionJson() {
+  return fetch('version.json', { cache: 'no-store' })
+    .then(r => (r.ok ? r.json() : null))
+    .then(v => {
+      if (!v || !v.version) return null;
+      return {
+        version: String(v.version).replace(/^v/i, ''),
+        sizeBytes: v.size_mb ? Math.round(v.size_mb * 1048576) : 0,
+        digest: '',
+        ghAsset: null,
+        giteeAsset: null,
+        source: 'version.json',
+      };
+    })
+    .catch(() => null);
+}
+
+function applyVersion(info) {
+  if (!info || !info.version) return;
+  const tag = 'v' + info.version;
+  const chip = document.getElementById('verChip');
+  const foot = document.getElementById('footVer');
+  const dlv = document.getElementById('dlVer');
+  if (chip) chip.textContent = '最新 ' + tag;
+  if (foot) foot.textContent = tag;
+  if (dlv) dlv.textContent = tag;
+  if (info.sizeBytes) {
+    const sz = document.getElementById('dlSize');
+    if (sz) sz.textContent = (info.sizeBytes / 1048576).toFixed(1);
+  }
+  const sha = document.getElementById('dlSha');
+  if (sha && info.digest) {
+    sha.textContent = info.digest.slice(0, 16) + '…';
+    sha.title = 'sha256: ' + info.digest;
+  }
+}
+
+function loadLatestVersion() {
+  return new Promise(resolve => {
+    let done = false;
+    let ghSettled = 0;
+    const finish = info => {
+      if (!done && info && info.version) { done = true; resolve(info); }
+    };
+    const afterGh = () => {
+      // GitHub 两条都没结果时才去问 Gitee：匿名 API 有频率限制（超了回 403），
+      // 不能每次开页面都打它，否则同一个出口 IP 的多个用户会互相挤占配额。
+      ghSettled += 1;
+      if (ghSettled < 2 || done) return;
+      fetchJSON(GITEE_LIST_API).then(fromGitee).then(finish).catch(() => {});
+    };
+    fetchJSON(GH_API_VIA).then(fromGitHub).then(finish).catch(() => {}).finally(afterGh);
+    fetchJSON(GH_API).then(fromGitHub).then(finish).catch(() => {}).finally(afterGh);
+    // 6 秒还没结果就回落 version.json，不让首屏一直挂着「最新版本」
+    setTimeout(() => {
+      if (done) return;
+      done = true;
+      fromVersionJson().then(v => resolve(v)).catch(() => resolve(null));
+    }, 6000);
+  });
+}
+
+// 本地缓存：同一访客 10 分钟内再打开页面直接显示已知版本，不再打接口
+const LS_KEY = 'ayabot_latest_release';
+function readCachedVersion() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (!o || !o.version || Date.now() - (o.ts || 0) > 10 * 60 * 1000) return null;
+    return o;
+  } catch (e) { return null; }
+}
+function writeCachedVersion(info) {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify({
+      version: info.version, sizeBytes: info.sizeBytes || 0,
+      digest: info.digest || '', ts: Date.now(),
+    }));
+  } catch (e) { /* 隐私模式下写不了，忽略 */ }
+}
+
+const cachedVersion = readCachedVersion();
+if (cachedVersion) applyVersion(cachedVersion);
+
+const latestPromise = loadLatestVersion().then(info => {
+  const use = info || cachedVersion || null;
+  if (info) { applyVersion(info); writeCachedVersion(info); }
+  return use;
+});
 
 // 只取响应头的计时探测（no-cors：读不到状态码，但能反映连通性与 RTT）
 function timeLane(name, url, ms = 6000) {
@@ -578,19 +759,12 @@ async function runSpeedTest() {
   dlMeta.textContent = '正在确认版本与线路…';
   mirrors.innerHTML = '';
 
-  // ① 版本号 + 各平台是否有对应发行版（并发，谁先回用谁）
-  const [gh, giteeRel] = await Promise.all([
-    fetchJSON(GH_API_VIA).then(v => v || fetchJSON(GH_API)),
-    fetchJSON(GITEE_ALIAS_API),
-  ]);
-  const ghOk = !!(gh && gh.tag_name)
-    && ((gh.assets || []).some(a => a && a.name === 'Ayabot-latest.exe'));
-  // Gitee 除了「发行版存在」，还必须确认附件里真的有安装包：
-  // 光有发行版（例如创建成功但上传失败）会让按钮指向一个 404。
-  const giteeAssets = (giteeRel && giteeRel.assets) || [];
-  const GITEE_ASSET_NAME = 'Ayabot-latest.exe';
-  const giteeOk = !!(giteeRel && giteeRel.id)
-    && giteeAssets.some(a => a && a.name === GITEE_ASSET_NAME);
+  // ① 版本信息：复用页面加载时已经解析好的结果（不重复请求）
+  const info = await latestPromise;
+  // 只有在「确实知道附件不存在」时才把线路标灰；拿不到信息时按可用处理，
+  // 否则一断网就把所有线路都显示成「未就绪」，比真实情况更糟。
+  const ghOk = info && info.ghAsset !== null ? !!info.ghAsset : true;
+  const giteeOk = info && info.giteeAsset !== null ? !!info.giteeAsset : true;
 
   const lanes = [];
   lanes.push({
@@ -634,11 +808,6 @@ async function runSpeedTest() {
     dlMain.href = giteeOk ? GITEE_ASSET : GH_ASSET;
     dlMeta.textContent = '线路都没测通（可能被网络限制），按钮指向默认线路；建议挂代理或用 Docker 镜像';
   }
-  if (gh && gh.tag_name) {
-    const v = String(gh.tag_name).replace(/^v/i, '');
-    const el = document.getElementById('dlVer');
-    if (el) el.textContent = 'v' + v;
-  }
 }
 
 document.getElementById('dlRetest').addEventListener('click', runSpeedTest);
@@ -646,23 +815,6 @@ document.getElementById('dlRetest').addEventListener('click', runSpeedTest);
 dlMain.addEventListener('click', () => {
   if (!bestLane) dlMain.href = GITEE_ASSET;
 });
-
-// ── 版本号 / 包大小 ───────────────────────────────────────
-fetch('version.json', { cache: 'no-store' })
-  .then(r => (r.ok ? r.json() : null))
-  .then(v => {
-    if (!v || !v.version) return;
-    const tag = 'v' + v.version;
-    const chip = document.getElementById('verChip');
-    const foot = document.getElementById('footVer');
-    if (chip) chip.textContent = '最新 ' + tag;
-    if (foot) foot.textContent = tag;
-    if (v.size_mb) {
-      const sz = document.getElementById('dlSize');
-      if (sz) sz.textContent = v.size_mb;
-    }
-  })
-  .catch(() => {});
 
 // ── 打赏码放大 ───────────────────────────────────────────
 const lb = document.getElementById('lightbox');
