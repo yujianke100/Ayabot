@@ -85,7 +85,27 @@ python scripts/publish_gitee.py --version 1.2.3 --exe /tmp/ayabot.exe
 ```
 
 脚本会：建/复用 `v<版本>` 发行版 → 上传 exe → 把 `latest` 别名发行版的附件换成这一版 →
-按 `--keep 4` 轮换旧版本附件。全程只需要 Gitee token，不碰自有服务器。
+按 `--keep 4` 轮换旧版本附件 → **再把源码仓库（当前分支 + 全部 tag）推一遍到 Gitee**。
+全程只需要 Gitee token，不碰自有服务器。
+
+## 代码仓库同步（默认开启）
+
+Gitee 上的源码原本靠「仓库镜像」从 GitHub 拉，受可达性影响会落后，容易变成
+「发行版里有最新安装包，代码还停在旧提交」。所以发布完成后会直接用 token 推送：
+
+```
+分支 main: 本地 ce634e1 / Gitee ce634e1
+推送分支 main …  640e5f2..ce634e1  main -> main
+推送 25 个 tag …  Everything up-to-date
+校验: Gitee main = ce634e1 → 一致
+```
+
+- 只想同步代码、不发安装包：`python scripts/publish_gitee.py --sync-repo-only`
+- 只想发安装包、不同步代码：`python scripts/publish_gitee.py ... --no-sync-repo`
+- 只比对不推送：`python scripts/sync_gitee_repo.py --verify-only`
+
+实现要点：token 只用来现拼推送 URL，**不写进 `.git/config`，也不新增 git remote**；
+推送失败不会影响发版结果（包已经传上去了，只会打印警告）。
 
 ## 下载地址（发布后长期稳定）
 
