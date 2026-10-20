@@ -19,12 +19,12 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 api='https://api.github.com/repos/yujianke100/Ayabot/releases/latest'
 meta="$(curl -sL --max-time 15 "https://gh-proxy.com/$api" 2>/dev/null || true)"
 ver="$(printf '%s' "$meta" | grep -o '"tag_name"[^,]*' | head -1 | sed 's/.*"v\?\([0-9][^"]*\)".*/\1/')"
-size_bytes="$(printf '%s' "$meta" | grep -o '"size":[0-9]*' | head -1 | grep -o '[0-9]*')"
+size_bytes="$(printf '%s' "$meta" | tr -d '\n' | sed -n 's/.*"size": *\([0-9][0-9]*\).*/\1/p')"
 if [ -z "$ver" ]; then
   ver="$(sed -n '1p' "$SRC/../VERSION" | tr -d '\r' | sed 's/^\xef\xbb\xbf//' | tr -d '[:space:]')"
   echo "（取不到线上版本，退回本地 VERSION=$ver）"
 fi
-size_mb="$(python3 -c "print(round(${size_bytes:-0}/1048576,1))" 2>/dev/null || echo 0)"
+size_mb="$(awk -v b="${size_bytes:-0}" 'BEGIN{printf "%.1f", b/1048576}')"
 
 cat > "$SRC/version.json" <<EOF
 {
