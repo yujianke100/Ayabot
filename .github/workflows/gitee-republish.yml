@@ -1,0 +1,62 @@
+# ── Gitee 补发（不需要重新打 tag / 重新构建） ──
+#
+# 用途：
+#   · Gitee 发布失败后重试（token 过期、描述为空、网络抖动…）
+#   · 历史版本补传到 Gitee
+# 做法：直接从 GitHub Release 拉已发布的 exe，再用 main 分支上的脚本发到 Gitee。
+
+name: Gitee 补发
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（不带 v），例如 1.2.3'
+        required: true
+        type: string
+
+jobs:
+  republish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main          # 用 main 上的脚本，逻辑比打 tag 时更新
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 下载 GitHub Release 里的 exe
+        env:
+          V: ${{ inputs.version }}
+        run: |
+          V="${V#v}"
+          URL="https://github.com/yujianke100/Ayabot/releases/download/v${V}/Ayabot-latest.exe"
+          echo "下载: $URL"
+          curl -fL --retry 3 --retry-delay 3 -o Ayabot-latest.exe "$URL"
+          ls -l Ayabot-latest.exe
+          echo "sha256: $(sha256sum Ayabot-latest.exe | cut -d' ' -f1)"
+
+      - name: 发布到 Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_OWNER: ${{ secrets.GITEE_OWNER }}
+          GITEE_REPO: ${{ secrets.GITEE_REPO }}
+          GITEE_TARGET: ${{ secrets.GITEE_TARGET }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ inputs.version }}
+        run: |
+          if [ -z "$GITEE_TOKEN" ]; then
+            echo "::error::未配置 GITEE_TOKEN"
+            exit 1
+          fi
+          V="${V#v}"
+          gh release view "v$V" --json body -q .body > gitee-notes.md 2>/dev/null || true
+          [ -s gitee-notes.md ] && echo "已取到发行说明 $(wc -c < gitee-notes.md) 字节" || echo "无发行说明，用默认描述"
+          ARGS=(--version "$V" --exe Ayabot-latest.exe
+                --owner "${GITEE_OWNER:-yujianke100}" --repo "${GITEE_REPO:-Ayabot}")
+          [ -s gitee-notes.md ] && ARGS+=(--notes-file gitee-notes.md)
+          [ -n "${GITEE_TARGET:-}" ] && ARGS+=(--target "$GITEE_TARGET")
+          python scripts/publish_gitee.py "${ARGS[@]}"
