@@ -148,7 +148,7 @@ def upload(token: str, owner: str, repo: str, release_id: int, exe: Path,
             "--" + boundary + "\r\n"
             + 'Content-Disposition: form-data; name="access_token"\r\n\r\n' + token + "\r\n"
             + "--" + boundary + "\r\n"
-            + 'Content-Disposition: form-data; name="file"; filename="' + ASSET_NAME + '"\r\n'
+            + 'Content-Disposition: form-data; name="file"; filename="' + name + '"\r\n'
             + "Content-Type: application/octet-stream\r\n\r\n"
         ).encode("utf-8")
         tail = ("\r\n--" + boundary + "--\r\n").encode("utf-8")
