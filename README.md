@@ -16,7 +16,7 @@
 
 🌐 **产品主页（国内可直连）**：<https://ayabot.jianke-yu.online>　·　版本更新日志详见 [GitHub Releases](https://github.com/yujianke100/ayabot/releases)。
 
-> ⚠️ **免责声明**：本项目为个人非商业开源项目，所调用的接口与数据均来自第三方公开渠道，与哔哩哔哩（bilibili）官方无关，亦未获其授权或背书。若相关权利人认为本项目对其接口、内容或素材的使用构成侵权，请通过 [Issues](https://github.com/yujianke100/Ayabot/issues) 联系作者，核实后将立即修改或下架相关内容。
+> ⚠️ **免责声明**：本项目为个人非商业开源项目，所调用的接口、内容与素材均来自第三方公开渠道，与哔哩哔哩（bilibili）官方无关，亦未获其授权或背书。如权利人认为存在侵权，请通过 [Issues](https://github.com/yujianke100/Ayabot/issues) 联系作者，核实后立即修改或下架。
 
 ---
 
