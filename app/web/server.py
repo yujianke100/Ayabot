@@ -782,6 +782,7 @@ async def _auth_middleware(request: Request, call_next):
     # Allow login page, auth endpoint, image proxy, and static icons without auth
     path = request.url.path
     if (path in ("/", "/api/login", "/favicon.ico", "/icon-192.png")
+            or path.startswith("/vendor/")
             or path.startswith("/api/external/")
             or path.startswith("/api/proxy_image")):
         return await call_next(request)
@@ -4298,12 +4299,30 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <meta name="theme-color" content="#2563eb">
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-<script src="https://unpkg.com/modern-screenshot@4.7.0/dist/index.js"></script>
+<script src="/vendor/tailwind.js?v=__AYABOT_VERSION__"></script>
+<script src="/vendor/vue.global.prod.js?v=__AYABOT_VERSION__"></script>
+<script src="/vendor/chart.umd.min.js?v=__AYABOT_VERSION__"></script>
+<script src="/vendor/modern-screenshot.js?v=__AYABOT_VERSION__"></script>
+<script>
+/* ── 前端库兜底 ──
+   四个库都内置在 app/web/vendor/ 里随程序发布，正常情况下永远走本地，不依赖任何外网 CDN。
+   （以前从 unpkg / jsdelivr 拉，国内一旦连不上 Vue 就不会挂载，用户看到的是整页 {{ }} 裸模板。）
+   下面这段只在极端情况下（内置文件缺失 / 被安全软件拦截）才去试一次 CDN。 */
+(function () {
+    var need = [];
+    if (typeof Vue === 'undefined') need.push(['https://unpkg.com/vue@3/dist/vue.global.prod.js', 'Vue']);
+    if (typeof Chart === 'undefined') need.push(['https://cdn.jsdelivr.net/npm/chart.js@4', 'Chart']);
+    if (need.length) {
+        for (var i = 0; i < need.length; i++) {
+            try { document.write('<script src="' + need[i][0] + '"><\/script>'); } catch (e) {}
+        }
+    }
+})();
+</script>
 <style>
 #app { background: #fff; min-height: 100vh; }
+/* Vue 挂载完成前不显示原始模板（{{ }} 裸文本），避免 CDN 慢/失败时闪出一屏乱码 */
+[v-cloak] { display: none !important; }
 /* ── 礼物卡片（毛玻璃 + 主题色渐变）── */
 .bili-card {
     border-radius: 12px;
@@ -4411,7 +4430,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </style>
 </head>
 <body class="bg-gray-100 p-2 sm:p-4">
-<div id="app" class="max-w-6xl mx-auto" style="min-height:80vh;"><!-- 初始白屏防止闪烁 -->
+<!-- 前端加载失败时的兜底提示：宁可说清「界面没起来、后台还在跑」，也不要把 {{ }} 裸模板给用户看 -->
+<div id="bootfail" style="display:none;max-width:580px;margin:16vh auto;padding:26px 28px;border:1px solid #e5e7eb;border-radius:14px;box-shadow:0 8px 28px rgba(15,23,42,.08);font-family:'Microsoft YaHei','PingFang SC',sans-serif;color:#111827;line-height:1.75">
+    <div style="font-size:19px;font-weight:700;margin-bottom:10px">⚠️ 界面资源没能加载出来</div>
+    <p style="margin:0 0 10px;color:#374151">页面脚本组件加载失败，所以管理界面显示不出来。<b>机器人和直播间仍在后台正常运行</b>，只是这个网页没起来。</p>
+    <p style="margin:0 0 16px;color:#6b7280;font-size:13px">请先刷新重试。如果反复出现，一般是程序目录里的 <code style="background:#f3f4f6;padding:1px 5px;border-radius:4px">app/web/vendor</code> 文件缺失或被安全软件拦截，重新下载最新版即可恢复。</p>
+    <button onclick="location.reload()" style="background:#2563eb;color:#fff;border:0;border-radius:9px;padding:9px 20px;font-size:14px;cursor:pointer">刷新重试</button>
+</div>
+<div id="app" v-cloak class="max-w-6xl mx-auto" style="min-height:80vh;"><!-- 初始白屏防止闪烁 -->
 
 <!-- ══════ 登录页 ══════ -->
 <div v-if="!loggedIn" class="flex items-center justify-center min-h-[80vh] px-4">
@@ -9156,6 +9182,20 @@ createApp({
     }
 }).mount('#app');
 </script>
+<script>
+/* 启动自检：Vue 没加载 / 没挂载成功时给出明确提示（否则 v-cloak 会让页面一片空白） */
+(function () {
+    function bootFail() {
+        var app = document.getElementById('app');
+        if (app && app.__vue_app__) return;
+        var box = document.getElementById('bootfail');
+        if (box) { box.style.display = 'block'; }
+        if (app) { app.style.display = 'none'; }
+    }
+    if (typeof Vue === 'undefined') { bootFail(); return; }
+    setTimeout(bootFail, 4000);
+})();
+</script>
 </body>
 </html>
 """
@@ -9203,6 +9243,38 @@ def _figs_path(name: str) -> Path:
             return p
     p = Path(__file__).resolve().parent.parent.parent / "figs" / name
     return p
+
+
+# ── 前端第三方库（本地内置） ──
+# 以前 vue / chart.js / tailwind 都从 unpkg、jsdelivr 拉，国内网络常有连不上或超时的情况。
+# unpkg 一旦失败，Vue 根本没挂载，用户看到的就是整页「{{ }}」裸模板（v-if 也不生效），
+# 但机器人后台照常在跑 —— 所以必须本地内置，不再依赖任何 CDN。
+
+_VENDOR_MEDIA = {
+    ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+}
+
+
+def _vendor_path(name: str) -> Path:
+    """查找 app/web/vendor/ 下的前端库（冻结模式与源码模式都能找到）。"""
+    name = Path(name).name  # 只允许单层文件名，防目录穿越
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        p = Path(sys._MEIPASS) / "app" / "web" / "vendor" / name
+        if p.exists():
+            return p
+    return Path(__file__).resolve().parent / "vendor" / name
+
+
+@app.get("/vendor/{name}")
+async def vendor_asset(name: str):
+    """本地内置的前端库。名字带版本号查询串（?v=1.2.6）可放心长缓存。"""
+    p = _vendor_path(name)
+    media = _VENDOR_MEDIA.get(p.suffix, "application/octet-stream")
+    if not p.exists():
+        return Response(status_code=404)
+    return FastResponse(content=p.read_bytes(), media_type=media,
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @app.get("/figs/alipay.jpg")

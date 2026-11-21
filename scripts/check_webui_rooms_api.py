@@ -100,7 +100,7 @@ def main() -> int:
                        "api/update/check", "魔搭 ModelScope", "ModelScope".lower()):
             if needle not in html:
                 failures.append(f"首页缺少前端片段: {needle}")
-        for needle in ("api-inference.modelscope.cn/v1", "2000 次免费 API 调用"):
+        for needle in ("api-inference.modelscope.cn/v1", "2000 次/天"):
             if needle not in html:
                 failures.append(f"魔搭提示缺少内容: {needle}")
         print("page bytes:", len(html))
