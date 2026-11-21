@@ -4319,6 +4319,171 @@ INDEX_HTML = r"""<!DOCTYPE html>
     }
 })();
 </script>
+<script>
+/* ── 机器人配置模板的打包 / 套用 ──
+   机器人配置模板要带的是「机器人配置」这一整页：features（功能模板）+ keyword_reply（关键词回复）
+   + custom_fortunes（自定义签文）+ cooldown / rate_limit（冷却与限流）。
+   以前只存 roomCfg.features，同级的签文和关键词规则会被静默丢掉（issue #3），
+   于是「从房间 A 存模板 → 套到房间 B」之后 #抽签 还是默认签文、关键词规则也是空的。
+
+   老模板的 config 就是扁平的 features 本身，没有 __ayabot_bot_tpl 标记，靠它区分新旧。 */
+(function (root) {
+    var MARK = '__ayabot_bot_tpl';
+    var VER = 2;
+
+    function clone(v) { return v == null ? v : JSON.parse(JSON.stringify(v)); }
+    function isObj(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
+    function hasContent(o) { return isObj(o) && Object.keys(o).length > 0; }
+    function own(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+
+    // 签文：丢掉空串 / 空数组，别把界面上的占位值当成真实签文搬过去
+    function pruneFortunes(src) {
+        if (!isObj(src)) return null;
+        var out = {}, k, v, arr;
+        for (k in src) {
+            if (!own(src, k)) continue;
+            v = src[k];
+            if (Array.isArray(v)) {
+                arr = v.filter(function (t) { return t != null && String(t).trim() !== ''; });
+                if (arr.length) out[k] = arr;
+            } else if (typeof v === 'string' && v.trim() !== '') {
+                out[k] = v;
+            }
+        }
+        return hasContent(out) ? out : null;
+    }
+
+    // 关键词规则：统一成后端格式（keywords / allowed_uids 数组），丢掉界面专用的 xxxStr
+    function normaliseKeywordReply(src) {
+        if (!isObj(src)) return null;
+        var rules = Array.isArray(src.rules) ? src.rules : [], outRules = [], i, r, kws, uids;
+        for (i = 0; i < rules.length; i++) {
+            r = rules[i] || {};
+            kws = Array.isArray(r.keywords)
+                ? r.keywords
+                : String(r.keywordsStr || '').split(/[,，]\s*/);
+            kws = kws.map(function (s) { return String(s).trim(); }).filter(Boolean);
+            if (!kws.length) continue;
+            uids = Array.isArray(r.allowed_uids)
+                ? r.allowed_uids
+                : String(r.allowedUidsStr || '').split(/[,，]\s*/).map(function (s) { return Number(String(s).trim()); });
+            uids = uids.filter(function (n) { return typeof n === 'number' && isFinite(n) && n > 0; });
+            outRules.push({
+                keywords: kws,
+                reply: r.reply || '',
+                match_mode: r.match_mode || 'contains',
+                allowed_uids: uids.length ? uids : null,
+            });
+        }
+        if (!outRules.length) return null;
+        return { enabled: !!src.enabled, cooldown: (src.cooldown == null ? 30 : src.cooldown), rules: outRules };
+    }
+
+    // 房间配置 -> 模板 payload
+    function pack(roomCfg) {
+        var cfg = roomCfg || {};
+        var features = clone(cfg.features) || {};
+        var kr = cfg.keyword_reply;
+        if (!kr && features.keyword_reply) {  // 极老配置把关键词规则塞在 features 里
+            kr = features.keyword_reply;
+            delete features.keyword_reply;
+        }
+        var out = {};
+        out[MARK] = VER;
+        out.features = features;
+        var nkr = normaliseKeywordReply(kr);
+        if (nkr) out.keyword_reply = nkr;
+        var cf = pruneFortunes(cfg.custom_fortunes);
+        if (cf) out.custom_fortunes = cf;
+        if (hasContent(cfg.cooldown)) out.cooldown = clone(cfg.cooldown);
+        if (hasContent(cfg.rate_limit)) out.rate_limit = clone(cfg.rate_limit);
+        return out;
+    }
+
+    // 模板 payload -> 各段落（老模板：整个 config 就是 features）
+    function unpack(tplConfig) {
+        var c = tplConfig || {};
+        if (c[MARK] !== VER) return { legacy: true, features: clone(c) || {} };
+        return {
+            legacy: false,
+            features: clone(c.features) || {},
+            keyword_reply: clone(c.keyword_reply) || null,
+            custom_fortunes: clone(c.custom_fortunes) || null,
+            cooldown: clone(c.cooldown) || null,
+            rate_limit: clone(c.rate_limit) || null,
+        };
+    }
+
+    // 套用到编辑中的 roomConfig：空段落不覆盖目标房间已有配置（避免空模板清空别人的规则）
+    function applyToEditor(roomCfg, tplConfig) {
+        var p = unpack(tplConfig);
+        var feats = p.features || {};
+        var cur = roomCfg.features || (roomCfg.features = {});
+        var k;
+        for (k in feats) {
+            if (!own(feats, k)) continue;
+            if (k === 'welcome_templates_for_uids') {
+                cur.welcome_templates_for_uids = clone(feats[k]);
+                cur.welcome_templates_for_uids_entries = Object.entries(feats[k] || {})
+                    .map(function (e) { return { uid: Number(e[0]), template: e[1] }; });
+            } else {
+                cur[k] = clone(feats[k]);
+            }
+        }
+        if (!p.legacy) {
+            if (p.keyword_reply) {
+                roomCfg.keyword_reply = clone(p.keyword_reply);
+                roomCfg.keyword_reply.rules = (p.keyword_reply.rules || []).map(function (r) {
+                    return Object.assign({}, r, {
+                        keywordsStr: (r.keywords || []).join(', '),
+                        allowedUidsStr: (r.allowed_uids || []).join(', '),
+                    });
+                });
+            }
+            if (p.custom_fortunes) roomCfg.custom_fortunes = clone(p.custom_fortunes);
+            if (p.cooldown) roomCfg.cooldown = Object.assign({}, roomCfg.cooldown || {}, clone(p.cooldown));
+            if (p.rate_limit) roomCfg.rate_limit = Object.assign({}, roomCfg.rate_limit || {}, clone(p.rate_limit));
+        }
+        return roomCfg;
+    }
+
+    // 套用成「保存房间配置」的请求体（新建房间时直接 POST 它）
+    function toSaveBody(tplConfig) {
+        var p = unpack(tplConfig);
+        if (p.legacy) return { features: p.features || {} };
+        var body = {};
+        if (hasContent(p.features)) body.features = p.features;
+        if (p.keyword_reply) body.keyword_reply = p.keyword_reply;
+        if (hasContent(p.custom_fortunes)) body.custom_fortunes = p.custom_fortunes;
+        if (hasContent(p.cooldown)) body.cooldown = p.cooldown;
+        if (hasContent(p.rate_limit)) body.rate_limit = p.rate_limit;
+        return body;
+    }
+
+    // 模板摘要：列表里显示「N 项功能 · 签文 M 条 · 关键词 K 条」
+    function summary(tplConfig) {
+        var p = unpack(tplConfig);
+        var feats = p.features || {}, nFeat = 0, nF = 0, k;
+        for (k in feats) { if (own(feats, k)) nFeat++; }
+        var cf = p.custom_fortunes || {};
+        for (k in cf) {
+            if (!own(cf, k)) continue;
+            nF += Array.isArray(cf[k]) ? cf[k].length : (cf[k] ? 1 : 0);
+        }
+        return {
+            features: nFeat,
+            fortunes: nF,
+            keywords: (p.keyword_reply && p.keyword_reply.rules ? p.keyword_reply.rules.length : 0),
+            legacy: p.legacy,
+        };
+    }
+
+    root.AyabotBotTpl = {
+        pack: pack, unpack: unpack, applyToEditor: applyToEditor,
+        toSaveBody: toSaveBody, summary: summary, MARK: MARK, VER: VER,
+    };
+})(window);
+</script>
 <style>
 #app { background: #fff; min-height: 100vh; }
 /* Vue 挂载完成前不显示原始模板（{{ }} 裸文本），避免 CDN 慢/失败时闪出一屏乱码 */
@@ -5937,7 +6102,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <div v-for="(t, ti) in botTemplates" :key="ti" class="border rounded p-3 flex items-center justify-between mb-2">
                 <div>
                     <span class="font-bold text-sm">{{ t.name }}</span>
-                    <span class="text-xs text-gray-400 ml-2">{{ Object.keys(t.config).length }} 项配置</span>
+                    <span class="text-xs text-gray-400 ml-2">{{ botTplSummaryText(t.config) }}</span>
                 </div>
                 <button @click="deleteTemplate('bot', t.name)" class="bg-red-50 hover:bg-red-100 text-red-500 px-3 py-1 rounded text-xs font-medium">删除</button>
             </div>
@@ -8161,7 +8326,8 @@ createApp({
                         }
                         if (newRoomBotTemplate.value) {
                             const tpl = (tplData.bot_templates || []).find(t => t.name === newRoomBotTemplate.value);
-                            if (tpl) body.features = tpl.config;
+                            // 新版模板带签文/关键词/冷却限流，老模板只有扁平的 features
+                            if (tpl) Object.assign(body, window.AyabotBotTpl.toSaveBody(tpl.config));
                         }
                         if (Object.keys(body).length) {
                             await fetch(`/api/rooms/${data.room_id}/config`, {
@@ -9005,7 +9171,8 @@ createApp({
                         config.api_key = llmApiKeyReal.value;
                     }
                 } else {
-                    config = roomCfg.features || {};
+                    // 机器人模板：不能只存 features —— 签文 / 关键词规则 / 冷却限流都在同级的其他字段里
+                    config = window.AyabotBotTpl.pack(roomCfg);
                 }
                 const res = await fetch('/api/templates', {
                     method: 'POST',
@@ -9090,19 +9257,20 @@ createApp({
         async function applyTemplateToBot() {
             const tpl = botTemplates.value.find(t => t.name === applyBotTemplate.value);
             if (!tpl || !roomConfig.value) return;
-            const c = tpl.config;
-            // 套用到 roomConfig（注意先转成 entries 格式）
-            for (const key of Object.keys(c)) {
-                if (key === 'welcome_templates_for_uids') {
-                    roomConfig.value.features.welcome_templates_for_uids_entries = Object.entries(c[key] || {}).map(([uid, tmpl]) => ({uid: Number(uid), template: tmpl}));
-                } else {
-                    roomConfig.value.features[key] = c[key];
-                }
-            }
+            // features / 关键词规则 / 签文 / 冷却限流一起套；老模板只带 features 也能用
+            window.AyabotBotTpl.applyToEditor(roomConfig.value, tpl.config);
             applyBotTemplate.value = '';
             applyTemplateMsg.value = '✅ 已套用模板，请点击保存';
             applyTemplateOk.value = true;
             setTimeout(() => { applyTemplateMsg.value = ''; }, 5000);
+        }
+        function botTplSummaryText(cfg) {
+            const s = window.AyabotBotTpl.summary(cfg || {});
+            const parts = [`${s.features} 项功能`];
+            if (s.fortunes) parts.push(`签文 ${s.fortunes} 条`);
+            if (s.keywords) parts.push(`关键词 ${s.keywords} 条`);
+            if (s.legacy) parts.push('旧版模板');
+            return parts.join(' · ');
         }
 
         return {showUpdateModal, updateChecking, updateError, updateData, checkUpdate, viewChangelog, showChangelog, changelogContent, renderMarkdown,
@@ -9177,7 +9345,7 @@ createApp({
                 restartingAll, restartAllMsg, restartAllOk,
                 loadTemplates, saveTemplate, deleteTemplate, restartAllBots, restartSingleBot,
                 applyLlmTemplate, applyBotTemplate, applyTemplateMsg, applyTemplateOk,
-                applyTemplateToLlm, applyTemplateToBot,
+                applyTemplateToLlm, applyTemplateToBot, botTplSummaryText,
                 configSections, toggleSection};
     }
 }).mount('#app');
