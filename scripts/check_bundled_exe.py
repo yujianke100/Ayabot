@@ -35,7 +35,9 @@ EXPECTED_STRINGS = {
                        # v1.2.5: AI 页的魔搭一键填入 + 新建房间走新的模板查找
                        "applyModelScope", "find_template_config", "write_default_config",
                        # v1.2.6: 前端库改为本地内置（CDN 挂了也不至于整页 {{ }} 裸模板）
-                       "/vendor/", "_vendor_path", "vendor_asset", "bootfail"),
+                       "/vendor/", "_vendor_path", "vendor_asset", "bootfail",
+                       # v1.2.7: 机器人配置模板带全同级字段（签文 / 关键词规则 / 冷却限流）
+                       "AyabotBotTpl", "__ayabot_bot_tpl", "botTplSummaryText"),
     "app.auth": ("auth_status.json", "needs_login"),
     # v1.2.5: 新建房间不再依赖根目录模板（多路径查找 + 内置默认值兜底）
     "app.config": ("find_template_config", "write_default_config"),
