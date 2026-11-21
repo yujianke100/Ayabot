@@ -24,11 +24,11 @@ def _make_ico(png_path: Path) -> Path | None:
 
 
 def _load_version() -> str:
-    """从项目根目录 VERSION 文件读取版本号。"""
+    """从项目根目录 VERSION 文件读取版本号（文件带 BOM，必须用 utf-8-sig）。"""
     base_dir = Path(__file__).resolve().parent.parent
     ver_file = base_dir / "VERSION"
     if ver_file.exists():
-        return ver_file.read_text(encoding="utf-8").strip()
+        return ver_file.read_text(encoding="utf-8-sig").strip().lstrip("\ufeff")
     return ""
 
 

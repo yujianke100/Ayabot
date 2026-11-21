@@ -76,11 +76,13 @@ def main(exe_path: str) -> int:
     print(f"PYZ 模块数: {len(names)}")
 
     # v1.2.6: 前端库必须真的打进 exe —— 缺了用户打开网页只会看到「界面资源没能加载出来」
+    # PyInstaller 的 TOC 键在 Windows 上可能是反斜杠，统一成正斜杠再比。
+    toc_norm = {k.replace("\\", "/") for k in arch.toc}
     for asset in ("app/web/vendor/vue.global.prod.js",
                   "app/web/vendor/chart.umd.min.js",
                   "app/web/vendor/tailwind.js",
                   "app/web/vendor/modern-screenshot.js"):
-        ok = asset in arch.toc
+        ok = asset in toc_norm
         print(f"  {'OK ' if ok else 'MISS'} 资源 {asset}")
         if not ok:
             failures.append(f"缺少资源 {asset}")
