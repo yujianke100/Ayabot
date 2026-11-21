@@ -14,5 +14,6 @@ build
 dist
 *.spec
 *.ico
+build_version_info.txt
 test_*.py
 webui.log.err
