@@ -488,13 +488,51 @@ def _rate_limited(ip: str) -> bool:
 
 _GIFT_ICON_CACHE: dict[int, str] = {}
 _GIFT_NAME_CACHE: dict[str, str] = {}
+_GIFT_PRICE_CACHE: dict[str, tuple[int, str]] = {}   # 礼物名 → (单价, 币种)；导入历史数据时用于估算金额
 _GIFT_CACHE_BUILT = False
+_GIFT_PRICE_PATH = "data/gift_prices.json"           # 相对 _ROOMS_BASE_DIR，缓存一份供离线导入用
+
+
+def _gift_price_file() -> Path:
+    return Path(_ROOMS_BASE_DIR).resolve() / _GIFT_PRICE_PATH
+
+
+def _load_gift_prices_from_disk() -> dict[str, tuple[int, str]]:
+    p = _gift_price_file()
+    if not p.exists():
+        return {}
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    out: dict[str, tuple[int, str]] = {}
+    for name, val in (raw.get("prices") or {}).items():
+        try:
+            price, coin = val
+            out[str(name)] = (int(price), str(coin))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _save_gift_prices_to_disk(prices: dict[str, tuple[int, str]]) -> None:
+    try:
+        p = _gift_price_file()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(
+            {"updated_at": int(time.time()),
+             "prices": {k: [v[0], v[1]] for k, v in prices.items()}},
+            ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:  # 缓存写不进去不影响主流程
+        logger.warning("save gift prices failed: %s", exc)
 
 
 async def _build_gift_cache() -> None:
-    global _GIFT_ICON_CACHE, _GIFT_NAME_CACHE, _GIFT_CACHE_BUILT
+    global _GIFT_ICON_CACHE, _GIFT_NAME_CACHE, _GIFT_PRICE_CACHE, _GIFT_CACHE_BUILT
     if _GIFT_CACHE_BUILT:
         return
+    if not _GIFT_PRICE_CACHE:
+        _GIFT_PRICE_CACHE = _load_gift_prices_from_disk()
     try:
         data = await asyncio.wait_for(live.get_gift_config(), timeout=8)
     except asyncio.TimeoutError:
@@ -508,10 +546,14 @@ async def _build_gift_cache() -> None:
 
     cache_id: dict[int, str] = {}
     cache_name: dict[str, str] = {}
+    prices: dict[str, tuple[int, str]] = {}
     for g in data.get("list", []):
         gid = _safe_int(g.get("id"))
         name = g.get("name", "")
         icon = g.get("img_basic") or ""
+        if name:
+            # 价格与图标无关：免费/无图礼物也要能算金额
+            prices[name] = (_safe_int(g.get("price")), str(g.get("coin_type") or "gold"))
         if not icon:
             continue
         if gid > 0:
@@ -520,8 +562,12 @@ async def _build_gift_cache() -> None:
             cache_name[name] = icon
     _GIFT_ICON_CACHE = cache_id
     _GIFT_NAME_CACHE = cache_name
+    if prices:
+        _GIFT_PRICE_CACHE = prices
+        _save_gift_prices_to_disk(prices)
     _GIFT_CACHE_BUILT = True
-    logger.info("gift cache built: %d by id, %d by name", len(cache_id), len(cache_name))
+    logger.info("gift cache built: %d by id, %d by name, %d prices",
+                len(cache_id), len(cache_name), len(prices))
 
 
 async def _ensure_gift_cache() -> None:
@@ -3581,6 +3627,192 @@ async def api_room_export_all(
         return []
 
 
+@app.post("/api/rooms/{room_id}/import/danmaku-xml")
+async def api_import_danmaku_xml(room_id: str, request: Request):
+    """从录播弹幕 XML 补历史礼物 / 上舰数据。
+
+    body 直接是 XML 文件内容（不走 multipart，省掉 python-multipart 依赖）。
+    查询参数：
+      dry_run=1       只预检，不写库
+      skip_overlap=1  与已实时记录的事件重合（±3 秒）时跳过，避免重复计数
+    """
+    from app.config import get_room_path
+    from app.danmaku_xml import DanmakuXmlError, build_plan, parse_danmaku_xml
+    from app.storage import StatsStore
+
+    _, role, _ = _get_current_role(request)
+    if role != "admin":
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    room_dir = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR)
+    if not (room_dir / "config.yaml").exists():
+        return JSONResponse({"error": "房间不存在"}, status_code=404)
+
+    raw = await request.body()
+    if not raw:
+        return JSONResponse({"error": "没有收到文件内容"}, status_code=400)
+
+    filename = (request.headers.get("X-Filename") or "").strip()
+    filename = Path(filename).name or "danmaku.xml"
+    # source 会写进数据库并用于撤销，做个长度与字符收敛
+    safe_name = "".join(ch for ch in filename if ch.isprintable())[:120]
+    source = f"xml:{safe_name}"
+
+    try:
+        parsed = parse_danmaku_xml(raw, safe_name)
+    except DanmakuXmlError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # 解析崩溃也不要把 500 抛给用户
+        logger.warning("import xml parse failed: %s", exc)
+        return {"ok": False, "error": f"解析失败：{exc}"}
+
+    if not _GIFT_PRICE_CACHE:
+        try:
+            await asyncio.wait_for(_build_gift_cache(), timeout=12)
+        except Exception:
+            pass
+    price_map = dict(_GIFT_PRICE_CACHE) or _load_gift_prices_from_disk()
+
+    plan = build_plan(parsed, price_map, source)
+    stats = dict(plan.stats)
+
+    dry_run = request.query_params.get("dry_run") in ("1", "true", "yes")
+    skip_overlap = request.query_params.get("skip_overlap") in ("1", "true", "yes")
+
+    db_path = _room_db_path(room_id)
+    store = StatsStore(str(db_path))
+    try:
+        # 重叠检测：同一时间段若已被实时记录过，提醒用户（导入会重复计算）
+        overlap = 0
+        overlap_guards = 0
+        live_idx: dict[tuple[int, str, int], list[int]] = {}
+        guard_seen: list[tuple[int, int, int]] = []
+        if stats.get("start_ts") and stats.get("end_ts"):
+            lo, hi = stats["start_ts"] - 5, stats["end_ts"] + 5
+            live_idx = store.live_gift_index(lo, hi)
+            guard_seen = store.guard_times(lo, hi)
+            for ev, _key in plan.gifts:
+                ts_list = live_idx.get((ev.uid, ev.gift_name, ev.gift_num)) or []
+                if any(abs(t - ev.ts) <= 3 for t in ts_list):
+                    overlap += 1
+            for g in plan.guards:
+                if any(uid == g["uid"] and lv == g["guard_level"] and abs(t - g["ts"]) <= 120
+                       for uid, lv, t in guard_seen):
+                    overlap_guards += 1
+        stats["overlap_gifts"] = overlap
+        stats["overlap_guards"] = overlap_guards
+        stats["source"] = source
+
+        if dry_run:
+            # 预检再算一遍"真正会新增多少"（重复导入时这个数字会是 0）
+            new_gifts = 0
+            for ev, key in plan.gifts:
+                skip = False
+                if skip_overlap and overlap:
+                    ts_list = live_idx.get((ev.uid, ev.gift_name, ev.gift_num)) or []
+                    skip = any(abs(t - ev.ts) <= 3 for t in ts_list)
+                if skip:
+                    continue
+                exists = store._conn.execute(
+                    "SELECT 1 FROM gift_events WHERE dedupe_key = ? LIMIT 1", (key,)).fetchone()
+                if not exists:
+                    new_gifts += 1
+            stats["would_insert"] = new_gifts
+            return {"ok": True, "dry_run": True, "stats": stats}
+
+        inserted = 0
+        skipped_dup = 0
+        skipped_overlap = 0
+        for ev, key in plan.gifts:
+            if skip_overlap:
+                ts_list = live_idx.get((ev.uid, ev.gift_name, ev.gift_num)) or []
+                if any(abs(t - ev.ts) <= 3 for t in ts_list):
+                    skipped_overlap += 1
+                    continue
+            if store.record_gift_event(ev, dedupe_key=key, source=source, commit=False):
+                inserted += 1
+            else:
+                skipped_dup += 1
+        store._conn.commit()
+
+        guards_in = 0
+        for g in plan.guards:
+            if skip_overlap and any(
+                    uid == g["uid"] and lv == g["guard_level"] and abs(t - g["ts"]) <= 120
+                    for uid, lv, t in guard_seen):
+                continue
+            if store.record_guard_event(**g):
+                guards_in += 1
+
+        stats.update({
+            "inserted": inserted,
+            "skipped_duplicate": skipped_dup,
+            "skipped_overlap": skipped_overlap,
+            "guards_inserted": guards_in,
+        })
+        logger.info("import xml: room=%s file=%s gifts=%d dup=%d guards=%d",
+                    room_id, safe_name, inserted, skipped_dup, guards_in)
+        return {"ok": True, "dry_run": False, "stats": stats}
+    except Exception as exc:
+        logger.warning("import xml failed: %s", exc)
+        return JSONResponse({"ok": False, "error": f"写入失败：{exc}"}, status_code=500)
+    finally:
+        try:
+            store._conn.close()
+        except Exception:
+            pass
+
+
+@app.get("/api/rooms/{room_id}/imports")
+async def api_list_imports(room_id: str, request: Request):
+    """已导入的历史数据批次（可撤销）。"""
+    from app.storage import StatsStore
+
+    _, role, _ = _get_current_role(request)
+    if role != "admin":
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return {"imports": []}
+    store = StatsStore(str(db_path))
+    try:
+        return {"imports": store.list_import_sources()}
+    finally:
+        try:
+            store._conn.close()
+        except Exception:
+            pass
+
+
+@app.delete("/api/rooms/{room_id}/imports")
+async def api_delete_import(room_id: str, request: Request):
+    """撤销一次导入：删掉该批次写入的礼物与上舰记录，并把月度聚合扣回去。"""
+    from app.storage import StatsStore
+
+    _, role, _ = _get_current_role(request)
+    if role != "admin":
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    source = request.query_params.get("source", "").strip()
+    if not source.startswith("xml:"):
+        return JSONResponse({"error": "source 不合法"}, status_code=400)
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return {"ok": False, "error": "数据库不存在"}
+    store = StatsStore(str(db_path))
+    try:
+        result = store.delete_gift_events_by_source(source)
+        logger.info("undo import: room=%s source=%s deleted=%s guards=%s",
+                    room_id, source, result["deleted"], result["guard_deleted"])
+        return {"ok": True, **result}
+    finally:
+        try:
+            store._conn.close()
+        except Exception:
+            pass
+
+
 @app.post("/api/rooms/{room_id}/delete_old")
 async def api_room_delete_old(room_id: str, request: Request):
     """删除指定房间的旧数据. data_type: 'gift' | 'danmaku' | 'all'."""
@@ -5933,6 +6165,94 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <div v-if="apiMsg" class="mt-2 text-sm" :class="apiMsgOk ? 'text-green-600' : 'text-red-500'">{{ apiMsg }}</div>
             </div>
 
+            <!-- 历史数据导入（录播弹幕 XML） -->
+            <div id="xmlImportPanel" class="bg-white p-4 sm:p-6 rounded-xl shadow-sm">
+                <h2 class="text-lg font-bold mb-1">📥 导入历史数据</h2>
+                <p class="text-xs text-gray-500 mb-1">
+                    用录播工具（如录播姬 BililiveRecorder）保存的弹幕 <b>.xml</b> 补历史送礼排行与上舰记录。
+                    机器人只能记录运行期间的礼物，这里可以把以前的场次补进来。
+                </p>
+                <p class="text-xs text-amber-600 mb-3">
+                    建议先点「预检」看清楚会导入什么，确认后再导入。同一份文件重复导入不会重复计数，导入后也可以整批撤销。
+                </p>
+                <div class="flex flex-col sm:flex-row sm:items-center gap-2 flex-wrap">
+                    <input type="file" accept=".xml,text/xml,application/xml" multiple ref="xmlFileInput"
+                           @change="onXmlFilesPicked"
+                           class="text-xs border rounded p-1.5 w-full sm:w-auto sm:max-w-xs file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-blue-50 file:text-blue-600">
+                    <label class="text-xs text-gray-600 flex items-center gap-1 whitespace-nowrap">
+                        <input type="checkbox" v-model="xmlSkipOverlap" class="w-4 h-4">
+                        跳过与实时记录重叠的部分
+                    </label>
+                    <button @click="xmlDryRun" :disabled="xmlBusy || !xmlFiles.length"
+                            class="bg-gray-200 hover:bg-gray-300 disabled:opacity-50 text-gray-700 px-3 py-2 rounded text-sm whitespace-nowrap">
+                        {{ xmlBusy ? '处理中...' : '🔍 预检' }}
+                    </button>
+                    <button @click="xmlDoImport" :disabled="xmlBusy || !xmlPreview.length"
+                            class="bg-blue-500 hover:bg-blue-600 disabled:bg-blue-300 text-white px-4 py-2 rounded text-sm whitespace-nowrap">
+                        导入
+                    </button>
+                    <span v-if="xmlFiles.length" class="text-xs text-gray-400">已选 {{ xmlFiles.length }} 个文件</span>
+                </div>
+
+                <div v-if="xmlError" class="mt-3 text-sm text-red-500">{{ xmlError }}</div>
+
+                <!-- 预检结果 -->
+                <div v-if="xmlPreview.length" class="mt-3 space-y-2">
+                    <div v-for="(p, i) in xmlPreview" :key="i" class="border rounded p-3 text-xs">
+                        <div class="flex items-center justify-between gap-2 flex-wrap">
+                            <span class="font-bold text-sm break-all">{{ p.name }}</span>
+                            <span v-if="!p.ok" class="text-red-500">❌ {{ p.error }}</span>
+                            <span v-else-if="p.stats.overlap_gifts || p.stats.overlap_guards" class="text-amber-600">
+                                ⚠️ 与已有实时记录重合 {{ p.stats.overlap_gifts }} 条礼物
+                                <template v-if="p.stats.overlap_guards">、{{ p.stats.overlap_guards }} 条上舰</template>
+                            </span>
+                            <span v-else class="text-green-600">✅ 可以导入</span>
+                        </div>
+                        <div v-if="p.ok" class="mt-2 grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1 text-gray-600">
+                            <span>时间段：{{ fmtRange(p.stats) }}</span>
+                            <span>礼物：{{ p.stats.gifts }} 条 / {{ p.stats.gift_num }} 件</span>
+                            <span>上舰：{{ p.stats.guards }} 条</span>
+                            <span>盲盒：{{ p.stats.blindbox }} 条</span>
+                            <span>礼物金额：约 {{ p.stats.value_yuan }} 元</span>
+                            <span>上舰金额：约 {{ p.stats.guard_value_yuan }} 元</span>
+                            <span v-if="p.stats.would_insert !== undefined">将新增：{{ p.stats.would_insert }} 条</span>
+                            <span v-if="p.stats.dropped_no_uid">无 UID 丢弃：{{ p.stats.dropped_no_uid }} 条</span>
+                            <span v-if="p.stats.unknown_price_events" class="text-amber-600">
+                                未识别价格的礼物：{{ p.stats.unknown_price_events }} 条
+                            </span>
+                        </div>
+                        <div v-if="p.ok && p.stats.unknown_price_names && p.stats.unknown_price_names.length"
+                             class="mt-1 text-[11px] text-amber-600 break-all">
+                            这些礼物查不到价格，数量照常记、金额记 0：{{ p.stats.unknown_price_names.join('、') }}
+                        </div>
+                        <div v-for="(w, wi) in (p.ok ? (p.stats.warnings || []) : [])" :key="wi"
+                             class="mt-1 text-[11px] text-amber-600">💡 {{ w }}</div>
+                    </div>
+                </div>
+
+                <div v-if="xmlMsg" class="mt-3 text-sm" :class="xmlMsgOk ? 'text-green-600' : 'text-red-500'">{{ xmlMsg }}</div>
+
+                <!-- 已导入批次 -->
+                <div class="mt-4 pt-3 border-t">
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-bold text-gray-600">已导入的记录</span>
+                        <button @click="loadXmlImports" class="text-xs text-blue-500 hover:underline">刷新</button>
+                    </div>
+                    <div v-if="!xmlImports.length" class="text-xs text-gray-400 py-2">还没有导入过历史数据</div>
+                    <div v-for="imp in xmlImports" :key="imp.source"
+                         class="flex items-center justify-between gap-2 py-1.5 border-b last:border-0 text-xs">
+                        <div class="min-w-0">
+                            <div class="font-medium truncate">{{ imp.name }}</div>
+                            <div class="text-gray-400">
+                                {{ imp.gift_events }} 条礼物<template v-if="imp.guard_events">、{{ imp.guard_events }} 条上舰</template>
+                                · {{ fmtDay(imp.first_ts) }}<template v-if="fmtDay(imp.last_ts) !== fmtDay(imp.first_ts)"> ~ {{ fmtDay(imp.last_ts) }}</template>
+                            </div>
+                        </div>
+                        <button @click="xmlUndoImport(imp)" class="bg-red-50 hover:bg-red-100 text-red-600 px-2.5 py-1 rounded whitespace-nowrap">撤销</button>
+                    </div>
+                </div>
+            </div>
+
             <!-- 数据删除 -->
             <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm">
                 <h2 class="text-lg font-bold mb-4 text-red-600">⚠️ 数据管理</h2>
@@ -7188,6 +7508,9 @@ createApp({
         }
         function selectRoomSubTab(key) {
             roomSubTab.value = key;
+            if (key === 'manage' && selectedRoom.value) {
+                loadXmlImports();
+            }
             if ((key === 'config' || key === 'llm') && selectedRoom.value) {
                 editRoomConfig(selectedRoom.value.room_id);
             }
@@ -7810,6 +8133,144 @@ createApp({
                 if (data.deleted_danmaku > 0) parts.push(`${data.deleted_danmaku} 条弹幕`);
                 delResult.value = parts.length ? `已删除 ${parts.join('、')}` : '没有需要删除的数据';
             } catch(e) { delResult.value = '删除失败: ' + e.message; }
+        }
+
+        // ── 历史数据导入（录播弹幕 XML） ──
+        const xmlFiles = ref([]);
+        const xmlBusy = ref(false);
+        const xmlPreview = ref([]);
+        const xmlMsg = ref('');
+        const xmlMsgOk = ref(false);
+        const xmlError = ref('');
+        const xmlImports = ref([]);
+        const xmlSkipOverlap = ref(true);
+
+        function onXmlFilesPicked(e) {
+            xmlFiles.value = Array.from(e.target.files || []);
+            xmlPreview.value = [];
+            xmlMsg.value = '';
+            xmlError.value = '';
+        }
+        function fmtDay(ts) {
+            if (!ts) return '';
+            const d = new Date(ts * 1000);
+            return `${d.getMonth() + 1}月${d.getDate()}日`;
+        }
+        function fmtRange(stats) {
+            const a = stats?.start_ts, b = stats?.end_ts;
+            if (!a) return '未知';
+            const d = new Date(a * 1000);
+            const pad = (n) => String(n).padStart(2, '0');
+            const head = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+            return stats.start_ts === stats.end_ts ? head : `${head} 起`;
+        }
+        async function xmlUpload(file, dryRun) {
+            const rid = selectedRoom.value?.room_id;
+            if (!rid) return null;
+            const qs = `?dry_run=${dryRun ? 1 : 0}&skip_overlap=${xmlSkipOverlap.value ? 1 : 0}`;
+            const res = await fetch(`/api/rooms/${rid}/import/danmaku-xml${qs}`, {
+                method: 'POST',
+                credentials: 'include',
+                // 直接把文件当请求体：后端自己解析，不依赖 multipart
+                headers: {'X-Filename': file.name, 'Content-Type': 'application/xml'},
+                body: file,
+            });
+            if (res.status === 401) { loggedIn.value = false; return null; }
+            const text = await res.text();
+            try { return JSON.parse(text); }
+            catch (e) { return {ok: false, error: (text || res.status).toString().slice(0, 200)}; }
+        }
+        async function xmlDryRun() {
+            if (!xmlFiles.value.length) return;
+            xmlBusy.value = true;
+            xmlError.value = '';
+            xmlMsg.value = '';
+            xmlPreview.value = [];
+            try {
+                for (const f of xmlFiles.value) {
+                    const data = await xmlUpload(f, true);
+                    if (!data) return;
+                    xmlPreview.value.push({
+                        name: f.name,
+                        ok: !!data.ok,
+                        error: data.error || '',
+                        stats: data.stats || {},
+                    });
+                }
+                if (!xmlPreview.value.some((p) => p.ok)) {
+                    xmlError.value = '这些文件都没法导入，原因见上面。';
+                }
+            } catch (e) {
+                xmlError.value = '预检失败: ' + e.message;
+            } finally { xmlBusy.value = false; }
+        }
+        async function xmlDoImport() {
+            if (!xmlPreview.value.length) return;
+            const okOnes = xmlPreview.value.filter((p) => p.ok);
+            if (!okOnes.length) { xmlError.value = '没有可以导入的文件'; return; }
+            const totalGifts = okOnes.reduce((s, p) => s + (p.stats.gifts || 0), 0);
+            const totalGuards = okOnes.reduce((s, p) => s + (p.stats.guards || 0), 0);
+            if (!confirm(`确定导入 ${okOnes.length} 个文件？\n共 ${totalGifts} 条礼物、${totalGuards} 条上舰记录。\n导入后可以在这里整批撤销。`)) return;
+            xmlBusy.value = true;
+            xmlMsg.value = '';
+            xmlError.value = '';
+            let gifts = 0, guards = 0, dup = 0, skipped = 0, failed = 0;
+            try {
+                for (const p of okOnes) {
+                    const f = xmlFiles.value.find((x) => x.name === p.name);
+                    if (!f) continue;
+                    const data = await xmlUpload(f, false);
+                    if (!data || !data.ok) { failed++; continue; }
+                    const st = data.stats || {};
+                    gifts += st.inserted || 0;
+                    guards += st.guards_inserted || 0;
+                    dup += st.skipped_duplicate || 0;
+                    skipped += st.skipped_overlap || 0;
+                }
+                const parts = [`新增 ${gifts} 条礼物`];
+                if (guards) parts.push(`${guards} 条上舰`);
+                if (dup) parts.push(`跳过重复 ${dup} 条`);
+                if (skipped) parts.push(`跳过重叠 ${skipped} 条`);
+                if (failed) parts.push(`${failed} 个文件失败`);
+                xmlMsg.value = '✅ 导入完成：' + parts.join('、');
+                xmlMsgOk.value = failed === 0;
+                // 只清预检结果、保留已选文件：用户想再确认一次「重复导入不会重复计数」时直接点预检即可
+                xmlPreview.value = [];
+                await loadXmlImports();
+            } catch (e) {
+                xmlMsg.value = '导入失败: ' + e.message;
+                xmlMsgOk.value = false;
+            } finally { xmlBusy.value = false; }
+        }
+        async function loadXmlImports() {
+            const rid = selectedRoom.value?.room_id;
+            if (!rid) return;
+            try {
+                const res = await fetch(`/api/rooms/${rid}/imports`, {credentials: 'include'});
+                if (!res.ok) return;
+                const data = await res.json();
+                xmlImports.value = data.imports || [];
+            } catch (e) { /* ignore */ }
+        }
+        async function xmlUndoImport(imp) {
+            const rid = selectedRoom.value?.room_id;
+            if (!rid) return;
+            if (!confirm(`撤销「${imp.name}」这次导入？\n会删除它写入的 ${imp.gift_events} 条礼物` +
+                         (imp.guard_events ? `、${imp.guard_events} 条上舰` : '') + '，并同步扣回月度统计。\n此操作不可恢复。')) return;
+            try {
+                const res = await fetch(`/api/rooms/${rid}/imports?source=${encodeURIComponent(imp.source)}`, {
+                    method: 'DELETE', credentials: 'include',
+                });
+                const data = await res.json();
+                if (!res.ok || !data.ok) throw new Error(data.error || res.status);
+                xmlMsg.value = `✅ 已撤销，删除 ${data.deleted} 条礼物` +
+                               (data.guard_deleted ? `、${data.guard_deleted} 条上舰` : '');
+                xmlMsgOk.value = true;
+                await loadXmlImports();
+            } catch (e) {
+                xmlMsg.value = '撤销失败: ' + e.message;
+                xmlMsgOk.value = false;
+            }
         }
 
         // ── 房间 API 配置 ──
@@ -9293,6 +9754,9 @@ createApp({
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
+                xmlFiles, xmlBusy, xmlPreview, xmlMsg, xmlMsgOk, xmlError, xmlImports,
+                xmlSkipOverlap, onXmlFilesPicked, xmlDryRun, xmlDoImport,
+                loadXmlImports, xmlUndoImport, fmtDay, fmtRange,
                 roomApiEnabled, roomApiUrl, roomApiFullKey, roomApiBusy,
                 apiMsg, apiMsgOk, loadRoomApiConfig, toggleRoomApi, regenerateRoomApiKey, copyText,
                 danmakuRows, danmakuErr, danmakuOffset, danmakuLimit, danmakuTotal, danmakuPage,

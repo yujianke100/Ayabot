@@ -47,6 +47,8 @@ def main() -> None:
 
     cfg_path = prepare()
     srv.init_app(load_config(cfg_path), config_path=cfg_path)
+    # 预览用：关掉 IP 限流（自动化截图/回归会短时间内打很多请求，正式运行不受影响）
+    srv._rate_limited = lambda ip: False  # type: ignore[assignment]
     print(f"preview: http://127.0.0.1:{PORT}/  账号 {USER} / 密码 {PASS}", flush=True)
     uvicorn.run(srv.app, host="127.0.0.1", port=PORT, log_level="warning")
 

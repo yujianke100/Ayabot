@@ -31,6 +31,8 @@ class StatsStore:
         self._conn = sqlite3.connect(p)
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.execute("PRAGMA synchronous=NORMAL;")
+        # 房间机器人可能同时在写同一个库：等锁而不是直接报 database is locked
+        self._conn.execute("PRAGMA busy_timeout=8000;")
         self._create_tables()
 
     def _create_tables(self) -> None:
@@ -130,18 +132,47 @@ class StatsStore:
             """
         )
         self._conn.commit()
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """老库补列：dedupe_key（导入去重）+ source（数据来源，便于撤销导入）。"""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(gift_events)")}
+        added = False
+        if "dedupe_key" not in cols:
+            self._conn.execute(
+                "ALTER TABLE gift_events ADD COLUMN dedupe_key TEXT NOT NULL DEFAULT ''")
+            added = True
+        if "source" not in cols:
+            self._conn.execute(
+                "ALTER TABLE gift_events ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+            added = True
+        # 部分唯一索引：只对「带 key 的导入行」生效，实时行（key 为空）行为完全不变
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_gift_events_dedupe "
+            "ON gift_events(dedupe_key) WHERE dedupe_key <> ''")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gift_events_source ON gift_events(source)")
+        if added:
+            self._conn.commit()
 
     @staticmethod
     def month_of_ts(ts: int) -> str:
         return datetime.fromtimestamp(ts).strftime("%Y-%m")
 
-    def record_gift_event(self, event: GiftEvent) -> None:
-        self._conn.execute(
+    def record_gift_event(self, event: GiftEvent, dedupe_key: str = "", source: str = "",
+                          commit: bool = True) -> bool:
+        """写入一条礼物事件。返回是否真的新增（重复导入会返回 False 且不动统计）。
+
+        dedupe_key 为空 = 实时事件，不做去重（保持原有行为）。
+        导入历史数据时传稳定的 dedupe_key，同一份 XML 重复导入不会重复计数。
+        """
+        cur = self._conn.execute(
             """
-            INSERT INTO gift_events (
+            INSERT OR IGNORE INTO gift_events (
                 ts, month, uid, uname, event_type, gift_name, gift_num,
-                is_blind_box, blind_box_cost, actual_value, profit_value, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_blind_box, blind_box_cost, actual_value, profit_value, raw_json,
+                dedupe_key, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.ts,
@@ -156,8 +187,15 @@ class StatsStore:
                 event.actual_value,
                 event.profit_value,
                 event.raw_json,
+                dedupe_key,
+                source,
             ),
         )
+        if cur.rowcount == 0:
+            # 命中 dedupe_key 唯一索引：重复导入，统计不动
+            if commit:
+                self._conn.commit()
+            return False
 
         if event.is_blind_box:
             self._conn.execute(
@@ -210,7 +248,9 @@ class StatsStore:
             ),
         )
 
-        self._conn.commit()
+        if commit:
+            self._conn.commit()
+        return True
 
     def get_user_monthly_blindbox(self, month: str, uid: int) -> Optional[tuple[int, int, int, int]]:
         row = self._conn.execute(
@@ -568,6 +608,121 @@ class StatsStore:
         keys = ("ts", "uid", "uname", "guard_level", "guard_name", "months",
                 "price_coin", "value", "start_time")
         return [dict(zip(keys, row)) for row in rows]
+
+    # ── 历史数据导入（录播弹幕 XML）────────────────────────────────
+
+    def live_gift_index(self, start_ts: int, end_ts: int) -> dict[tuple[int, str, int], list[int]]:
+        """区间内【实时记录】的礼物，按 (uid, 礼物名, 数量) 建索引，用于识别导入重叠。"""
+        rows = self._conn.execute(
+            """
+            SELECT uid, gift_name, gift_num, ts FROM gift_events
+            WHERE dedupe_key = '' AND ts BETWEEN ? AND ?
+            """,
+            (start_ts, end_ts),
+        ).fetchall()
+        idx: dict[tuple[int, str, int], list[int]] = {}
+        for uid, name, num, ts in rows:
+            idx.setdefault((int(uid), str(name), int(num)), []).append(int(ts))
+        return idx
+
+    def guard_times(self, start_ts: int, end_ts: int) -> list[tuple[int, int, int]]:
+        """区间内已有的上舰记录 (uid, guard_level, ts)。"""
+        rows = self._conn.execute(
+            "SELECT uid, guard_level, ts FROM guard_events WHERE ts BETWEEN ? AND ?",
+            (start_ts, end_ts),
+        ).fetchall()
+        return [(int(a), int(b), int(c)) for a, b, c in rows]
+
+    def list_import_sources(self) -> list[dict[str, Any]]:
+        """已导入的批次（按 source 归并），供「撤销导入」列表用。"""
+        out: list[dict[str, Any]] = []
+        rows = self._conn.execute(
+            """
+            SELECT source, COUNT(1) AS events, COALESCE(SUM(gift_num), 0) AS num,
+                   MIN(ts) AS first_ts, MAX(ts) AS last_ts
+            FROM gift_events
+            WHERE source LIKE 'xml:%'
+            GROUP BY source ORDER BY last_ts DESC
+            """
+        ).fetchall()
+        for source, events, num, first_ts, last_ts in rows:
+            guard = self._conn.execute(
+                "SELECT COUNT(1) FROM guard_events WHERE source = ?", (source,)
+            ).fetchone()[0]
+            out.append({
+                "source": source,
+                "name": str(source)[4:] or str(source),
+                "gift_events": int(events),
+                "gift_num": int(num),
+                "guard_events": int(guard),
+                "first_ts": int(first_ts or 0),
+                "last_ts": int(last_ts or 0),
+            })
+        return out
+
+    def delete_gift_events_by_source(self, source: str) -> dict[str, int]:
+        """撤销一次导入：按行精确扣回月度聚合，再删行（不重算，避免与保留期清理打架）。"""
+        rows = self._conn.execute(
+            """
+            SELECT month, uid, is_blind_box, gift_num, blind_box_cost,
+                   actual_value, profit_value, ts
+            FROM gift_events WHERE source = ?
+            """,
+            (source,),
+        ).fetchall()
+        if not rows:
+            return {"deleted": 0, "guard_deleted": 0}
+
+        blind_delta: dict[tuple[str, int], list[int]] = {}
+        gift_delta: dict[tuple[str, int], list[int]] = {}
+        for month, uid, is_blind, num, cost, actual, profit, _ts in rows:
+            g = gift_delta.setdefault((month, uid), [0, 0, 0, 0])
+            g[0] += 1
+            g[1] += int(num)
+            g[2] += int(actual)
+            g[3] = max(g[3], int(_ts))
+            if is_blind:
+                b = blind_delta.setdefault((month, uid), [0, 0, 0, 0])
+                b[0] += int(num)
+                b[1] += int(cost)
+                b[2] += int(actual)
+                b[3] += int(profit)
+
+        for (month, uid), d in gift_delta.items():
+            self._conn.execute(
+                """
+                UPDATE monthly_gift_stats
+                   SET gift_count = gift_count - ?,
+                       gift_num_total = gift_num_total - ?,
+                       value_total = value_total - ?
+                 WHERE month = ? AND uid = ?
+                """,
+                (d[0], d[1], d[2], month, uid),
+            )
+        for (month, uid), d in blind_delta.items():
+            self._conn.execute(
+                """
+                UPDATE monthly_blindbox_stats
+                   SET blind_box_count = blind_box_count - ?,
+                       cost_total = cost_total - ?,
+                       actual_total = actual_total - ?,
+                       profit_total = profit_total - ?
+                 WHERE month = ? AND uid = ?
+                """,
+                (d[0], d[1], d[2], d[3], month, uid),
+            )
+        # 扣到全 0 的行直接删掉，别在排行榜里留空壳
+        self._conn.execute(
+            "DELETE FROM monthly_gift_stats WHERE gift_count <= 0 AND value_total <= 0")
+        self._conn.execute(
+            "DELETE FROM monthly_blindbox_stats WHERE blind_box_count <= 0 AND cost_total <= 0")
+
+        deleted = self._conn.execute(
+            "DELETE FROM gift_events WHERE source = ?", (source,)).rowcount
+        guard_deleted = self._conn.execute(
+            "DELETE FROM guard_events WHERE source = ?", (source,)).rowcount
+        self._conn.commit()
+        return {"deleted": int(deleted), "guard_deleted": int(guard_deleted)}
 
     def get_guard_totals(self, date_from: str = "", date_to: str = "") -> dict[str, Any]:
         """上舰数量与价值汇总（value 单位：电池）。"""
