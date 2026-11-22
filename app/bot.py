@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import sqlite3
 from contextlib import suppress
 import json
 import logging
@@ -98,6 +99,8 @@ class LiveRobot:
         self._recent_gifts: dict[tuple, float] = {}
         # 上舰去重：(uid, start_time) -> 最近时间戳（一次开通会推送三种事件）
         self._recent_guards: dict[tuple, float] = {}
+        # 统计写入失败计数器（写库被锁/磁盘忙时兜底重试仍失败），进心跳供 WebUI 显示
+        self._dropped_stats = 0
         # 后台守护任务（run() 里创建）
         self._heartbeat_task: Optional[asyncio.Task[None]] = None
         self._danmaku_guard_task: Optional[asyncio.Task[None]] = None
@@ -197,6 +200,8 @@ class LiveRobot:
             "last_gift_ts": getattr(self, "_last_gift_ts", 0),
             "last_danmaku_ts": getattr(self, "_last_danmaku_ts", 0),
             "queue_depth": self._msg_queue.qsize(),
+            # 统计写入失败条数：非 0 说明有礼物/上舰因为写库失败没能记上（日志里有详细信息）
+            "dropped_stats": getattr(self, "_dropped_stats", 0),
             "credential_status": (
                 self.auth.load_status().get("status") if self.auth is not None else "ok"
             ),
@@ -319,36 +324,65 @@ class LiveRobot:
 
         return _extract_live_status(info)
 
+    def _guarded(self, handler):
+        """把事件处理函数包一层 try/except。
+
+        `LiveDanmaku.dispatch()` 是 `asyncio.create_task(handler(...))` —— 处理函数是
+        **游离任务**，里面抛异常不会回到任何 await 处：只有 GC 时才由 asyncio 的
+        异常处理器打一句「Task exception was never retrieved」，日志里既没有事件类型
+        也没有礼物信息，出一个 bug 就等于永久静默丢数据。
+        这里统一兜住并打全上下文（事件类型 + 处理函数名 + 原始数据摘要）。
+        """
+        name = getattr(handler, "__name__", str(handler))
+
+        async def _wrapper(event):
+            try:
+                await handler(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._dropped_stats += 1
+                cmd = event.get("type") if isinstance(event, dict) else None
+                try:
+                    keys = list((event.get("data") or {}).keys())[:12] if isinstance(event, dict) else []
+                except Exception:  # noqa: BLE001
+                    keys = []
+                self.logger.error(
+                    "事件处理异常：handler=%s cmd=%s err=%s keys=%s", name, cmd, exc, keys,
+                    exc_info=True)
+
+        return _wrapper
+
     async def _start_danmaku(self) -> None:
         self._danmaku = live.LiveDanmaku(
             room_display_id=self.config.room_display_id,
             credential=self.credential,
         )
 
-        self._danmaku.on("INTERACT_WORD_V2")(self._on_enter_room)
-        self._danmaku.on("INTERACT_WORD_V2")(self._on_interact_word)
+        self._danmaku.on("INTERACT_WORD_V2")(self._guarded(self._on_enter_room))
+        self._danmaku.on("INTERACT_WORD_V2")(self._guarded(self._on_interact_word))
 
-        self._danmaku.on("SEND_GIFT")(self._on_gift)
+        self._danmaku.on("SEND_GIFT")(self._guarded(self._on_gift))
         # 2026-07 起 B 站灰度新协议 SEND_GIFT_V2（protobuf 编码），必须单独监听
-        self._danmaku.on("SEND_GIFT_V2")(self._on_gift_v2)
-        self._danmaku.on("COMBO_SEND")(self._on_gift)
-        self._danmaku.on("UNIVERSAL_EVENT_GIFT")(self._on_gift)
-        self._danmaku.on("UNIVERSAL_EVENT_GIFT_V2")(self._on_gift)
-        self._danmaku.on("SPECIAL_GIFT")(self._on_special_gift)
-        self._danmaku.on("GUARD_BUY")(self._on_guard_buy)
-        self._danmaku.on("USER_TOAST_MSG")(self._on_guard_buy)
-        self._danmaku.on("USER_TOAST_MSG_V2")(self._on_guard_buy)
+        self._danmaku.on("SEND_GIFT_V2")(self._guarded(self._on_gift_v2))
+        self._danmaku.on("COMBO_SEND")(self._guarded(self._on_gift))
+        self._danmaku.on("UNIVERSAL_EVENT_GIFT")(self._guarded(self._on_gift))
+        self._danmaku.on("UNIVERSAL_EVENT_GIFT_V2")(self._guarded(self._on_gift))
+        self._danmaku.on("SPECIAL_GIFT")(self._guarded(self._on_special_gift))
+        self._danmaku.on("GUARD_BUY")(self._guarded(self._on_guard_buy))
+        self._danmaku.on("USER_TOAST_MSG")(self._guarded(self._on_guard_buy))
+        self._danmaku.on("USER_TOAST_MSG_V2")(self._guarded(self._on_guard_buy))
 
-        self._danmaku.on("LIKE_INFO_V3_CLICK")(self._on_like)
-        self._danmaku.on("ROOM_ADMINS")(self._on_room_admins)
-        self._danmaku.on("DANMU_MSG")(self._on_danmaku)
+        self._danmaku.on("LIKE_INFO_V3_CLICK")(self._guarded(self._on_like))
+        self._danmaku.on("ROOM_ADMINS")(self._guarded(self._on_room_admins))
+        self._danmaku.on("DANMU_MSG")(self._guarded(self._on_danmaku))
 
         # Log all events for debugging blindbox and unknown event types
-        self._danmaku.on("ALL")(self._on_all_events)
+        self._danmaku.on("ALL")(self._guarded(self._on_all_events))
 
         # Send connected message when WebSocket auth succeeds
         if self.config.features.connected_message_enabled and self.config.features.connected_message:
-            self._danmaku.on("VERIFICATION_SUCCESSFUL")(self._on_connected)
+            self._danmaku.on("VERIFICATION_SUCCESSFUL")(self._guarded(self._on_connected))
 
         async def _run_connect() -> None:
             assert self._danmaku is not None
@@ -810,7 +844,11 @@ class LiveRobot:
             profit_value=profit,
             raw_json=json.dumps(payload, ensure_ascii=False),
         )
-        self.store.record_gift_event(event_row)
+        self._record_stat(
+            "礼物统计",
+            label=f"uid={uid} {uname!r} {gift_name} x{gift_num} ts={event_row.ts}",
+            write=lambda: self.store.record_gift_event(event_row),
+        )
 
         if not self.config.features.thanks_enabled:
             return
@@ -836,6 +874,38 @@ class LiveRobot:
                 thanks += f"，{profit}电池"
 
         await self._enqueue_message(text=thanks, reply_uid=uid)
+
+    def _record_stat(self, kind: str, *, label: str, write) -> bool:
+        """写统计的兜底通道：**任何情况下都不能让一条礼物/上舰静默消失**。
+
+        为什么需要这一层：
+        - 导入录播 XML、清理旧数据、按日期删除都会长时间占住 SQLite 写锁；
+          实时链路撞上时 `record_gift_event` 会抛 `database is locked`。
+        - 这些回调是 `LiveDanmaku.dispatch()` 里 `asyncio.create_task()` 起的**游离任务**，
+          异常不会回到任何人的 await 处，只会在 GC 时变成一句
+          「Task exception was never retrieved」——用户看到的现象就是「礼物没统计上，
+          日志里什么也没有」。
+        所以这里自己重试、自己记日志、自己计数（计数进心跳，WebUI 能看到）。
+        """
+        for attempt in range(3):
+            try:
+                write()
+                return True
+            except sqlite3.OperationalError as exc:
+                # 被锁/磁盘忙：等一小会儿重试（导入侧已改成小批提交，正常 <100ms 就放锁）。
+                # 这里用的是 time.sleep，会挡住事件循环 —— 所以只重试 3 次、总共最多 0.3s，
+                # 宁可少等也不能把弹幕循环卡住。
+                if attempt == 2:
+                    self._dropped_stats += 1
+                    self.logger.error(
+                        "%s 写入失败（数据库忙，已重试 3 次）：%s | %s", kind, exc, label)
+                    return False
+                time.sleep(0.1 * (attempt + 1))
+            except Exception as exc:  # noqa: BLE001
+                self._dropped_stats += 1
+                self.logger.error("%s 写入失败：%s | %s", kind, exc, label, exc_info=True)
+                return False
+        return False
 
     def _warn_gift_without_uid(self, uname: str, gift_name: str) -> None:
         """礼物事件缺少 uid 时给出限流告警（常见原因：凭证失效/匿名连接）。"""
@@ -888,7 +958,10 @@ class LiveRobot:
             }
 
         # 记录与「感谢开关」解耦：关掉致谢也必须留下上舰记录
-        try:
+        recorded = False
+
+        def _write_guard() -> None:
+            nonlocal recorded
             recorded = self.store.record_guard_event(
                 ts=int(now),
                 month=_now().strftime("%Y-%m"),
@@ -905,9 +978,12 @@ class LiveRobot:
                     (event.get("data") or {}).get("data") or {}, ensure_ascii=False
                 ),
             )
-        except Exception as exc:  # noqa: BLE001
-            recorded = False
-            self.logger.warning("guard record failed: uid=%s err=%s", uid, exc)
+
+        self._record_stat(
+            "上舰统计",
+            label=f"uid={uid} {uname!r} {guard_name} x{months} start_time={start_time}",
+            write=_write_guard,
+        )
 
         self.logger.info(
             "guard buy: uid=%s uname=%s %s x%s 价值=%s电池 start_time=%s type=%s recorded=%s%s",

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -724,6 +725,128 @@ def main() -> int:
         except urllib.error.HTTPError as exc:
             code = exc.code
         ok("普通用户得到 403", code == 403, code)
+
+        # ── 29. 导入不能长时间独占写锁（实时链路会因此丢礼物） ──
+        print("[29] 导入期间的写锁粒度")
+        # 造一份 6 万条礼物的 XML：不分批提交的话整段导入全程独占写锁，
+        # 实时链路 busy_timeout 一到就抛 database is locked，那条礼物就没了。
+        n_gift = 60000
+        body = [
+            '<?xml version="1.0" encoding="utf-8"?>', "<i>",
+            "<metadata><record_start_time>2024-09-01T20:00:00+08:00</record_start_time>"
+            "</metadata>",
+        ]
+        for i in range(n_gift):
+            body.append(f'<gift ts="{i % 7200}.{i % 1000:03d}" uid="{100000 + i}" '
+                        f'user="U{i}" giftname="辣条" giftcount="1"/>')
+        body.append("</i>")
+        big_xml = "\n".join(body).encode()
+        db_path = str(srv._room_db_path(ROOM))
+
+        max_wait = [0.0]
+        live_err: list[str] = []
+        live_done = [False]
+
+        def _live_writer() -> None:
+            from app.storage import StatsStore
+            st = StatsStore(db_path)
+            while not live_done[0]:
+                t0 = time.time()
+                try:
+                    st._conn.execute(
+                        "INSERT INTO gift_events (ts,month,uid,uname,event_type,gift_name,"
+                        "gift_num,is_blind_box,blind_box_cost,actual_value,profit_value,"
+                        "raw_json,dedupe_key,source) "
+                        "VALUES (?,?,'9','实时','SEND_GIFT','辣条',1,0,0,0,0,'{}','','')",
+                        (int(time.time()), "2024-12"))
+                    st._conn.commit()
+                    max_wait[0] = max(max_wait[0], time.time() - t0)
+                except Exception as exc:  # noqa: BLE001
+                    live_err.append(f"{type(exc).__name__}: {exc}")
+                time.sleep(0.002)
+            st._conn.close()
+
+        lw = threading.Thread(target=_live_writer, daemon=True)
+        lw.start()
+        time.sleep(0.05)
+        t0 = time.time()
+        res_big = srv._import_xml_blocking(
+            ROOM, db_path, big_xml, "big.xml", "xml:big.xml#lockprobe",
+            dict(srv._GIFT_PRICE_CACHE), False, False)
+        import_s = time.time() - t0
+        live_done[0] = True
+        lw.join(timeout=10)
+
+        ok("大文件导入成功", bool(res_big.get("ok")), res_big.get("error"))
+        ok(f"6 万条全部落库", res_big.get("stats", {}).get("inserted") == n_gift,
+           res_big.get("stats", {}).get("inserted"))
+        ok("导入期间实时写入 0 次失败", not live_err, live_err[:3])
+        # 分批提交后单次持锁应在几十毫秒；整体一个事务时这里会是整段导入耗时
+        ok(f"单次写锁等待 < 0.5s（实测 {max_wait[0]*1000:.0f}ms，导入总计 {import_s:.2f}s）",
+           max_wait[0] < 0.5, max_wait[0])
+        # 这份大数据要清掉，别影响后面的用例
+        from app.storage import StatsStore as _SS
+        _st = _SS(db_path)
+        _st.delete_gift_events_by_source("xml:big.xml#lockprobe")
+        _st._conn.close()
+
+        # ── 30. 事件处理异常不能静默消失 ──
+        print("[30] 处理函数异常兜底")
+        import logging as _logging
+        from app.bot import LiveRobot
+
+        recs: list[_logging.LogRecord] = []
+
+        class _Cap(_logging.Handler):
+            def emit(self, record):
+                recs.append(record)
+
+        cap = _Cap()
+        _logging.getLogger("bili-live-robot").addHandler(cap)
+        _logging.getLogger("bili-live-robot").setLevel(_logging.DEBUG)
+
+        class _Stub:
+            logger = _logging.getLogger("bili-live-robot")
+            _dropped_stats = 0
+
+        stub = _Stub()
+
+        async def _boom(event):
+            raise ValueError("坏掉的 payload")
+
+        wrapped = LiveRobot._guarded(stub, _boom)
+        import asyncio as _asyncio
+        _asyncio.run(wrapped({"type": "SEND_GIFT_V2", "data": {"pb": "xx"}}))
+        ok("异常被兜住，没有抛出", True)
+        ok("失败计数 +1", stub._dropped_stats == 1, stub._dropped_stats)
+        joined = "\n".join(r.getMessage() for r in recs if r.levelno >= _logging.ERROR)
+        ok("日志里有处理函数名", "_boom" in joined, joined[-200:])
+        ok("日志里有事件类型", "SEND_GIFT_V2" in joined, joined[-200:])
+        _logging.getLogger("bili-live-robot").removeHandler(cap)
+
+        # 写库被锁时 _record_stat 必须重试到成功，而不是丢掉
+        class _Stub2(_Stub):
+            pass
+
+        tries = {"n": 0}
+        stub2 = _Stub2()
+
+        def _flaky() -> None:
+            tries["n"] += 1
+            if tries["n"] < 3:
+                raise sqlite3.OperationalError("database is locked")
+
+        ok("_record_stat 重试后成功", LiveRobot._record_stat(
+            stub2, "礼物统计", label="probe", write=_flaky) is True)
+        ok("确实重试了 3 次", tries["n"] == 3, tries["n"])
+        ok("成功时不计入 dropped", stub2._dropped_stats == 0, stub2._dropped_stats)
+
+        def _always_locked() -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        ok("始终失败时返回 False",
+           LiveRobot._record_stat(stub2, "礼物统计", label="probe2", write=_always_locked) is False)
+        ok("始终失败时 dropped +1", stub2._dropped_stats == 1, stub2._dropped_stats)
     finally:
         server.should_exit = True
         th.join(timeout=10)

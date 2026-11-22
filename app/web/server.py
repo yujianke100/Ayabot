@@ -3794,6 +3794,13 @@ def _import_xml_blocking(
         inserted = 0
         skipped_dup = 0
         skipped_overlap = 0
+        # 关键：**分批提交**，不要一次事务写到底。
+        # 实时链路（房间机器人的 record_gift_event）和我们在同一个库上抢写锁，
+        # sqlite 的 busy_timeout 只有 8s —— 一份 20 万条的 XML 如果整体一个事务，
+        # 全程独占写锁，实时礼物就会撞上 database is locked 而被丢掉。
+        # 分批提交把最长持锁时间压到毫秒级；中途失败也不怕：
+        # dedupe_key 保证重新导入同一份文件是幂等的，source 保证撤销仍然整批生效。
+        commit_every = 2000
         for ev, key in plan.gifts:
             if _is_overlap_gift(ev):
                 skipped_overlap += 1
@@ -3802,6 +3809,8 @@ def _import_xml_blocking(
                 inserted += 1
             else:
                 skipped_dup += 1
+            if inserted and inserted % commit_every == 0:
+                store._conn.commit()
         store._conn.commit()
 
         guards_in = 0
