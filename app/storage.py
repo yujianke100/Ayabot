@@ -720,6 +720,104 @@ class StatsStore:
         self._conn.commit()
         return len(months)
 
+    # ── 统计自检 / 修复 ─────────────────────────────────────
+    #
+    # 聚合是**增量**累加的：每次写礼物都会 +1/+num/+value。这条路上任何一次
+    # 「写了明细但没写聚合」（旧版本、中断、手工改库、跨版本迁移）都会留下
+    # 永久偏差，用户看到的现象就是「排行榜/季度统计跟明细对不上」「统计比实际少」。
+    # 无法追溯历史原因，但可以检出并重算 —— 所以提供这两个方法。
+
+    def consistency_report(self, limit: int = 20) -> dict[str, Any]:
+        """比对「礼物明细」与「月度聚合」，返回偏差清单。
+
+        只读，不改数据。偏差按 (月份, uid) 聚合，取绝对值最大的若干条。
+        """
+        detail = {
+            (m, u): (int(c), int(n), int(v)) for m, u, c, n, v in self._conn.execute(
+                """
+                SELECT month, uid, COUNT(1), COALESCE(SUM(gift_num), 0),
+                       COALESCE(SUM(actual_value), 0)
+                FROM gift_events GROUP BY month, uid
+                """)
+        }
+        agg = {
+            (m, u): (int(c), int(n), int(v)) for m, u, c, n, v in self._conn.execute(
+                """
+                SELECT month, uid, COALESCE(gift_count, 0), COALESCE(gift_num_total, 0),
+                       COALESCE(value_total, 0)
+                FROM monthly_gift_stats
+                """)
+        }
+        blind_detail = {
+            (m, u): (int(n), int(c), int(a), int(p)) for m, u, n, c, a, p in self._conn.execute(
+                """
+                SELECT month, uid, COALESCE(SUM(gift_num), 0),
+                       COALESCE(SUM(blind_box_cost), 0), COALESCE(SUM(actual_value), 0),
+                       COALESCE(SUM(profit_value), 0)
+                FROM gift_events WHERE is_blind_box = 1 GROUP BY month, uid
+                """)
+        }
+        blind_agg = {
+            (m, u): (int(n), int(c), int(a), int(p)) for m, u, n, c, a, p in self._conn.execute(
+                """
+                SELECT month, uid, COALESCE(blind_box_count, 0), COALESCE(cost_total, 0),
+                       COALESCE(actual_total, 0), COALESCE(profit_total, 0)
+                FROM monthly_blindbox_stats
+                """)
+        }
+
+        def _diff(detail_map, agg_map) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for key in set(detail_map) | set(agg_map):
+                d = detail_map.get(key, tuple(0 for _ in agg_map.get(key, ())))
+                a = agg_map.get(key, tuple(0 for _ in d))
+                # 两边长度对齐（盲盒 4 项、礼物 3 项）
+                if len(d) != len(a):
+                    pad = max(len(d), len(a))
+                    d = tuple(d) + (0,) * (pad - len(d))
+                    a = tuple(a) + (0,) * (pad - len(a))
+                if d != a:
+                    # 「只剩汇总、明细已被保留期清掉」不算错：那是正常的生命周期。
+                    # 单独标出来，不计入 ok，也不参与重算（重算会把它抹成 0）。
+                    if sum(abs(x) for x in d) == 0:
+                        kind = "aggregate_only"
+                    elif sum(abs(x) for x in a) == 0:
+                        kind = "detail_only"
+                    else:
+                        kind = "drift"
+                    out.append({"month": key[0], "uid": key[1], "kind": kind,
+                                "detail": list(d), "aggregate": list(a),
+                                "delta": [x - y for x, y in zip(d, a)]})
+            out.sort(key=lambda r: -sum(abs(x) for x in r["delta"]))
+            return out
+
+        gift_diff = _diff(detail, agg)
+        blind_diff = _diff(blind_detail, blind_agg)
+        real = [r for r in gift_diff + blind_diff if r["kind"] != "aggregate_only"]
+        return {
+            "ok": not real,
+            "gift_mismatch_count": len(gift_diff),
+            "blindbox_mismatch_count": len(blind_diff),
+            "aggregate_only_count": sum(
+                1 for r in gift_diff + blind_diff if r["kind"] == "aggregate_only"),
+            "gift_mismatch": gift_diff[:limit],
+            "blindbox_mismatch": blind_diff[:limit],
+            # 需要重算的月份（只剩汇总的月份重算也修不了，不列进来）
+            "months": sorted({r["month"] for r in real}),
+        }
+
+    def repair_stats(self) -> dict[str, Any]:
+        """按明细重算月度聚合，返回修复前后的偏差情况。
+
+        `rebuild_monthly_stats(None)` 会跳过「没有任何明细」的月份，
+        所以保留期已经清掉明细的月份不会被抹成 0。
+        """
+        before = self.consistency_report()
+        months = before.get("months") or []
+        rebuilt = self.rebuild_monthly_stats(months or None)
+        after = self.consistency_report()
+        return {"rebuilt_months": int(rebuilt), "before": before, "after": after}
+
     def list_import_sources(self) -> list[dict[str, Any]]:
         """已导入的批次（按 source 归并），供「撤销导入」列表用。"""
         out: list[dict[str, Any]] = []
@@ -772,73 +870,92 @@ class StatsStore:
         return out
 
     def delete_gift_events_by_source(self, source: str) -> dict[str, int]:
-        """撤销一次导入：按行精确扣回月度聚合，再删行（不重算，避免与保留期清理打架）。"""
-        rows = self._conn.execute(
-            """
-            SELECT month, uid, is_blind_box, gift_num, blind_box_cost,
-                   actual_value, profit_value, ts
-            FROM gift_events WHERE source = ?
-            """,
-            (source,),
-        ).fetchall()
-        # 注意：这里**不能**在 rows 为空时直接 return —— 只含上舰记录的批次
-        # 在 gift_events 里一行都没有，直接返回就撤不掉那批上舰记录了。
-        if not rows:
-            guard_deleted = self._conn.execute(
+        """撤销一次导入：按行精确扣回月度聚合，再删行（不重算，避免与保留期清理打架）。
+
+        整个撤销必须在一个**写事务**里完成。先 SELECT 出要扣的明细、再 DELETE、
+        再按差额扣聚合，这三步之间一旦让别的连接提交（导入是分批提交的），
+        DELETE 删掉的行数就和 SELECT 时看到的不一样了 —— 聚合会与明细永久对不上。
+        （实测：撤销时明细 2000 行，DELETE 删掉 4000 行，聚合仍记着 2000 条/20000 电池，
+        再点撤销也修不回来，因为明细已经没了。）
+        BEGIN IMMEDIATE 先拿写锁，后面的数据集才是稳定的。
+        """
+        conn = self._conn
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = conn.execute(
+                """
+                SELECT month, uid, is_blind_box, gift_num, blind_box_cost,
+                       actual_value, profit_value, ts
+                FROM gift_events WHERE source = ?
+                """,
+                (source,),
+            ).fetchall()
+            # 注意：这里**不能**在 rows 为空时直接 return —— 只含上舰记录的批次
+            # 在 gift_events 里一行都没有，直接返回就撤不掉那批上舰记录了。
+            if not rows:
+                guard_deleted = conn.execute(
+                    "DELETE FROM guard_events WHERE source = ?", (source,)).rowcount
+                conn.commit()
+                return {"deleted": 0, "guard_deleted": int(guard_deleted)}
+
+            blind_delta: dict[tuple[str, int], list[int]] = {}
+            gift_delta: dict[tuple[str, int], list[int]] = {}
+            for month, uid, is_blind, num, cost, actual, profit, _ts in rows:
+                g = gift_delta.setdefault((month, uid), [0, 0, 0, 0])
+                g[0] += 1
+                g[1] += int(num)
+                g[2] += int(actual)
+                g[3] = max(g[3], int(_ts))
+                if is_blind:
+                    b = blind_delta.setdefault((month, uid), [0, 0, 0, 0])
+                    b[0] += int(num)
+                    b[1] += int(cost)
+                    b[2] += int(actual)
+                    b[3] += int(profit)
+
+            for (month, uid), d in gift_delta.items():
+                conn.execute(
+                    """
+                    UPDATE monthly_gift_stats
+                       SET gift_count = gift_count - ?,
+                           gift_num_total = gift_num_total - ?,
+                           value_total = value_total - ?
+                     WHERE month = ? AND uid = ?
+                    """,
+                    (d[0], d[1], d[2], month, uid),
+                )
+            for (month, uid), d in blind_delta.items():
+                conn.execute(
+                    """
+                    UPDATE monthly_blindbox_stats
+                       SET blind_box_count = blind_box_count - ?,
+                           cost_total = cost_total - ?,
+                           actual_total = actual_total - ?,
+                           profit_total = profit_total - ?
+                     WHERE month = ? AND uid = ?
+                    """,
+                    (d[0], d[1], d[2], d[3], month, uid),
+                )
+            # 扣到全 0 的行直接删掉，别在排行榜里留空壳
+            conn.execute(
+                "DELETE FROM monthly_gift_stats WHERE gift_count <= 0 AND value_total <= 0")
+            conn.execute(
+                "DELETE FROM monthly_blindbox_stats WHERE blind_box_count <= 0 AND cost_total <= 0")
+
+            deleted = conn.execute(
+                "DELETE FROM gift_events WHERE source = ?", (source,)).rowcount
+            guard_deleted = conn.execute(
                 "DELETE FROM guard_events WHERE source = ?", (source,)).rowcount
-            self._conn.commit()
-            return {"deleted": 0, "guard_deleted": int(guard_deleted)}
-
-        blind_delta: dict[tuple[str, int], list[int]] = {}
-        gift_delta: dict[tuple[str, int], list[int]] = {}
-        for month, uid, is_blind, num, cost, actual, profit, _ts in rows:
-            g = gift_delta.setdefault((month, uid), [0, 0, 0, 0])
-            g[0] += 1
-            g[1] += int(num)
-            g[2] += int(actual)
-            g[3] = max(g[3], int(_ts))
-            if is_blind:
-                b = blind_delta.setdefault((month, uid), [0, 0, 0, 0])
-                b[0] += int(num)
-                b[1] += int(cost)
-                b[2] += int(actual)
-                b[3] += int(profit)
-
-        for (month, uid), d in gift_delta.items():
-            self._conn.execute(
-                """
-                UPDATE monthly_gift_stats
-                   SET gift_count = gift_count - ?,
-                       gift_num_total = gift_num_total - ?,
-                       value_total = value_total - ?
-                 WHERE month = ? AND uid = ?
-                """,
-                (d[0], d[1], d[2], month, uid),
-            )
-        for (month, uid), d in blind_delta.items():
-            self._conn.execute(
-                """
-                UPDATE monthly_blindbox_stats
-                   SET blind_box_count = blind_box_count - ?,
-                       cost_total = cost_total - ?,
-                       actual_total = actual_total - ?,
-                       profit_total = profit_total - ?
-                 WHERE month = ? AND uid = ?
-                """,
-                (d[0], d[1], d[2], d[3], month, uid),
-            )
-        # 扣到全 0 的行直接删掉，别在排行榜里留空壳
-        self._conn.execute(
-            "DELETE FROM monthly_gift_stats WHERE gift_count <= 0 AND value_total <= 0")
-        self._conn.execute(
-            "DELETE FROM monthly_blindbox_stats WHERE blind_box_count <= 0 AND cost_total <= 0")
-
-        deleted = self._conn.execute(
-            "DELETE FROM gift_events WHERE source = ?", (source,)).rowcount
-        guard_deleted = self._conn.execute(
-            "DELETE FROM guard_events WHERE source = ?", (source,)).rowcount
-        self._conn.commit()
-        return {"deleted": int(deleted), "guard_deleted": int(guard_deleted)}
+            conn.commit()
+            return {"deleted": int(deleted), "guard_deleted": int(guard_deleted)}
+        except BaseException:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
 
     def get_guard_totals(self, date_from: str = "", date_to: str = "") -> dict[str, Any]:
         """上舰数量与价值汇总（value 单位：电池）。"""

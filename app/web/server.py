@@ -3984,6 +3984,75 @@ async def api_delete_import(room_id: str, request: Request):
             pass
 
 
+@app.get("/api/rooms/{room_id}/stats_check")
+async def api_stats_check(room_id: str, request: Request):
+    """统计自检：比对礼物明细与月度聚合，找出对不上的月份/用户。
+
+    聚合是增量累加的，历史上只要有一次「写了明细没写聚合」，之后就一直偏。
+    这里只读不改，给管理员一个「到底准不准」的答案。
+    """
+    from app.storage import StatsStore
+
+    _, role, _ = _get_current_role(request)
+    if role != "admin":
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return {"ok": True, "gift_mismatch_count": 0, "blindbox_mismatch_count": 0,
+                "gift_mismatch": [], "blindbox_mismatch": [], "months": [],
+                "empty": True}
+
+    def _run() -> dict:
+        # 连接必须在线程里创建：sqlite3 连接绑定创建它的线程，
+        # 在事件循环里建、丢给 to_thread 用会抛 ProgrammingError。
+        store = StatsStore(str(db_path))
+        try:
+            return store.consistency_report()
+        finally:
+            try:
+                store._conn.close()
+            except Exception:
+                pass
+
+    return await asyncio.to_thread(_run)
+
+
+@app.post("/api/rooms/{room_id}/stats_repair")
+async def api_stats_repair(room_id: str, request: Request):
+    """按明细重算月度聚合（修复历史偏差）。
+
+    只重算「还有明细」的月份：明细已被保留期清掉的月份原样保留，
+    不会被按空明细抹成 0。
+    """
+    from app.storage import StatsStore
+
+    _, role, _ = _get_current_role(request)
+    if role != "admin":
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return {"ok": False, "error": "数据库不存在"}
+
+    def _run() -> dict:
+        store = StatsStore(str(db_path))
+        try:
+            return store.repair_stats()
+        finally:
+            try:
+                store._conn.close()
+            except Exception:
+                pass
+
+    result = await asyncio.to_thread(_run)
+    logger.info("stats repair: room=%s months=%s before_ok=%s after_ok=%s",
+                room_id, result.get("rebuilt_months"),
+                (result.get("before") or {}).get("ok"),
+                (result.get("after") or {}).get("ok"))
+    return {"ok": True, **result}
+
+
 @app.post("/api/rooms/{room_id}/delete_old")
 async def api_room_delete_old(room_id: str, request: Request):
     """删除指定房间的旧数据. data_type: 'gift' | 'danmaku' | 'all'."""
@@ -6423,6 +6492,47 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
                 <div v-if="delResult" class="mt-4 text-sm">{{ delResult }}</div>
             </div>
+
+            <!-- 统计自检 / 修复 -->
+            <div class="bg-white p-4 sm:p-6 rounded-xl shadow-sm mt-4" id="statsCheckPanel">
+                <h2 class="text-lg font-bold mb-1">🧮 统计自检</h2>
+                <p class="text-sm text-gray-500 mb-4">
+                    检查「送礼明细」和「月度汇总」是否一致。汇总表是逐条累加出来的，
+                    历史上只要有一次没累加（旧版本、异常退出、手工改库），之后排行榜和月度统计就会一直偏少。
+                    点「自检」只看不改；确实对不上再点「重算」。
+                </p>
+                <div class="flex items-center gap-2 flex-wrap">
+                    <button @click="statsCheck()" :disabled="statsBusy"
+                            class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm disabled:opacity-50">自检</button>
+                    <button @click="statsRepair()" :disabled="statsBusy || !statsDirty"
+                            class="bg-amber-500 hover:bg-amber-600 text-white px-4 py-2 rounded text-sm disabled:opacity-50">按明细重算</button>
+                    <span class="text-xs text-gray-400">重算只影响还有明细的月份，已过保留期的历史汇总不会被动到</span>
+                </div>
+                <div v-if="statsMsg" class="mt-3 text-sm"
+                     :class="statsOk ? 'text-green-600' : 'text-red-600'">{{ statsMsg }}</div>
+                <div v-if="statsRows.length" class="mt-3 overflow-x-auto">
+                    <table class="text-xs w-full">
+                        <thead>
+                            <tr class="text-gray-500 text-left border-b">
+                                <th class="py-1 pr-3">月份</th>
+                                <th class="py-1 pr-3">UID</th>
+                                <th class="py-1 pr-3">明细（条数/件数/价值）</th>
+                                <th class="py-1 pr-3">汇总（条数/件数/价值）</th>
+                                <th class="py-1">差额</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="row in statsRows" :key="row.month + '-' + row.uid" class="border-b last:border-0">
+                                <td class="py-1 pr-3">{{ row.month }}</td>
+                                <td class="py-1 pr-3">{{ row.uid }}</td>
+                                <td class="py-1 pr-3">{{ row.detail.join(' / ') }}</td>
+                                <td class="py-1 pr-3">{{ row.aggregate.join(' / ') }}</td>
+                                <td class="py-1" :class="row.delta.some(d => d) ? 'text-red-600' : ''">{{ row.delta.join(' / ') }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
 
         <!-- Bot 日志 -->
@@ -7156,6 +7266,62 @@ createApp({
         // Manage
         const delDate = ref('');
         const delResult = ref('');
+
+        // 统计自检 / 修复
+        const statsBusy = ref(false);
+        const statsMsg = ref('');
+        const statsOk = ref(true);
+        const statsRows = ref([]);
+        const statsDirty = ref(false);   // 自检发现有偏差才允许重算
+        async function statsCheck() {
+            const rid = selectedRoom.value?.room_id;
+            if (!rid) return;
+            statsBusy.value = true;
+            statsMsg.value = '';
+            try {
+                const res = await fetch(`/api/rooms/${rid}/stats_check`, {credentials: 'include'});
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || res.status);
+                const g = data.gift_mismatch || [];
+                const b = data.blindbox_mismatch || [];
+                statsRows.value = g.slice(0, 20);
+                statsDirty.value = !data.ok;
+                statsOk.value = !!data.ok;
+                if (data.ok) {
+                    statsMsg.value = '✅ 明细与汇总一致，没有发现问题';
+                } else {
+                    statsMsg.value = `⚠️ 发现 ${data.gift_mismatch_count} 处礼物统计偏差` +
+                                     (data.blindbox_mismatch_count ? `、${data.blindbox_mismatch_count} 处盲盒统计偏差` : '') +
+                                     '（下表按偏差大小排序，最多显示 20 条）';
+                }
+            } catch (e) {
+                statsMsg.value = '自检失败: ' + e.message;
+                statsOk.value = false;
+            } finally { statsBusy.value = false; }
+        }
+        async function statsRepair() {
+            const rid = selectedRoom.value?.room_id;
+            if (!rid) return;
+            if (!confirm('按送礼明细重算月度汇总？\n只影响还有明细的月份，不会动到已过保留期的历史汇总。')) return;
+            statsBusy.value = true;
+            try {
+                const res = await fetch(`/api/rooms/${rid}/stats_repair`, {
+                    method: 'POST', credentials: 'include',
+                });
+                const data = await res.json();
+                if (!res.ok || !data.ok) throw new Error(data.error || res.status);
+                const after = data.after || {};
+                statsRows.value = (after.gift_mismatch || []).slice(0, 20);
+                statsDirty.value = !after.ok;
+                statsOk.value = !!after.ok;
+                statsMsg.value = after.ok
+                    ? `✅ 已重算 ${data.rebuilt_months} 个月份，明细与汇总现在一致`
+                    : `⚠️ 重算后仍有 ${after.gift_mismatch_count} 处偏差（可能是明细里就缺数据）`;
+            } catch (e) {
+                statsMsg.value = '重算失败: ' + e.message;
+                statsOk.value = false;
+            } finally { statsBusy.value = false; }
+        }
 
         // Room API config
         const roomApiEnabled = ref(false);
@@ -9956,6 +10122,7 @@ createApp({
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
                 delDate, delResult, confirmDelete,
+                statsBusy, statsMsg, statsOk, statsRows, statsDirty, statsCheck, statsRepair,
                 xmlFiles, xmlBusy, xmlPreview, xmlMsg, xmlMsgOk, xmlError, xmlImports,
                 xmlSkipOverlap, onXmlFilesPicked, xmlDryRun, xmlDoImport,
                 loadXmlImports, xmlUndoImport, fmtDay, fmtRange, xmlFileInput,

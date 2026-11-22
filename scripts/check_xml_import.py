@@ -930,6 +930,117 @@ def main() -> int:
         ok("2020 年的上舰被删掉、新的还在",
            len(left) == before - 1 and all(row[0] == 880002 for row in left),
            left[:5])
+
+        # ── 34. 导入进行中撤销，聚合不能与明细脱节 ──
+        print("[34] 并发撤销（导入还在写）")
+        from app.storage import GiftEvent, StatsStore
+        race_db = str(room_dir / "data" / "race.db")
+        RSRC = "xml:race.xml#deadbeef"
+
+        def _rev(i: int):
+            return GiftEvent(ts=1735664400 + i, month="2024-12", uid=1001, uname="甲",
+                             event_type="SEND_GIFT", gift_name="辣条", gift_num=1,
+                             is_blind_box=0, blind_box_cost=0, actual_value=10,
+                             profit_value=0, raw_json="{}")
+
+        undo_store = StatsStore(race_db)
+        stop_evt = [False]
+        produced = {"n": 0}
+        imp_err: list[str] = []
+
+        def _importer() -> None:
+            st = StatsStore(race_db)
+            try:
+                for i in range(40000):
+                    if stop_evt[0]:
+                        break
+                    st.record_gift_event(_rev(i), dedupe_key=f"k{i}", source=RSRC,
+                                         commit=False)
+                    produced["n"] += 1
+                    if produced["n"] % 2000 == 0:
+                        st._conn.commit()
+                        time.sleep(0.01)
+                st._conn.commit()
+            except Exception as exc:  # noqa: BLE001
+                imp_err.append(f"{type(exc).__name__}: {exc}")
+            finally:
+                st._conn.close()
+
+        ith = threading.Thread(target=_importer)
+        ith.start()
+        time.sleep(0.05)
+        res_undo = undo_store.delete_gift_events_by_source(RSRC)
+        stop_evt[0] = True
+        ith.join(timeout=20)
+
+        def _race_state():
+            row = undo_store._conn.execute(
+                "SELECT COUNT(1), COALESCE(SUM(actual_value), 0) FROM gift_events "
+                "WHERE month='2024-12' AND uid=1001").fetchone()
+            ag = undo_store._conn.execute(
+                "SELECT COALESCE(gift_count,0), COALESCE(value_total,0) FROM monthly_gift_stats "
+                "WHERE month='2024-12' AND uid=1001").fetchone()
+            return (int(row[0]), int(row[1])), (int(ag[0]), int(ag[1])) if ag else (0, 0)
+
+        detail_now, agg_now = _race_state()
+        ok("撤销时没有抛错", not imp_err, imp_err[:2])
+        ok("撤销删掉的行数 ≥ 0 且返回正常", res_undo.get("deleted", -1) >= 0, res_undo)
+        # 关键断言：聚合必须与明细一致（修前会出现聚合仍记着 2000 条/20000 的幽灵数据）
+        ok(f"撤销后聚合与明细一致（明细 {detail_now} / 聚合 {agg_now}）",
+           detail_now == agg_now, {"detail": detail_now, "agg": agg_now})
+        undo_store._conn.close()
+
+        # ── 35. 统计自检与修复 ──
+        print("[35] 统计自检 / 修复")
+        drift_db = str(room_dir / "data" / "drift.db")
+        ds = StatsStore(drift_db)
+        for i in range(10):
+            ds.record_gift_event(GiftEvent(ts=1735664400 + i, month="2024-12", uid=2002,
+                                           uname="乙", event_type="SEND_GIFT",
+                                           gift_name="辣条", gift_num=1, is_blind_box=0,
+                                           blind_box_cost=0, actual_value=10,
+                                           profit_value=0, raw_json="{}"),
+                                 dedupe_key=f"d{i}", source="xml:drift.xml#d")
+        # 人为制造「写了明细没写聚合」：只记 1 条、10 电池
+        ds._conn.execute("UPDATE monthly_gift_stats SET gift_count=1, gift_num_total=1, "
+                         "value_total=10 WHERE month='2024-12' AND uid=2002")
+        # 再造一个「只剩聚合、明细已被保留期清掉」的月份
+        ds._conn.execute(
+            "INSERT INTO monthly_gift_stats (month, uid, uname, gift_count, gift_num_total,"
+            " value_total, last_ts) VALUES ('2023-01', 3003, '丙', 5, 5, 50, 1600000000)")
+        ds._conn.commit()
+
+        rep = ds.consistency_report()
+        ok("自检发现偏差", rep["ok"] is False and rep["gift_mismatch_count"] >= 1,
+           rep["gift_mismatch"][:2])
+        ok("自检指出偏差月份", "2024-12" in (rep.get("months") or []), rep.get("months"))
+
+        fixed = ds.repair_stats()
+        ok("重算后一致", fixed["after"]["ok"] is True, fixed["after"])
+        row = ds._conn.execute(
+            "SELECT gift_count, value_total FROM monthly_gift_stats "
+            "WHERE month='2024-12' AND uid=2002").fetchone()
+        ok("按明细重算成 10 条 / 100 电池", tuple(row) == (10, 100), row)
+        kept = ds._conn.execute(
+            "SELECT COUNT(1) FROM monthly_gift_stats WHERE month='2023-01'").fetchone()[0]
+        ok("只剩聚合的月份不会被抹掉", kept == 1, kept)
+        ds._conn.close()
+
+        # 接口层：管理员可用、普通用户 403
+        code, r = _req("GET", f"/api/rooms/{ROOM}/stats_check")
+        ok("自检接口返回 200", code == 200 and "gift_mismatch_count" in r, code)
+        code, r = _req("POST", f"/api/rooms/{ROOM}/stats_repair")
+        ok("重算接口返回 200 且修完一致", code == 200 and (r.get("after") or {}).get("ok") is True,
+           (r.get("after") or {}).get("ok"))
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{PORT}/api/rooms/{ROOM}/stats_repair", data=b"", method="POST",
+            headers={"Cookie": "session=user-token"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                code2 = resp.status
+        except urllib.error.HTTPError as exc:
+            code2 = exc.code
+        ok("普通用户不能重算统计", code2 == 403, code2)
     finally:
         server.should_exit = True
         th.join(timeout=10)
