@@ -17,6 +17,7 @@ Ayabot 跨平台进程管理器
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -119,6 +120,26 @@ def _use_inprocess() -> bool:
 # ── 同进程 Bot 运行（冻结模式） ──────────────────────────────
 
 
+def _write_bot_error(data_dir: Path, exc: BaseException) -> None:
+    """把 Bot 崩溃的「为什么」写进 data_dir/bot_error.json，留给守护进程展示。
+
+    只留异常类型、消息和 traceback 最后三行 —— 完整堆栈在日志里，这里要的是
+    用户在界面上能一眼看懂的一句话。
+    """
+    try:
+        import traceback
+
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        tail = " / ".join(ln.strip() for ln in tb.strip().splitlines()[-3:])
+        detail = f"{type(exc).__name__}: {exc} | {tail}"[:280]
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "bot_error.json").write_text(
+            json.dumps({"ts": int(time.time()), "reason": detail}, ensure_ascii=False),
+            encoding="utf-8")
+    except Exception as exc2:  # noqa: BLE001
+        logger.debug("write bot_error failed: %s", exc2)
+
+
 async def start_bot_in_process(room_id: str) -> bool:
     """在当前进程内启动 Bot（asyncio Task），返回 True 表示已受理。
 
@@ -166,6 +187,9 @@ async def start_bot_in_process(room_id: str) -> bool:
                 auth.write_status("error", f"机器人异常退出：{exc}"[:300])
             except Exception:  # noqa: BLE001
                 pass
+            # 把「为什么退出」留给守护进程展示。守护进程只看到 status!=running，
+            # 会写一句「进程已退出」，用户完全不知道是代码 bug、网络问题还是被系统杀了。
+            _write_bot_error(Path(config.storage.sqlite_path).parent, exc)
 
     task = asyncio.create_task(_supervised_run(), name=f"bot-{room_id}")
     _inproc_bots[room_id] = (holder, auth, task)

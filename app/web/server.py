@@ -616,10 +616,16 @@ def _get_db() -> sqlite3.Connection:
 
 
 def _parse_date(d: str) -> tuple[int, int]:
-    dt = datetime.datetime.strptime(d, "%Y-%m-%d")
-    start = int(dt.timestamp())
-    end = int((dt + datetime.timedelta(days=1)).timestamp())
-    return start, end
+    """`YYYY-MM-DD` → 配置时区的当天 [起, 止) 时间戳。
+
+    以前是 `datetime.strptime(...)` 后直接 `.timestamp()` —— 那是 **naive**
+    datetime，`.timestamp()` 按**系统本地时区**解释。配置时区是 UTC、机器在东八区时，
+    这里会整体偏 8 小时，「昨天/今天」的数据就查错窗口。
+    统一走 `tzutil.day_range`（唯一时区来源），空串或格式错误抛 ValueError。
+    """
+    lo, _ = tzutil.day_range(d)
+    _, hi = tzutil.day_range(d)
+    return lo, hi + 1
 
 
 def _safe_int(val: Any) -> int:
@@ -715,7 +721,20 @@ def _crash_info_path(room_id: str) -> Path:
     return Path(_ROOMS_BASE_DIR).resolve() / "rooms" / room_id / "data" / "crash_info.json"
 
 
-def _write_crash_info(room_id: str, reason: str, exit_code: Optional[int] = None) -> None:
+def _bot_error_path(room_id: str) -> Path:
+    """同进程 Bot 崩溃时写的详细错误（异常 + traceback 尾部）。
+
+    和 crash_info.json 分开存：
+    - crash_info 由守护进程写「它观察到的现象」（进程已退出 / 心跳超时）
+    - bot_error 由 Bot 自己写「它为什么退出」（异常类型 + 堆栈）
+    守护进程重启时把两者拼起来给用户看，否则用户只看到「进程已退出」，
+    完全不知道是代码 bug、网络问题还是被系统杀了。
+    """
+    return Path(_ROOMS_BASE_DIR).resolve() / "rooms" / room_id / "data" / "bot_error.json"
+
+
+def _write_crash_info(room_id: str, reason: str, exit_code: Optional[int] = None,
+                      paused: bool = False, retry_at: float = 0.0) -> None:
     try:
         path = _crash_info_path(room_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -724,10 +743,45 @@ def _write_crash_info(room_id: str, reason: str, exit_code: Optional[int] = None
             "reason": reason,
             "exit_code": exit_code,
             "attempts": len(_restart_attempts.get(room_id, [])),
+            # paused=True 表示守护进程已放弃自动重启（连续崩溃太频繁），
+            # retry_at 是下次还会再试的时间。前端据此改文案，不要再说「已自动重启」。
+            "paused": bool(paused),
+            "retry_at": int(retry_at or 0),
         }
         path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     except Exception as exc:  # noqa: BLE001
         logger.debug("write crash info failed: %s", exc)
+
+
+def _take_bot_error(room_id: str) -> str:
+    """取走同进程 Bot 的崩溃详情（读后删除，避免下次复用到旧错误）。"""
+    try:
+        path = _bot_error_path(room_id)
+        if not path.exists():
+            return ""
+        data = json.loads(path.read_text(encoding="utf-8"))
+        path.unlink(missing_ok=True)
+        if isinstance(data, dict):
+            return str(data.get("reason") or "")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("read bot error failed: %s", exc)
+    return ""
+
+
+def _clear_crash_state(room_id: str) -> None:
+    """手动启动/重启后清掉崩溃记录、崩溃详情和限流计数。
+
+    不清限流计数的话，用户点完重启、下一次崩溃会立刻又被判「连续崩溃」而暂停重启，
+    看起来就像「重启不生效」。
+    """
+    for path in (_crash_info_path(room_id), _bot_error_path(room_id)):
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+    _restart_attempts.pop(room_id, None)
+    _zombie_restarts.pop(room_id, None)
+    _no_heartbeat_since.pop(room_id, None)
 
 
 def _read_crash_info(room_id: str) -> dict:
@@ -752,10 +806,23 @@ def _restart_allowed(room_id: str, now: float) -> bool:
 
 
 async def _recover_room(room_id: str, reason: str, now: float) -> None:
+    # 同进程 Bot 自己写的崩溃详情优先（比「进程已退出」有用得多）
+    detail = _take_bot_error(room_id)
+    if detail:
+        reason = f"{reason}：{detail}"[:300]
     if not _restart_allowed(room_id, now):
+        # 连续崩溃太频繁 → 暂停自动重启。**这里必须写 crash_info**：
+        # 以前只打一行日志就 return，房间就那样死着，前端什么提示都没有，
+        # 用户看到的就是「机器人意外关闭，得手动点重启」。
+        history = _restart_attempts.get(room_id, [])
+        retry_at = (history[-1] + _CRASH_COOLDOWN) if history else (now + _CRASH_COOLDOWN)
+        _write_crash_info(
+            room_id,
+            f"{reason}（连续 {len(history)} 次崩溃，已暂停自动重启）",
+            last_exit_code(room_id), paused=True, retry_at=retry_at)
         logger.warning(
-            "supervisor: room %s crashed too often (%d times/15min), 冷却中，暂停自动重启",
-            room_id, len(_restart_attempts.get(room_id, [])),
+            "supervisor: room %s crashed too often (%d times/15min), 冷却中，暂停自动重启（%s 后重试）",
+            room_id, len(history), time.strftime("%H:%M:%S", time.localtime(retry_at)),
         )
         return
     _restart_attempts.setdefault(room_id, []).append(now)
@@ -2535,7 +2602,9 @@ async def api_list_rooms(request: Request):
         crash = _read_crash_info(rid)
         if crash:
             r["crash_info"] = crash
-            r["recent_crash"] = (now - int(crash.get("ts") or 0)) < 900
+            # 暂停自动重启时要一直显示（不然用户过十几分钟回来提示就消失了，
+            # 又变成「莫名其妙停了」）；普通崩溃只在 15 分钟内提示「已自动重启」。
+            r["recent_crash"] = bool(crash.get("paused")) or (now - int(crash.get("ts") or 0)) < 900
         else:
             r["recent_crash"] = False
         if r.get("status") == "running" and r["auth_status"] == "needs_login":
@@ -2629,12 +2698,7 @@ async def api_start_room(room_id: str):
         return JSONResponse({"error": "启动失败，请检查配置"}, status_code=500)
     _mark_desired(room_id, True)
     _save_room_states()
-    # 清除上次崩溃记录
-    try:
-        _crash_info_path(room_id).unlink(missing_ok=True)
-    except Exception:  # noqa: BLE001
-        pass
-    _restart_attempts.pop(room_id, None)
+    _clear_crash_state(room_id)
     return {"ok": True, "status": "running"}
 
 
@@ -2653,6 +2717,10 @@ async def api_restart_room(room_id: str):
     ok = await restart_room_async(room_id)
     if ok:
         _mark_desired(room_id, True)
+        # 手动重启等于用户明确要求「重新来一次」：清掉崩溃记录和限流计数，
+        # 否则「连续 5 次崩溃」的计数留着，下一次崩溃会立刻又被暂停自动重启，
+        # 用户会觉得「点了重启也没用」。
+        _clear_crash_state(room_id)
     _save_room_states()
     return {"ok": ok, "status": "running" if ok else "stopped"}
 
@@ -5284,10 +5352,21 @@ INDEX_HTML = r"""<!DOCTYPE html>
             </button>
         </div>
 
-        <!-- 异常退出提示（自动守护已恢复） -->
+        <!-- 异常退出提示（自动守护已恢复 / 或已暂停自动重启） -->
         <div v-if="selectedRoom && selectedRoom.recent_crash"
-             class="bg-yellow-50 border border-yellow-200 rounded-xl p-3 mb-4 text-xs text-yellow-800">
-            ⚠️ 机器人刚刚异常退出（{{ selectedRoom.crash_info?.reason }}<span v-if="selectedRoom.crash_info?.exit_code !== null && selectedRoom.crash_info?.exit_code !== undefined">，退出码 {{ selectedRoom.crash_info.exit_code }}</span>），守护进程已自动重启。
+             class="border rounded-xl p-3 mb-4 text-xs"
+             :class="selectedRoom.crash_info?.paused ? 'bg-red-50 border-red-200 text-red-700' : 'bg-yellow-50 border-yellow-200 text-yellow-800'">
+            <template v-if="selectedRoom.crash_info?.paused">
+                <div>⚠️ 机器人异常退出，且<strong>连续崩溃太频繁，守护进程已暂停自动重启</strong>。</div>
+                <div class="mt-1 break-all">原因：{{ selectedRoom.crash_info?.reason }}</div>
+                <div class="mt-1" v-if="selectedRoom.crash_info?.retry_at">
+                    下次自动重试：{{ fmtDateTime(selectedRoom.crash_info.retry_at, true) }}
+                </div>
+                <div class="mt-1">急着恢复可以点上面的「保存并重启」；如果反复出现，请把上面这段原因发给我。</div>
+            </template>
+            <template v-else>
+                ⚠️ 机器人刚刚异常退出（{{ selectedRoom.crash_info?.reason }}<span v-if="selectedRoom.crash_info?.exit_code !== null && selectedRoom.crash_info?.exit_code !== undefined">，退出码 {{ selectedRoom.crash_info.exit_code }}</span>），守护进程已自动重启。
+            </template>
         </div>
 
         <!-- 房间信息头（手机竖排，避免标题被按钮挤成竖排文字） -->
