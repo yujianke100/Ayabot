@@ -847,6 +847,89 @@ def main() -> int:
         ok("始终失败时返回 False",
            LiveRobot._record_stat(stub2, "礼物统计", label="probe2", write=_always_locked) is False)
         ok("始终失败时 dropped +1", stub2._dropped_stats == 1, stub2._dropped_stats)
+
+        # ── 31. 中文文件名的导入 ──
+        print("[31] 中文文件名")
+        # fetch 的 header 值只能是 ISO-8859-1，中文文件名直接塞进 X-Filename 会让浏览器
+        # 抛 TypeError（请求根本发不出去）。前端 encodeURIComponent，后端 unquote。
+        cn_name = "录播 2024年12月01日#1.xml"
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_SAME_A,
+                       quote(cn_name, safe=""), dry_run=1)
+        ok("百分号编码的中文文件名能被接受", code == 200 and r.get("ok"), r.get("error"))
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_SAME_A,
+                       quote(cn_name, safe=""))
+        ok("真导入成功", code == 200 and r.get("ok"), r.get("error"))
+        imports = (_req("GET", f"/api/rooms/{ROOM}/imports")[1] or {}).get("imports") or []
+        # `#` 会被替换成 `_`（否则 source 的 `名字#摘要` 会被切错），其余原样保留
+        want = cn_name.replace("#", "_")
+        hit = [i for i in imports if i["name"] == want]
+        ok("批次名还原成中文（# 已替换）", bool(hit), [i["name"] for i in imports][:6])
+        if hit:
+            code, r = _req("DELETE", f"/api/rooms/{ROOM}/imports?source={quote(hit[0]['source'])}")
+            ok("中文批次能撤销", code == 200 and r.get("ok"), r.get("error"))
+        # 未编码的 ASCII 文件名照旧可用（脚本/老客户端）
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_SAME_A, "plain.xml", dry_run=1)
+        ok("未编码的 ASCII 文件名照旧可用", code == 200 and r.get("ok"), r.get("error"))
+
+        # ── 32. 大库上的预检不能是全表扫描 ──
+        print("[32] 预检性能（dedupe_key 部分索引）")
+        # dedupe_key 上是部分索引（WHERE dedupe_key <> ''）。如果预检只查
+        # `dedupe_key = ?`，SQLite 推不出索引条件 → 每条全表扫描 → O(n²)。
+        # 实测 6 万行的库 + 3000 次查找要 23.7 秒（折算 20 万条预检 26 分钟）。
+        from app.storage import GiftEvent as _GE
+        from app.storage import StatsStore as _S2
+        _s = _S2(str(db))
+        _s._conn.execute("BEGIN")
+        fill = 60000
+        for i in range(fill):
+            _s.record_gift_event(
+                _GE(ts=1735664400 + i, month="2024-12", uid=700000 + i, uname=f"f{i}",
+                    event_type="SEND_GIFT", gift_name="辣条", gift_num=1, is_blind_box=0,
+                    blind_box_cost=0, actual_value=0, profit_value=0, raw_json="{}"),
+                dedupe_key=f"fill{i}", source="xml:fill.xml#ffff", commit=False)
+        _s._conn.commit()
+        _s._conn.close()
+
+        n_probe = 3000
+        body = ['<?xml version="1.0" encoding="utf-8"?>', "<i>",
+                "<metadata><record_start_time>2025-03-01T20:00:00+08:00</record_start_time>"
+                "</metadata>"]
+        for i in range(n_probe):
+            body.append(f'<gift ts="{i}.000" uid="{900000 + i}" user="P{i}" '
+                        f'giftname="辣条" giftcount="1"/>')
+        body.append("</i>")
+        probe_xml = "\n".join(body)
+        t0 = time.time()
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", probe_xml, "probe.xml", dry_run=1)
+        dt = time.time() - t0
+        ok(f"预检 {n_probe} 条用时 {dt:.2f}s（< 5s）", code == 200 and dt < 5, dt)
+        ok("预检结果正确（全部是新增）",
+           (r.get("stats") or {}).get("would_insert") == n_probe,
+           (r.get("stats") or {}).get("would_insert"))
+
+        # ── 33. 按日期删除要连上舰一起删 ──
+        print("[33] 按日期删除包含上舰")
+        from app.storage import StatsStore as _S3
+        _s3 = _S3(str(db))
+        _s3.record_guard_event(ts=1600000000, month="2020-09", uid=880001, uname="老舰长",
+                               guard_level=3, guard_name="舰长", months=1,
+                               price_coin=198000, value=1980, start_time=1600000000,
+                               source="xml:old_guard.xml#0ld0")
+        _s3.record_guard_event(ts=int(time.time()), month="2024-12", uid=880002, uname="新舰长",
+                               guard_level=2, guard_name="提督", months=1,
+                               price_coin=1998000, value=19980, start_time=int(time.time()),
+                               source="xml:new_guard.xml#n3w0")
+        _s3._conn.close()
+        before = q("SELECT COUNT(1) FROM guard_events")[0][0]
+        code, r = _req("POST", f"/api/rooms/{ROOM}/delete_old",
+                       json.dumps({"date": "2021-01-01", "type": "gift"}).encode(),
+                       {"Content-Type": "application/json"})
+        ok("删除接口返回 200", code == 200, r)
+        ok("返回里带上舰删除条数", (r or {}).get("deleted_guards") == 1, r)
+        left = q("SELECT uid FROM guard_events ORDER BY ts")
+        ok("2020 年的上舰被删掉、新的还在",
+           len(left) == before - 1 and all(row[0] == 880002 for row in left),
+           left[:5])
     finally:
         server.should_exit = True
         th.join(timeout=10)

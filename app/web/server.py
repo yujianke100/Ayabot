@@ -25,6 +25,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import unquote
 
 import aiohttp
 import yaml
@@ -3778,15 +3779,24 @@ def _import_xml_blocking(
 
         if dry_run:
             # 预检再算一遍"真正会新增多少"（重复导入时这个数字会是 0）
-            new_gifts = 0
-            for ev, key in plan.gifts:
-                if _is_overlap_gift(ev):
-                    continue
-                exists = store._conn.execute(
-                    "SELECT 1 FROM gift_events WHERE dedupe_key = ? LIMIT 1", (key,)).fetchone()
-                if not exists:
-                    new_gifts += 1
-            stats["would_insert"] = new_gifts
+            #
+            # 这里有两个坑，都会让预检从"秒级"变成"几十分钟"：
+            # 1) dedupe_key 上是**部分索引**（WHERE dedupe_key <> ''）。SQLite 只有在
+            #    查询条件本身能推出索引条件时才会用它 —— 只写 `dedupe_key = ?` 会退化成
+            #    全表扫描。实测 6 万行的库上 3000 次查找要 23.7 秒，折算 20 万条的预检
+            #    要 26 分钟（用户看到的现象就是"点了预检一直不动"）。
+            #    加上 `AND dedupe_key <> ''` 后走覆盖索引，快 2700 倍。
+            # 2) 逐条往返也慢，按 500 个键一批做 IN 查询。
+            pending = [k for ev, k in plan.gifts if not _is_overlap_gift(ev)]
+            known: set[str] = set()
+            for i in range(0, len(pending), 500):
+                chunk = pending[i:i + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                known.update(r[0] for r in store._conn.execute(
+                    f"SELECT dedupe_key FROM gift_events "
+                    f"WHERE dedupe_key IN ({placeholders}) AND dedupe_key <> ''",
+                    chunk))
+            stats["would_insert"] = sum(1 for k in pending if k not in known)
             stats["would_insert_guards"] = sum(
                 1 for g in plan.guards if not _is_overlap_guard(g))
             return {"ok": True, "dry_run": True, "stats": stats}
@@ -3819,9 +3829,13 @@ def _import_xml_blocking(
             if _is_overlap_guard(g):
                 continue
             # record_guard_event 走 UPSERT：命中已有 (uid, start_time) 时也只 rowcount=1，
-            # 所以先查一次，才能把"新增"和"已存在"分开报给用户
+            # 所以先查一次，才能把"新增"和"已存在"分开报给用户。
+            # 同样要带 `AND start_time > 0`：索引是部分索引（WHERE start_time > 0），
+            # 少了这个条件 SQLite 用不上它，每条都是全表扫描（和预检那里同一个坑）。
+            # 顺带也是语义对齐：start_time=0 的行本来就不参与 UPSERT 去重。
             exists = store._conn.execute(
-                "SELECT 1 FROM guard_events WHERE uid = ? AND start_time = ? LIMIT 1",
+                "SELECT 1 FROM guard_events WHERE uid = ? AND start_time = ? "
+                "AND start_time > 0 LIMIT 1",
                 (g["uid"], g["start_time"])).fetchone()
             if exists:
                 guards_dup += 1
@@ -3881,6 +3895,12 @@ async def api_import_danmaku_xml(room_id: str, request: Request):
                                       f"上限 {MAX_XML_BYTES // 1048576} MB"}
 
     filename = (request.headers.get("X-Filename") or "").strip()
+    # 文件名必须能带中文。HTTP 头只能放 ISO-8859-1，浏览器 fetch 遇到中文头值会直接抛
+    # TypeError（"Cannot convert argument to a ByteString"）—— 请求根本发不出去，
+    # 用户看到的是"导入失败: Cannot convert argument..."。所以前端发送前
+    # encodeURIComponent，这里解开；ASCII 文件名编码后不变，老客户端/脚本也照旧可用。
+    if "%" in filename:
+        filename = unquote(filename)
     filename = Path(filename).name or "danmaku.xml"
     # source 会写进数据库并用于撤销，做个长度与字符收敛。
     # `#` 要去掉：source 用 `xml:名字#摘要` 的形式，名字里带 # 会把摘要切错位置。
@@ -3995,6 +4015,15 @@ async def api_room_delete_old(room_id: str, request: Request):
                 "SELECT DISTINCT month FROM gift_events WHERE ts < ?", (cutoff_ts,)).fetchall()]
             cur.execute("DELETE FROM gift_events WHERE ts < ?", (cutoff_ts,))
             result["deleted_gifts"] = cur.rowcount
+            # 上舰记录属于同一类统计，必须一起删：漏了它会让「删除旧数据」之后
+            # 大航海页面上还留着几年前的记录（而礼物已经没了），看起来像没删干净。
+            # 老库可能还没有这张表，先看 sqlite_master。
+            has_guard_tbl = cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='guard_events'"
+            ).fetchone()
+            if has_guard_tbl:
+                cur.execute("DELETE FROM guard_events WHERE ts < ?", (cutoff_ts,))
+                result["deleted_guards"] = cur.rowcount
         if data_type in ("danmaku", "all"):
             cur.execute("DELETE FROM danmaku_log WHERE ts < ?",
                         (tzutil.day_range(date_str)[1] + 1,))
@@ -8283,6 +8312,7 @@ createApp({
                 const data = await res.json();
                 const parts = [];
                 if (data.deleted_gifts > 0) parts.push(`${data.deleted_gifts} 条送礼`);
+                if (data.deleted_guards > 0) parts.push(`${data.deleted_guards} 条上舰`);
                 if (data.deleted_danmaku > 0) parts.push(`${data.deleted_danmaku} 条弹幕`);
                 delResult.value = parts.length ? `已删除 ${parts.join('、')}` : '没有需要删除的数据';
             } catch(e) { delResult.value = '删除失败: ' + e.message; }
@@ -8337,7 +8367,10 @@ createApp({
                 method: 'POST',
                 credentials: 'include',
                 // 直接把文件当请求体：后端自己解析，不依赖 multipart
-                headers: {'X-Filename': file.name, 'Content-Type': 'application/xml'},
+                // 文件名要先 encodeURIComponent：HTTP 头只能放 ISO-8859-1，
+                // 中文文件名直接放进去会让 fetch 抛 TypeError（请求发不出去）
+                headers: {'X-Filename': encodeURIComponent(file.name),
+                          'Content-Type': 'application/xml'},
                 body: file,
             });
             if (res.status === 401) { loggedIn.value = false; return null; }
