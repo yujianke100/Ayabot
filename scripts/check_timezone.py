@@ -208,6 +208,37 @@ def main() -> int:
         st4._conn.close()
 
 
+
+        # ── 15. 「今天零点」不能退化成系统本地时区 ──
+        print("[15] 当天窗口")
+        tzutil.set_config_timezone("UTC")
+        _n = tzutil.now()
+        _start = tzutil.day_start_ts(_n)
+        ok("day_start_ts 是配置时区的零点",
+           _start == int(_n.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()),
+           [_start, _n.isoformat()])
+        ok("day_end_ts = 零点 + 86400", tzutil.day_end_ts(_n) == _start + 86400)
+        # 旧的错误写法（naive datetime.timestamp()）在东八区会偏 8 小时，这里必须不同
+        _naive = int(datetime(_n.year, _n.month, _n.day).timestamp())
+        if abs(_start - _naive) not in (0,):
+            ok("旧写法确认会偏（说明这条断言有意义）", True, (start_d := (_start - _naive)) / 3600)
+        tzutil.set_config_timezone("Asia/Shanghai")
+        _n2 = tzutil.now()
+        ok("换回东八区后零点仍是当地零点",
+           tzutil.day_start_ts(_n2) == int(_n2.replace(hour=0, minute=0, second=0,
+                                                       microsecond=0).timestamp()))
+
+        # ── 15b. bot 的 _now() 与 tzutil.now() 必须同源 ──
+        print("[15b] bot 与 tzutil 同源")
+        from app.bot import _now as bot_now
+        for tzn in ("UTC", "Asia/Shanghai", "Europe/Berlin"):
+            tzutil.set_config_timezone(tzn)
+            a, b = bot_now(), tzutil.now()
+            same_day = (a.year, a.month, a.day) == (b.year, b.month, b.day)
+            ok(f"[{tzn}] bot._now 与 tzutil.now 同日同时区", same_day and a.utcoffset() == b.utcoffset(),
+               [a.isoformat(), b.isoformat()])
+        tzutil.set_config_timezone("Asia/Shanghai")
+
         # ── 13. 时区数据必须真的可用（Windows 没有系统 tzdb，全靠 tzdata 包）──
         print("[13] tzdata 依赖")
         try:
@@ -247,6 +278,13 @@ def main() -> int:
                    and not ln.strip().startswith("#")]
             ok(f"{f} 无 datetime.now() 直接取当前时间", not bad, bad[:3])
         src_bot = (ROOT / "app" / "bot.py").read_text(encoding="utf-8")
+        # naive datetime(y,m,d).timestamp() 会被当系统本地时区，必须用 tzutil.day_start_ts
+        naive_lines = [ln.strip() for ln in src_bot.splitlines()
+                       if "datetime(now.year" in ln or "datetime(_n.year" in ln]
+        ok("bot 不用 naive datetime(y,m,d).timestamp()", not naive_lines, naive_lines[:2])
+        ok("bot 的今日窗口用 tzutil.day_start_ts", "tzutil.day_start_ts" in src_bot)
+        ok("bot 的 _now() 走 tzutil（单一来源）",
+           "return tzutil.now()" in src_bot)
         ok("bot 记录礼物/上舰用配置时区 _now()",
            'month = _now().strftime("%Y-%m")' in src_bot
            and 'month=_now().strftime("%Y-%m")' in src_bot)

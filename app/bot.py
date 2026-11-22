@@ -1098,7 +1098,10 @@ class LiveRobot:
         if name == "today_blindbox":
             self.logger.info("today blindbox stats requested: uid=%s arg=%s", uid, arg)
             now = _now()
-            today_start = int(datetime(now.year, now.month, now.day).timestamp())
+            # 用配置时区算当天窗口。写成 datetime(y,m,d).timestamp() 会被当成系统本地时区，
+            # 系统时区与配置不一致时「今日盲盒」统计的窗口会整体偏移。
+            from app import tzutil
+            today_start = tzutil.day_start_ts(now)
             today_end = today_start + 86400
             if arg:
                 result = self.store.get_today_user_blindbox_by_uname(today_start, today_end, arg)
@@ -1688,10 +1691,13 @@ def set_bot_timezone(tz_name: str) -> None:
 
 
 def _now() -> datetime:
-    """返回配置时区的当前时间（兜底 UTC）。"""
-    if _TZ:
-        return datetime.now(_TZ)
-    return datetime.now()
+    """返回配置时区的当前时间。
+
+    直接走 `app.tzutil`，让「机器人写 month/开播日期」和「WebUI 按日期筛选/导出/删除」
+    共用同一个时区来源 —— 以前这里是独立的一套 `_TZ`，两套口径会悄悄漂移。
+    """
+    from app import tzutil
+    return tzutil.now()
 
 
 def _is_in_time_slot(time_start: int, time_end: int, current_hour: int | None = None) -> bool:

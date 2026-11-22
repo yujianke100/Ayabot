@@ -92,6 +92,22 @@ def day_range(date_str: str) -> tuple[int, int]:
     return int(start.timestamp()), int(end.timestamp())
 
 
+def day_start_ts(dt: datetime | None = None) -> int:
+    """配置时区下「当天 00:00」的时间戳。
+
+    不要写成 `datetime(d.year, d.month, d.day).timestamp()` —— 那是 **naive** datetime，
+    `.timestamp()` 会按**系统本地时区**解释它。系统时区不是配置时区时，取到的「今天零点」
+    会整体偏移（东八区 vs UTC 差 8 小时），`#今日盲盒` 这类按「今天」统计的功能就错窗口。
+    """
+    d = dt or now()
+    return int(d.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+
+
+def day_end_ts(dt: datetime | None = None) -> int:
+    """配置时区下「当天 23:59:59」之后一刻的时间戳（当天上界，开区间）。"""
+    return day_start_ts(dt) + 86400
+
+
 def range_before(date_str: str) -> int:
     """`YYYY-MM-DD`（配置时区）当天 00:00:00 的时间戳，用于「删除某日之前」。"""
     return day_range(date_str)[0]

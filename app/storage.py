@@ -723,19 +723,30 @@ class StatsStore:
     def list_import_sources(self) -> list[dict[str, Any]]:
         """已导入的批次（按 source 归并），供「撤销导入」列表用。"""
         out: list[dict[str, Any]] = []
-        rows = self._conn.execute(
-            """
-            SELECT source, COUNT(1) AS events, COALESCE(SUM(gift_num), 0) AS num,
-                   MIN(ts) AS first_ts, MAX(ts) AS last_ts
-            FROM gift_events
-            WHERE source LIKE 'xml:%'
-            GROUP BY source ORDER BY last_ts DESC
-            """
-        ).fetchall()
-        for source, events, num, first_ts, last_ts in rows:
-            guard = self._conn.execute(
-                "SELECT COUNT(1) FROM guard_events WHERE source = ?", (source,)
-            ).fetchone()[0]
+        # 必须把 gift_events 和 guard_events 都算进来：只含上舰记录的 XML（没有礼物）
+        # 也是合法导入，如果只查 gift_events，这种批次在界面上根本不出现，就撤不掉了。
+        # 一次聚合两张表，避免每批再来一次 COUNT（批次多时是 N+1）。
+        gift_rows = {
+            r[0]: (r[1], r[2], r[3], r[4]) for r in self._conn.execute(
+                """
+                SELECT source, COUNT(1), COALESCE(SUM(gift_num), 0), MIN(ts), MAX(ts)
+                FROM gift_events WHERE source LIKE 'xml:%' GROUP BY source
+                """
+            ).fetchall()
+        }
+        guard_rows = {
+            r[0]: (r[1], r[2], r[3]) for r in self._conn.execute(
+                """
+                SELECT source, COUNT(1), MIN(ts), MAX(ts)
+                FROM guard_events WHERE source LIKE 'xml:%' GROUP BY source
+                """
+            ).fetchall()
+        }
+        for source in set(gift_rows) | set(guard_rows):
+            events, num, g_first, g_last = gift_rows.get(source, (0, 0, 0, 0))
+            guard, d_first, d_last = guard_rows.get(source, (0, 0, 0))
+            first_ts = min([t for t in (g_first, d_first) if t] or [0])
+            last_ts = max([t for t in (g_last, d_last) if t] or [0])
             # source 形如 xml:文件名#内容摘要；摘要只用于区分同名文件，界面默认不显示
             raw_name = str(source)[4:] or str(source)
             name, _, short = raw_name.partition("#")
@@ -749,6 +760,8 @@ class StatsStore:
                 "first_ts": int(first_ts or 0),
                 "last_ts": int(last_ts or 0),
             })
+        # 最近导入/最近的场次排前面（原来是 SQL 的 ORDER BY last_ts DESC）
+        out.sort(key=lambda x: (-x["last_ts"], x["name"]))
         # 同名批次同时存在时，把摘要补到名字后面，否则两个「danmaku.xml」看着一模一样
         seen: dict[str, int] = {}
         for item in out:
@@ -768,8 +781,13 @@ class StatsStore:
             """,
             (source,),
         ).fetchall()
+        # 注意：这里**不能**在 rows 为空时直接 return —— 只含上舰记录的批次
+        # 在 gift_events 里一行都没有，直接返回就撤不掉那批上舰记录了。
         if not rows:
-            return {"deleted": 0, "guard_deleted": 0}
+            guard_deleted = self._conn.execute(
+                "DELETE FROM guard_events WHERE source = ?", (source,)).rowcount
+            self._conn.commit()
+            return {"deleted": 0, "guard_deleted": int(guard_deleted)}
 
         blind_delta: dict[tuple[str, int], list[int]] = {}
         gift_delta: dict[tuple[str, int], list[int]] = {}

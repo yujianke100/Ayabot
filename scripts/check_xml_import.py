@@ -189,6 +189,15 @@ XML_TWO_DAYS = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 
+# 只含上舰记录、没有礼物的 XML（合法：录制期间没人送礼物，只上了舰）
+XML_GUARD_ONLY = """<?xml version="1.0" encoding="utf-8"?>
+<i>
+  <metadata><record_start_time>{start}</record_start_time></metadata>
+  <guard ts="100.000" uid="777" user="舰长甲" level="3" count="1"/>
+</i>
+""".format(start=BASE_ISO)
+
+
 def _req(method: str, path: str, body: bytes | None = None,
          headers: dict | None = None) -> tuple[int, dict]:
     req = urllib.request.Request(
@@ -224,6 +233,9 @@ def main() -> int:
     srv._GIFT_PRICE_CACHE = {"辣条": (100, "silver"), "小花花": (100, "gold"),
                              "小心心": (0, "silver")}
     srv._GIFT_CACHE_BUILT = True
+    # 本脚本一口气打上百个请求，会被「每 IP 60 次/分钟」的限流挡住（429）。
+    # 这是正式环境需要的保护，测试里关掉。
+    srv._rate_limited = lambda ip: False  # type: ignore[assignment]
 
     server = uvicorn.Server(uvicorn.Config(srv.app, host="127.0.0.1", port=PORT,
                                            log_level="warning"))
@@ -657,9 +669,51 @@ def main() -> int:
         ok("空房间建表并写入", (r.get("stats") or {}).get("inserted") == 1,
            (r.get("stats") or {}).get("inserted"))
 
-        # ── 25. 普通用户不能导入 ──
+        # ── 26. 只含上舰的批次：要能列出来、也要能撤销 ──
+        print("[26] 仅含上舰的批次")
+        undo("guard_only.xml")
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_GUARD_ONLY, "guard_only.xml")
+        st = r.get("stats") or {}
+        ok("导入成功且写入 1 条上舰",
+           code == 200 and r.get("ok") and st.get("guards_inserted") == 1,
+           st.get("guards_inserted"))
+        ok("礼物数为 0", st.get("gifts") == 0, st.get("gifts"))
+        imports = (_req("GET", f"/api/rooms/{ROOM}/imports")[1] or {}).get("imports") or []
+        mine = [i for i in imports if i["name"].startswith("guard_only.xml")]
+        ok("批次列表能看到仅上舰的批次", len(mine) == 1, [i["name"] for i in imports][:4])
+        ok("批次里 guard_events=1 / gift_events=0",
+           bool(mine) and mine[0]["guard_events"] == 1 and mine[0]["gift_events"] == 0,
+           mine[0] if mine else None)
+        if mine:
+            code, r = _req("DELETE",
+                           f"/api/rooms/{ROOM}/imports?source={quote(mine[0]['source'])}")
+            ok("撤销成功且删掉 1 条上舰",
+               code == 200 and r.get("guard_deleted") == 1, r)
+            ok("上舰记录真的没了",
+               q("SELECT COUNT(1) FROM guard_events WHERE source LIKE 'xml:guard_only.xml#%'")[0][0] == 0)
 
-        print("[25] 普通用户不能导入")
+        # ── 27. 批次列表按最近时间倒序 ──
+        print("[27] 批次排序")
+        undo("sortA.xml")
+        undo("sortB.xml")
+        # 两份内容必须不同：内容相同会被 dedupe_key 判成同一个事件，批次根本不会产生
+        old_xml = XML_SAME_A.replace("2024-12-01T18:05:02", "2024-10-01T18:05:02")                             .replace('uid="111"', 'uid="2111"')
+        new_xml = XML_SAME_A.replace("2024-12-01T18:05:02", "2024-11-20T18:05:02")                             .replace('uid="111"', 'uid="3111"')
+        post(f"/api/rooms/{ROOM}/import/danmaku-xml", old_xml, "sortA.xml")
+        post(f"/api/rooms/{ROOM}/import/danmaku-xml", new_xml, "sortB.xml")
+        imports = (_req("GET", f"/api/rooms/{ROOM}/imports")[1] or {}).get("imports") or []
+        names = [i["name"] for i in imports]
+        # 库里还有别的批次（比如 no_raw.xml 的场次更晚），所以只断言这两者的相对顺序
+        ia = next((i for i, n in enumerate(names) if n.startswith("sortA.xml")), -1)
+        ib = next((i for i, n in enumerate(names) if n.startswith("sortB.xml")), -1)
+        ok("较晚的场次排在较早的前面", ia >= 0 and ib >= 0 and ib < ia, names[:5])
+        last_ts = [i["last_ts"] for i in imports]
+        ok("整张表按 last_ts 倒序", last_ts == sorted(last_ts, reverse=True), last_ts[:5])
+        undo("sortA.xml")
+        undo("sortB.xml")
+
+        # ── 28. 普通用户不能导入 ──
+        print("[28] 普通用户不能导入")
         req = urllib.request.Request(
             f"http://127.0.0.1:{PORT}/api/rooms/{ROOM}/import/danmaku-xml",
             data=XML_NO_RAW.encode(), method="POST",
