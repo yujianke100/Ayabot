@@ -21,6 +21,8 @@ USER = "preview"
 PASS = "preview123"
 SCRATCH = Path("C:/Users/shinshi/AppData/Local/hermes/cache/scratch/preview_root")
 ROOM_ID = "1946287911"
+# 额外再放一个房间：截图/回归要验证「换房间」这类场景时的第二间房
+EXTRA_ROOM_IDS = ("2000000002",)
 
 
 def prepare() -> str:
@@ -36,6 +38,15 @@ def prepare() -> str:
     src["auth"] = dict(src.get("auth") or {}, credential_store_path="data/credential.json")
     cfg = room_dir / "config.yaml"
     cfg.write_text(yaml.safe_dump(src, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    for extra in EXTRA_ROOM_IDS:
+        extra_dir = SCRATCH / "rooms" / extra
+        (extra_dir / "data").mkdir(parents=True, exist_ok=True)
+        extra_src = dict(src)
+        extra_src["room_display_id"] = int(extra)
+        extra_src["room_name"] = f"测试房间{extra[-2:]}"
+        (extra_dir / "config.yaml").write_text(
+            yaml.safe_dump(extra_src, allow_unicode=True, sort_keys=False), encoding="utf-8")
     return str(cfg)
 
 

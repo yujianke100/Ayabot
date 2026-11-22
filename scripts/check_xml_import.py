@@ -90,6 +90,51 @@ XML_ONLY_CHAT = """<?xml version="1.0" encoding="utf-8"?>
 """.format(start=BASE_ISO)
 
 
+# 礼物名里带「盲盒」但没有 raw：绝不能算成盲盒（_extract_blindbox_profit 有名字兜底规则）
+XML_BOX_NAME_NO_RAW = """<?xml version="1.0" encoding="utf-8"?>
+<i>
+  <metadata><record_start_time>{start}</record_start_time></metadata>
+  <gift ts="10.000" uid="111" user="甲" giftname="幸运盲盒" giftcount="1"/>
+</i>
+""".format(start=BASE_ISO)
+
+# SEND_GIFT_V2 的 raw：只有 dmscore / pb（protobuf），没有金额字段 → 必须回退到价格表
+XML_V2_RAW = """<?xml version="1.0" encoding="utf-8"?>
+<i>
+  <metadata><record_start_time>{start}</record_start_time></metadata>
+  <gift ts="10.000" uid="111" user="甲" giftname="小花花" giftcount="2"
+        raw='{{"dmscore":62,"pb":"Cg=="}}'/>
+</i>
+""".format(start=BASE_ISO)
+
+
+# SEND_GIFT_V2 真实报文（星光铃铛 / 盲盒 / 实付 5200 金瓜子、盒价 5000）：
+# 录播姬开了「保存原始数据」时，<gift> 的 raw 就是 {"dmscore":..,"pb":"<这段>"}
+V2_PB = (
+    "CNfCjj0SDOatoumxvOS4jumypBpKaHR0cHM6Ly9pMS5oZHNsYi5jb20vYmZzL2ZhY2UvNzJjNmEwNDFhOTVjZDczODNkMmEwYzQyNTZmZGIwNGE2NDAyMmE5"
+    "OC5qcGdCKgjmn7gMKB8yCeeMq+eMq+azpTjVkLQBQNWQtAFI/7f2BFD/0Z8DWAFgA0ogCJABEIaTAhoM5bm46L+Q55uy55uSKgbniIblh7owiCdS9wQIiJMC"
+    "EgzmmJ/lhYnpk4Ppk5sYASACKNAoMNAoOIgnQgRnb2xkShM0ODI4Nzk3OTIxMjU0MjA1NDQwULKzzNYGWAFiJDZhOGIwMDlmLTcxYWQtNGM2Yi04NzdkLTc3"
+    "NWFhMDQ2MmNmY2gKcNAoeAWFAQAAgD+IAQGSAQbmipXlloLAAaifpwrqARUKDeWNl+eUuk5pZ2h0aW4Qyfvg+QSKAuEBCMn74PkEEtgBCg3ljZfnlLpOaWdo"
+    "dGluEkpodHRwczovL2kxLmhkc2xiLmNvbS9iZnMvZmFjZS9kNTJiMmUzNTNiMDg2OThhYzY2YmM2ZTQ1YmU0NGQwYWIwMGVhOGNlLmpwZzJbCg3ljZfnlLpO"
+    "aWdodGluEkpodHRwczovL2kxLmhkc2xiLmNvbS9iZnMvZmFjZS9kNTJiMmUzNTNiMDg2OThhYzY2YmM2ZTQ1YmU0NGQwYWIwMGVhOGNlLmpwZzoeCAcSGmJp"
+    "bGliaWxp55u05pKt6auY6IO95Li75pKtkgIAmgLlAQpKaHR0cHM6Ly9zMS5oZHNsYi5jb20vYmZzL2xpdmUvYTJlODI1NGY1YzUzM2E5YjNmMDAyMDFhODg3"
+    "OGMzN2ZmZmQ0MDY1MS5wbmcSS2h0dHBzOi8vaTAuaGRzbGIuY29tL2Jmcy9saXZlL2ZjNWVlOWNiYjAzNWVmOTRlNjQyZDNjNjc2Zjc0MWZjMzFlNThkMjcu"
+    "d2VicCpKaHR0cHM6Ly9pMC5oZHNsYi5jb20vYmZzL2xpdmUvYWU2YTkxMDZmZDY3MzdiNjg4YmI5M2EyOTM0NmUyNDA1ZjA1ZDcxOC5naWagAtAoqgIAWAFq"
+    "AgggerECCNfCjj0SwwEKDOatoumxvOS4jumypBJKaHR0cHM6Ly9pMS5oZHNsYi5jb20vYmZzL2ZhY2UvNzJjNmEwNDFhOTVjZDczODNkMmEwYzQyNTZmZGIw"
+    "NGE2NDAyMmE5OC5qcGcyWgoM5q2i6bG85LiO6bKkEkpodHRwczovL2kxLmhkc2xiLmNvbS9iZnMvZmFjZS83MmM2YTA0MWE5NWNkNzM4M2QyYTBjNDI1NmZk"
+    "YjA0YTY0MDIyYTk4LmpwZzoLIP///////////wEaZAoJ5Y2h5ZW15oGwEAMYjq3yAiCOrfICKI6t8gIwjq3yAkgBUMn74PkEYA16CSM1NzYyQTc5OYIBCSM1"
+    "NzYyQTc5OYoBCSM1NzYyQTc5OZIBByNGRkZGRkaaAQkjNTc2MkE3RTY="
+)
+
+XML_V2_BLIND = """<?xml version="1.0" encoding="utf-8"?>
+<i>
+  <metadata><record_start_time>{start}</record_start_time></metadata>
+  <gift ts="10.000" uid="128164183" user="止鱼与鲤" giftname="星光铃铛" giftcount="1"
+        raw='{{"dmscore":62,"pb":"{pb}"}}'/>
+</i>
+""".format(start=BASE_ISO, pb=V2_PB)
+
+
 def _req(method: str, path: str, body: bytes | None = None,
          headers: dict | None = None) -> tuple[int, dict]:
     req = urllib.request.Request(
@@ -298,8 +343,82 @@ def main() -> int:
                     " COALESCE(SUM(value_total),0) FROM monthly_gift_stats")[0]
         ok("月度聚合与导入行一致", tuple(monthly) == tuple(agg_after), (monthly, agg_after))
 
-        # ── 9. 权限 ──
-        print("[9] 普通用户不能导入")
+
+        # ── 9. 名字含「盲盒」但没有 raw：不许算成盲盒 ──
+        print("[9] 礼物名含「盲盒」但无 raw")
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_BOX_NAME_NO_RAW,
+                       "box_name.xml", dry_run=1)
+        st = r.get("stats") or {}
+        ok("能正常预检", code == 200 and r.get("ok"), r.get("error"))
+        ok("不误判成盲盒", st.get("blindbox") == 0, st.get("blindbox"))
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_BOX_NAME_NO_RAW, "box_name.xml")
+        row = q("SELECT is_blind_box, blind_box_cost, actual_value FROM gift_events"
+                " WHERE gift_name='幸运盲盒'")
+        ok("落库后 is_blind_box=0、成本 0", row and tuple(row[0]) == (0, 0, 0), row)
+        _req("DELETE", f"/api/rooms/{ROOM}/imports?source=xml:box_name.xml")
+
+        # ── 10. V2 风格的 raw（只有 pb，没有金额）→ 回退价格表 ──
+        print("[10] raw 里没有金额字段时回退价格表")
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_V2_RAW, "v2raw.xml", dry_run=1)
+        st = r.get("stats") or {}
+        ok("能正常预检", code == 200 and r.get("ok"), r.get("error"))
+        ok("没有把礼物算成「未知价格」", st.get("unknown_price_events") == 0,
+           st.get("unknown_price_names"))
+        ok("金额按价格表估 = 小花花 0.1×2 = 0.2 元",
+           abs(float(st.get("value_yuan") or 0) - 0.2) < 1e-6, st.get("value_yuan"))
+        ok("不算盲盒", st.get("blindbox") == 0, st.get("blindbox"))
+        _req("DELETE", f"/api/rooms/{ROOM}/imports?source=xml:v2raw.xml")
+
+        # ── 11. 重复导入时上舰计数要分开报 ──
+        print("[11] 重复导入的上舰计数")
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_WITH_RAW.format(start=BASE_ISO),
+                       "guard_dup.xml")
+        ok("首次导入上舰 1 条", (r.get("stats") or {}).get("guards_inserted") == 1,
+           (r.get("stats") or {}).get("guards_inserted"))
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_WITH_RAW.format(start=BASE_ISO),
+                       "guard_dup.xml")
+        st = r.get("stats") or {}
+        ok("再次导入不重复计入新增", st.get("guards_inserted") == 0, st.get("guards_inserted"))
+        ok("报成「已存在」1 条", st.get("guards_duplicate") == 1, st.get("guards_duplicate"))
+        _req("DELETE", f"/api/rooms/{ROOM}/imports?source=xml:guard_dup.xml")
+
+
+        # ── 11bis. V2 真实报文 raw：能还原盲盒与精确金额 ──
+        print("[11b] SEND_GIFT_V2 真实 raw")
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_V2_BLIND, "v2blind.xml", dry_run=1)
+        st = r.get("stats") or {}
+        ok("能正常预检", code == 200 and r.get("ok"), r.get("error"))
+        ok("识别为盲盒 1 条", st.get("blindbox") == 1, st.get("blindbox"))
+        ok("金额按实付 52 电池 = 5.2 元",
+           abs(float(st.get("value_yuan") or 0) - 5.2) < 1e-6, st.get("value_yuan"))
+        ok("没有落入「未知价格」", st.get("unknown_price_events") == 0,
+           st.get("unknown_price_names"))
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_V2_BLIND, "v2blind.xml")
+        row = q("SELECT is_blind_box, blind_box_cost, actual_value, profit_value FROM gift_events"
+                " WHERE source='xml:v2blind.xml'")
+        ok("落库：盲盒 成本50 实际52 盈亏2", row and tuple(row[0]) == (1, 50, 52, 2), row)
+        _req("DELETE", f"/api/rooms/{ROOM}/imports?source=xml:v2blind.xml")
+
+        # ── 12b. NOT NULL 违规不能被静默吞掉 ──
+        print("[12] 真错误要抛出来")
+        from app.storage import GiftEvent as _GE, StatsStore as _SS
+        _st = _SS(str(db))
+        try:
+            try:
+                _st.record_gift_event(_GE(ts=0, month="2024-12", uid=1, uname=None,
+                                          event_type="SEND_GIFT", gift_name="x", gift_num=1,
+                                          is_blind_box=0, blind_box_cost=0, actual_value=0,
+                                          profit_value=0, raw_json="{}"), dedupe_key="notnull1")
+                raised = False
+            except Exception:
+                raised = True
+            ok("uname 为 None 时抛异常（没被 OR IGNORE 吞掉）", raised)
+        finally:
+            _st._conn.close()
+
+        # ── 13. 权限 ──
+
+        print("[13] 普通用户不能导入")
         req = urllib.request.Request(
             f"http://127.0.0.1:{PORT}/api/rooms/{ROOM}/import/danmaku-xml",
             data=XML_NO_RAW.encode(), method="POST",

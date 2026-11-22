@@ -168,11 +168,14 @@ class StatsStore:
         """
         cur = self._conn.execute(
             """
-            INSERT OR IGNORE INTO gift_events (
+            INSERT INTO gift_events (
                 ts, month, uid, uname, event_type, gift_name, gift_num,
                 is_blind_box, blind_box_cost, actual_value, profit_value, raw_json,
                 dedupe_key, source
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            -- 只忽略「同一个导入去重键」这一种冲突；不要用 INSERT OR IGNORE，
+            -- 那会把 NOT NULL 之类的真错误一起静默吞掉（实时链路就查不出问题了）
+            ON CONFLICT(dedupe_key) WHERE dedupe_key <> '' DO NOTHING
             """,
             (
                 event.ts,

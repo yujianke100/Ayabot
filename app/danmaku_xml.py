@@ -54,8 +54,9 @@ from datetime import datetime
 GUARD_UNIT_PRICE = {3: 198000, 2: 1998000, 1: 19998000}
 GUARD_NAMES = {1: "总督", 2: "提督", 3: "舰长"}
 
-# 一条录播 XML 允许的最大体积：再大基本是导错了文件
-MAX_XML_BYTES = 256 * 1024 * 1024
+# 一条录播 XML 允许的最大体积：解析时要整个读进内存，给太大只会把用户机器拖死。
+# 典型一场 8 小时直播的弹幕文件是几 MB 到十几 MB，64 MB 已经很宽松。
+MAX_XML_BYTES = 64 * 1024 * 1024
 
 _ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})")
 
@@ -334,27 +335,54 @@ def build_plan(
     value_cent = 0          # 预检用：累计价值（元 × 100，避免浮点误差）
     total_num = 0
 
+    # SEND_GIFT_V2 的 raw 里只有 base64 protobuf（dmscore/pb），没有金额字段。
+    # 一条 V2 消息可能包含多件礼物，而录播姬会给每件礼物各写一个 <gift> 且带同一份 raw，
+    # 所以按 (礼物名, 数量) 把解码结果分桶、逐条取用 —— 这样精确价格和盲盒信息都能还原。
+    v2_buckets: dict[str, dict[tuple[str, int], list[dict]]] = {}
+
+    def _v2_payload(rec: GiftRec) -> dict | None:
+        pb = (rec.raw or {}).get("pb")
+        if not pb or not isinstance(pb, str):
+            return None
+        bucket = v2_buckets.get(pb)
+        if bucket is None:
+            bucket = {}
+            try:
+                from app.gift_v2 import decode_send_gift_v2
+                items = decode_send_gift_v2(pb)
+            except Exception:
+                items = []
+            for it in items:
+                bucket.setdefault(
+                    (str(it.get("giftName") or ""), _safe_int(it.get("num"))), []).append(it)
+            v2_buckets[pb] = bucket
+        pool = bucket.get((rec.name, rec.num))
+        return pool.pop(0) if pool else None
+
     for rec in parsed.gifts:
-        payload: dict
+        unit, coin = price_map.get(rec.name, (0, "gold"))
+        # 先按礼物名估一份兜底值：录播姬默认不写 raw，而且 SEND_GIFT_V2 的 raw 里
+        # 只有 protobuf（没有金额字段），两种情况都得靠价格表。
+        payload: dict = {
+            "giftName": rec.name,
+            "num": rec.num,
+            "price": unit,
+            "discount_price": unit,
+            "total_coin": unit * rec.num,
+            "coin_type": coin,
+            "blind_gift": None,
+        }
         if rec.raw:
-            payload = dict(rec.raw)
-            payload.setdefault("giftName", rec.name)
-            payload.setdefault("num", rec.num)
-        else:
-            unit, coin = price_map.get(rec.name, (0, "gold"))
-            if unit <= 0:
-                unknown_names[rec.name] = unknown_names.get(rec.name, 0) + 1
-            payload = {
-                "giftName": rec.name,
-                "num": rec.num,
-                "price": unit,
-                "discount_price": unit,
-                "total_coin": unit * rec.num,
-                "coin_type": coin,
-                "blind_gift": None,
-            }
-            if unit <= 0:
-                payload["price_unknown"] = True
+            payload.update({k: v for k, v in rec.raw.items() if v is not None})
+            v2_item = _v2_payload(rec)
+            if v2_item:
+                # V2 protobuf 解出来的才是权威数据（精确价格 + 盲盒信息）
+                payload.update({k: v for k, v in v2_item.items() if v is not None})
+
+        has_price = bool(_safe_int(payload.get("total_coin")) or _safe_int(payload.get("price")))
+        if not has_price:
+            unknown_names[rec.name] = unknown_names.get(rec.name, 0) + 1
+            payload["price_unknown"] = True
 
         payload["uid"] = rec.uid
         payload["uname"] = rec.uname
@@ -363,13 +391,21 @@ def build_plan(
         payload["xml_import"] = True
         payload["xml_source"] = source
 
-        blind = _blindbox_profit(payload)
+        # 盲盒判定只在「有真实金额数据」时做：
+        # _extract_blindbox_profit 有个兜底规则是「礼物名里含『盲盒』就算盲盒」，
+        # 对没有 raw 的历史数据会让「幸运盲盒」这类礼物被算成成本 0 的假盲盒。
+        # 宁可不算盲盒，也不要写进错数据。
+        if rec.raw and has_price:
+            blind = _blindbox_profit(payload)
+        else:
+            blind = {"is_blind_box": False, "blind_box_cost": 0,
+                     "actual_value": 0, "profit_value": 0}
         if blind["is_blind_box"]:
             blind_count += 1
             value_cent += int(blind["actual_value"]) * 10      # 实际价值：电池 ÷10 = 元
         else:
-            coin = _safe_int(payload.get("total_coin"))
-            value_cent += coin // 10                            # 金瓜子 ÷1000 = 元 >> ×100
+            coin_total = _safe_int(payload.get("total_coin"))
+            value_cent += coin_total // 10                      # 金瓜子 ÷1000 = 元 >> ×100
         total_num += rec.num
 
         key = dedupe_key_for("xml", rec.uid, rec.ts, rec.name, rec.num,

@@ -3627,36 +3627,24 @@ async def api_room_export_all(
         return []
 
 
-@app.post("/api/rooms/{room_id}/import/danmaku-xml")
-async def api_import_danmaku_xml(room_id: str, request: Request):
-    """从录播弹幕 XML 补历史礼物 / 上舰数据。
+def _import_xml_blocking(
+    db_path: str,
+    raw: bytes,
+    safe_name: str,
+    source: str,
+    price_map: dict,
+    dry_run: bool,
+    skip_overlap: bool,
+) -> dict:
+    """解析 + 写库。**同步函数，必须放到线程里跑**：
 
-    body 直接是 XML 文件内容（不走 multipart，省掉 python-multipart 依赖）。
-    查询参数：
-      dry_run=1       只预检，不写库
-      skip_overlap=1  与已实时记录的事件重合（±3 秒）时跳过，避免重复计数
+    - 一份几十 MB 的 XML 解析要几百毫秒到几秒
+    - 上万条礼物逐行 INSERT 也要时间
+    直接在 async 端点里跑会卡住 uvicorn 的事件循环，房间守护循环和其它请求都跟着卡。
+    sqlite3 连接默认绑定创建它的线程，所以连接也在这里面建、在这里面关。
     """
-    from app.config import get_room_path
     from app.danmaku_xml import DanmakuXmlError, build_plan, parse_danmaku_xml
     from app.storage import StatsStore
-
-    _, role, _ = _get_current_role(request)
-    if role != "admin":
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-
-    room_dir = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR)
-    if not (room_dir / "config.yaml").exists():
-        return JSONResponse({"error": "房间不存在"}, status_code=404)
-
-    raw = await request.body()
-    if not raw:
-        return JSONResponse({"error": "没有收到文件内容"}, status_code=400)
-
-    filename = (request.headers.get("X-Filename") or "").strip()
-    filename = Path(filename).name or "danmaku.xml"
-    # source 会写进数据库并用于撤销，做个长度与字符收敛
-    safe_name = "".join(ch for ch in filename if ch.isprintable())[:120]
-    source = f"xml:{safe_name}"
 
     try:
         parsed = parse_danmaku_xml(raw, safe_name)
@@ -3666,21 +3654,10 @@ async def api_import_danmaku_xml(room_id: str, request: Request):
         logger.warning("import xml parse failed: %s", exc)
         return {"ok": False, "error": f"解析失败：{exc}"}
 
-    if not _GIFT_PRICE_CACHE:
-        try:
-            await asyncio.wait_for(_build_gift_cache(), timeout=12)
-        except Exception:
-            pass
-    price_map = dict(_GIFT_PRICE_CACHE) or _load_gift_prices_from_disk()
-
     plan = build_plan(parsed, price_map, source)
     stats = dict(plan.stats)
 
-    dry_run = request.query_params.get("dry_run") in ("1", "true", "yes")
-    skip_overlap = request.query_params.get("skip_overlap") in ("1", "true", "yes")
-
-    db_path = _room_db_path(room_id)
-    store = StatsStore(str(db_path))
+    store = StatsStore(db_path)
     try:
         # 重叠检测：同一时间段若已被实时记录过，提醒用户（导入会重复计算）
         overlap = 0
@@ -3703,32 +3680,40 @@ async def api_import_danmaku_xml(room_id: str, request: Request):
         stats["overlap_guards"] = overlap_guards
         stats["source"] = source
 
+        def _is_overlap_gift(ev) -> bool:
+            if not skip_overlap:
+                return False
+            ts_list = live_idx.get((ev.uid, ev.gift_name, ev.gift_num)) or []
+            return any(abs(t - ev.ts) <= 3 for t in ts_list)
+
+        def _is_overlap_guard(g: dict) -> bool:
+            if not skip_overlap:
+                return False
+            return any(uid == g["uid"] and lv == g["guard_level"] and abs(t - g["ts"]) <= 120
+                       for uid, lv, t in guard_seen)
+
         if dry_run:
             # 预检再算一遍"真正会新增多少"（重复导入时这个数字会是 0）
             new_gifts = 0
             for ev, key in plan.gifts:
-                skip = False
-                if skip_overlap and overlap:
-                    ts_list = live_idx.get((ev.uid, ev.gift_name, ev.gift_num)) or []
-                    skip = any(abs(t - ev.ts) <= 3 for t in ts_list)
-                if skip:
+                if _is_overlap_gift(ev):
                     continue
                 exists = store._conn.execute(
                     "SELECT 1 FROM gift_events WHERE dedupe_key = ? LIMIT 1", (key,)).fetchone()
                 if not exists:
                     new_gifts += 1
             stats["would_insert"] = new_gifts
+            stats["would_insert_guards"] = sum(
+                1 for g in plan.guards if not _is_overlap_guard(g))
             return {"ok": True, "dry_run": True, "stats": stats}
 
         inserted = 0
         skipped_dup = 0
         skipped_overlap = 0
         for ev, key in plan.gifts:
-            if skip_overlap:
-                ts_list = live_idx.get((ev.uid, ev.gift_name, ev.gift_num)) or []
-                if any(abs(t - ev.ts) <= 3 for t in ts_list):
-                    skipped_overlap += 1
-                    continue
+            if _is_overlap_gift(ev):
+                skipped_overlap += 1
+                continue
             if store.record_gift_event(ev, dedupe_key=key, source=source, commit=False):
                 inserted += 1
             else:
@@ -3736,10 +3721,17 @@ async def api_import_danmaku_xml(room_id: str, request: Request):
         store._conn.commit()
 
         guards_in = 0
+        guards_dup = 0
         for g in plan.guards:
-            if skip_overlap and any(
-                    uid == g["uid"] and lv == g["guard_level"] and abs(t - g["ts"]) <= 120
-                    for uid, lv, t in guard_seen):
+            if _is_overlap_guard(g):
+                continue
+            # record_guard_event 走 UPSERT：命中已有 (uid, start_time) 时也只 rowcount=1，
+            # 所以先查一次，才能把"新增"和"已存在"分开报给用户
+            exists = store._conn.execute(
+                "SELECT 1 FROM guard_events WHERE uid = ? AND start_time = ? LIMIT 1",
+                (g["uid"], g["start_time"])).fetchone()
+            if exists:
+                guards_dup += 1
                 continue
             if store.record_guard_event(**g):
                 guards_in += 1
@@ -3749,18 +3741,77 @@ async def api_import_danmaku_xml(room_id: str, request: Request):
             "skipped_duplicate": skipped_dup,
             "skipped_overlap": skipped_overlap,
             "guards_inserted": guards_in,
+            "guards_duplicate": guards_dup,
         })
-        logger.info("import xml: room=%s file=%s gifts=%d dup=%d guards=%d",
-                    room_id, safe_name, inserted, skipped_dup, guards_in)
+        logger.info("import xml: file=%s gifts=%d dup=%d guards=%d/%d",
+                    safe_name, inserted, skipped_dup, guards_in, guards_dup)
         return {"ok": True, "dry_run": False, "stats": stats}
-    except Exception as exc:
-        logger.warning("import xml failed: %s", exc)
-        return JSONResponse({"ok": False, "error": f"写入失败：{exc}"}, status_code=500)
     finally:
         try:
             store._conn.close()
         except Exception:
             pass
+
+
+@app.post("/api/rooms/{room_id}/import/danmaku-xml")
+async def api_import_danmaku_xml(room_id: str, request: Request):
+    """从录播弹幕 XML 补历史礼物 / 上舰数据。
+
+    body 直接是 XML 文件内容（不走 multipart，省掉 python-multipart 依赖）。
+    查询参数：
+      dry_run=1       只预检，不写库
+      skip_overlap=1  与已实时记录的事件重合（±3 秒）时跳过，避免重复计数
+    """
+    from app.config import get_room_path
+    from app.danmaku_xml import MAX_XML_BYTES
+
+    _, role, _ = _get_current_role(request)
+    if role != "admin":
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    room_dir = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR)
+    if not (room_dir / "config.yaml").exists():
+        return JSONResponse({"error": "房间不存在"}, status_code=404)
+
+    # 先看 Content-Length 再读 body：直接把整个文件读进内存，超大文件会把内存吃光
+    declared = _safe_int(request.headers.get("content-length"))
+    if declared and declared > MAX_XML_BYTES:
+        return {"ok": False, "error": f"文件太大（{declared / 1048576:.1f} MB），"
+                                      f"上限 {MAX_XML_BYTES // 1048576} MB"}
+    raw = await request.body()
+    if not raw:
+        return JSONResponse({"error": "没有收到文件内容"}, status_code=400)
+    if len(raw) > MAX_XML_BYTES:
+        return {"ok": False, "error": f"文件太大（{len(raw) / 1048576:.1f} MB），"
+                                      f"上限 {MAX_XML_BYTES // 1048576} MB"}
+
+    filename = (request.headers.get("X-Filename") or "").strip()
+    filename = Path(filename).name or "danmaku.xml"
+    # source 会写进数据库并用于撤销，做个长度与字符收敛
+    safe_name = "".join(ch for ch in filename if ch.isprintable())[:120]
+    source = f"xml:{safe_name}"
+
+    if not _GIFT_PRICE_CACHE:
+        try:
+            await asyncio.wait_for(_build_gift_cache(), timeout=12)
+        except Exception:
+            pass
+    price_map = dict(_GIFT_PRICE_CACHE) or _load_gift_prices_from_disk()
+
+    dry_run = request.query_params.get("dry_run") in ("1", "true", "yes")
+    skip_overlap = request.query_params.get("skip_overlap") in ("1", "true", "yes")
+
+    try:
+        result = await asyncio.to_thread(
+            _import_xml_blocking, str(_room_db_path(room_id)), raw, safe_name,
+            source, price_map, dry_run, skip_overlap)
+    except Exception as exc:
+        logger.warning("import xml failed: %s", exc)
+        return JSONResponse({"ok": False, "error": f"写入失败：{exc}"}, status_code=500)
+    if result.get("ok") and not dry_run:
+        logger.info("import xml done: room=%s file=%s", room_id, safe_name)
+    return result
+
 
 
 @app.get("/api/rooms/{room_id}/imports")
@@ -6215,7 +6266,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                             <span>盲盒：{{ p.stats.blindbox }} 条</span>
                             <span>礼物金额：约 {{ p.stats.value_yuan }} 元</span>
                             <span>上舰金额：约 {{ p.stats.guard_value_yuan }} 元</span>
-                            <span v-if="p.stats.would_insert !== undefined">将新增：{{ p.stats.would_insert }} 条</span>
+                            <span v-if="p.stats.would_insert !== undefined">
+                                将新增：{{ p.stats.would_insert }} 条礼物
+                                <template v-if="p.stats.would_insert_guards">、{{ p.stats.would_insert_guards }} 条上舰</template>
+                            </span>
                             <span v-if="p.stats.dropped_no_uid">无 UID 丢弃：{{ p.stats.dropped_no_uid }} 条</span>
                             <span v-if="p.stats.unknown_price_events" class="text-amber-600">
                                 未识别价格的礼物：{{ p.stats.unknown_price_events }} 条
@@ -8144,6 +8198,18 @@ createApp({
         const xmlError = ref('');
         const xmlImports = ref([]);
         const xmlSkipOverlap = ref(true);
+        const xmlFileInput = ref(null);
+
+        // 换房间时必须把导入状态清干净：否则在房间 A 选的文件/预检结果会留在界面上，
+        // 到房间 B 一点「导入」就导进了 B（文件是 A 的，房间是 B 的）
+        Vue.watch(() => selectedRoom.value?.room_id, () => {
+            xmlFiles.value = [];
+            xmlPreview.value = [];
+            xmlMsg.value = '';
+            xmlError.value = '';
+            xmlImports.value = [];
+            if (xmlFileInput.value) xmlFileInput.value.value = '';
+        });
 
         function onXmlFilesPicked(e) {
             xmlFiles.value = Array.from(e.target.files || []);
@@ -8214,7 +8280,7 @@ createApp({
             xmlBusy.value = true;
             xmlMsg.value = '';
             xmlError.value = '';
-            let gifts = 0, guards = 0, dup = 0, skipped = 0, failed = 0;
+            let gifts = 0, guards = 0, dup = 0, skipped = 0, failed = 0, guardDup = 0;
             try {
                 for (const p of okOnes) {
                     const f = xmlFiles.value.find((x) => x.name === p.name);
@@ -8226,11 +8292,13 @@ createApp({
                     guards += st.guards_inserted || 0;
                     dup += st.skipped_duplicate || 0;
                     skipped += st.skipped_overlap || 0;
+                    guardDup += st.guards_duplicate || 0;
                 }
                 const parts = [`新增 ${gifts} 条礼物`];
                 if (guards) parts.push(`${guards} 条上舰`);
                 if (dup) parts.push(`跳过重复 ${dup} 条`);
                 if (skipped) parts.push(`跳过重叠 ${skipped} 条`);
+                if (guardDup) parts.push(`${guardDup} 条上舰已存在`);
                 if (failed) parts.push(`${failed} 个文件失败`);
                 xmlMsg.value = '✅ 导入完成：' + parts.join('、');
                 xmlMsgOk.value = failed === 0;
@@ -9756,7 +9824,7 @@ createApp({
                 delDate, delResult, confirmDelete,
                 xmlFiles, xmlBusy, xmlPreview, xmlMsg, xmlMsgOk, xmlError, xmlImports,
                 xmlSkipOverlap, onXmlFilesPicked, xmlDryRun, xmlDoImport,
-                loadXmlImports, xmlUndoImport, fmtDay, fmtRange,
+                loadXmlImports, xmlUndoImport, fmtDay, fmtRange, xmlFileInput,
                 roomApiEnabled, roomApiUrl, roomApiFullKey, roomApiBusy,
                 apiMsg, apiMsgOk, loadRoomApiConfig, toggleRoomApi, regenerateRoomApiKey, copyText,
                 danmakuRows, danmakuErr, danmakuOffset, danmakuLimit, danmakuTotal, danmakuPage,
