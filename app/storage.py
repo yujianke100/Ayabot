@@ -558,6 +558,7 @@ class StatsStore:
         start_time: int = 0,
         source: str = "",
         raw_json: str = "",
+        commit: bool = True,
     ) -> bool:
         """写入一条上舰记录（已存在则仅在价格不同时更新金额）。返回是否新增行。
 
@@ -581,7 +582,8 @@ class StatsStore:
             (ts, month, uid, uname, guard_level, guard_name, months,
              price_coin, value, start_time, source, raw_json),
         )
-        self._conn.commit()
+        if commit:
+            self._conn.commit()
         return cur.rowcount > 0
 
     def list_guard_events(
@@ -652,15 +654,26 @@ class StatsStore:
             guard = self._conn.execute(
                 "SELECT COUNT(1) FROM guard_events WHERE source = ?", (source,)
             ).fetchone()[0]
+            # source 形如 xml:文件名#内容摘要；摘要只用于区分同名文件，界面默认不显示
+            raw_name = str(source)[4:] or str(source)
+            name, _, short = raw_name.partition("#")
             out.append({
                 "source": source,
-                "name": str(source)[4:] or str(source),
+                "name": name or raw_name,
+                "short": short,
                 "gift_events": int(events),
                 "gift_num": int(num),
                 "guard_events": int(guard),
                 "first_ts": int(first_ts or 0),
                 "last_ts": int(last_ts or 0),
             })
+        # 同名批次同时存在时，把摘要补到名字后面，否则两个「danmaku.xml」看着一模一样
+        seen: dict[str, int] = {}
+        for item in out:
+            seen[item["name"]] = seen.get(item["name"], 0) + 1
+        for item in out:
+            if seen.get(item["name"], 0) > 1 and item["short"]:
+                item["name"] = f"{item['name']} ({item['short']})"
         return out
 
     def delete_gift_events_by_source(self, source: str) -> dict[str, int]:

@@ -58,6 +58,10 @@ GUARD_NAMES = {1: "总督", 2: "提督", 3: "舰长"}
 # 典型一场 8 小时直播的弹幕文件是几 MB 到十几 MB，64 MB 已经很宽松。
 MAX_XML_BYTES = 64 * 1024 * 1024
 
+# 单份文件里礼物 + 上舰的最大条数。每个事件都要在内存里留一条记录等着算时间，
+# 异常文件（比如把好几个月的合并成一个、或者结构异常）会把内存吃满，这里兜个底。
+MAX_EVENTS = 200_000
+
 _ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})")
 
 
@@ -177,7 +181,6 @@ def parse_danmaku_xml(data: bytes, filename: str = "") -> ParseResult:
     meta_record_start = ""
     info_start = ""
     derived_base: int | None = None
-    first_appear: float | None = None
 
     # 逐元素解析，避免把几十 MB 的树整个建起来
     try:
@@ -194,8 +197,6 @@ def parse_danmaku_xml(data: bytes, filename: str = "") -> ParseResult:
                 appear, send_ms = _parse_p(el.get("p") or "")
                 if derived_base is None and send_ms:
                     derived_base = int(send_ms / 1000 - appear)
-                if first_appear is None:
-                    first_appear = appear
             elif tag == "gift":
                 uid = _safe_int(el.get("uid"))
                 name = (el.get("giftname") or "").strip()
@@ -216,6 +217,10 @@ def parse_danmaku_xml(data: bytes, filename: str = "") -> ParseResult:
                     raw=raw,
                 ))
                 res.gift_rel.append(rel)
+                if len(res.gifts) > MAX_EVENTS:
+                    raise DanmakuXmlError(
+                        f"文件里的礼物超过 {MAX_EVENTS} 条，太夸张了。"
+                        "请把文件按场次拆开分别导入。")
             elif tag == "guard":
                 uid = _safe_int(el.get("uid"))
                 level = _safe_int(el.get("level"))
@@ -379,8 +384,10 @@ def build_plan(
                 # V2 protobuf 解出来的才是权威数据（精确价格 + 盲盒信息）
                 payload.update({k: v for k, v in v2_item.items() if v is not None})
 
-        has_price = bool(_safe_int(payload.get("total_coin")) or _safe_int(payload.get("price")))
-        if not has_price:
+        has_amount = bool(_safe_int(payload.get("total_coin")) or _safe_int(payload.get("price")))
+        # 价格表里查得到、但单价就是 0 的（银瓜子道具、免费礼物）不算「未知价格」，
+        # 否则用户的警告列表里会冒出一堆本来就不值钱的礼物。
+        if not has_amount and rec.name not in price_map:
             unknown_names[rec.name] = unknown_names.get(rec.name, 0) + 1
             payload["price_unknown"] = True
 
@@ -395,7 +402,7 @@ def build_plan(
         # _extract_blindbox_profit 有个兜底规则是「礼物名里含『盲盒』就算盲盒」，
         # 对没有 raw 的历史数据会让「幸运盲盒」这类礼物被算成成本 0 的假盲盒。
         # 宁可不算盲盒，也不要写进错数据。
-        if rec.raw and has_price:
+        if rec.raw and has_amount:
             blind = _blindbox_profit(payload)
         else:
             blind = {"is_blind_box": False, "blind_box_cost": 0,

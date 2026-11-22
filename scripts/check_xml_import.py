@@ -24,6 +24,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -135,6 +136,30 @@ XML_V2_BLIND = """<?xml version="1.0" encoding="utf-8"?>
 """.format(start=BASE_ISO, pb=V2_PB)
 
 
+# 同名不同内容的两份文件：批次必须能分开
+XML_SAME_A = """<?xml version="1.0" encoding="utf-8"?>
+<i>
+  <metadata><record_start_time>{start}</record_start_time></metadata>
+  <gift ts="10.000" uid="111" user="甲" giftname="小花花" giftcount="1"/>
+</i>
+""".format(start=BASE_ISO)
+
+XML_SAME_B = """<?xml version="1.0" encoding="utf-8"?>
+<i>
+  <metadata><record_start_time>{start}</record_start_time></metadata>
+  <gift ts="20.000" uid="222" user="乙" giftname="小花花" giftcount="3"/>
+</i>
+""".format(start=BASE_ISO)
+
+# 单价 0 的免费礼物：不该进「未识别价格」名单
+XML_FREE_GIFT = """<?xml version="1.0" encoding="utf-8"?>
+<i>
+  <metadata><record_start_time>{start}</record_start_time></metadata>
+  <gift ts="10.000" uid="111" user="甲" giftname="小心心" giftcount="5"/>
+</i>
+""".format(start=BASE_ISO)
+
+
 def _req(method: str, path: str, body: bytes | None = None,
          headers: dict | None = None) -> tuple[int, dict]:
     req = urllib.request.Request(
@@ -167,7 +192,8 @@ def main() -> int:
     srv._SESSIONS[TOKEN] = (time.time() + 900, "tester", "admin", [])
     srv._SESSIONS["user-token"] = (time.time() + 900, "normal", "user", [])
     # 固定价格表，避免用例依赖网络
-    srv._GIFT_PRICE_CACHE = {"辣条": (100, "silver"), "小花花": (100, "gold")}
+    srv._GIFT_PRICE_CACHE = {"辣条": (100, "silver"), "小花花": (100, "gold"),
+                             "小心心": (0, "silver")}
     srv._GIFT_CACHE_BUILT = True
 
     server = uvicorn.Server(uvicorn.Config(srv.app, host="127.0.0.1", port=PORT,
@@ -198,12 +224,22 @@ def main() -> int:
     import sqlite3
     db = room_dir / "data" / "bot.db"
 
+
     def q(sql: str, args=()):
         conn = sqlite3.connect(str(db))
         try:
             return conn.execute(sql, args).fetchall()
         finally:
             conn.close()
+
+    def undo(name: str) -> dict:
+        """按文件名撤销对应批次（source 里带内容摘要，得先查出来再 URL 编码）。"""
+        rows = q("SELECT DISTINCT source FROM gift_events WHERE source LIKE ? "
+                 "UNION SELECT DISTINCT source FROM guard_events WHERE source LIKE ?",
+                 (f"xml:{name}#%", f"xml:{name}#%"))
+        if not rows:
+            return {"ok": False, "error": "批次不存在"}
+        return _req("DELETE", f"/api/rooms/{ROOM}/imports?source={quote(rows[0][0])}")[1]
 
     try:
         # ── 1. 无 raw：预检 ──
@@ -237,7 +273,9 @@ def main() -> int:
         ok("上舰写入 1 条", st.get("guards_inserted") == 1, st.get("guards_inserted"))
         rows = q("SELECT uid, gift_name, gift_num, is_blind_box, source FROM gift_events ORDER BY id")
         ok("库里 3 行", len(rows) == 3, rows)
-        ok("source 标记为 xml:", all(str(x[4]).startswith("xml:") for x in rows), rows[0][4] if rows else None)
+        ok("source 标记为 xml: 且带内容摘要",
+           all(str(x[4]).startswith("xml:") and "#" in str(x[4]) for x in rows),
+           rows[0][4] if rows else None)
         ok("无 raw 不会误判成盲盒", all(x[3] == 0 for x in rows), [x[3] for x in rows])
         g = q("SELECT guard_level, months, price_coin, value FROM guard_events")
         ok("上舰 舰长×2 月 396000 金瓜子", g and g[0][:3] == (3, 2, 396000), g)
@@ -298,7 +336,7 @@ def main() -> int:
         # ── 7. 与实时数据重叠 ──
         print("[7] 和实时记录重叠")
         # 先撤掉前面那份导入，腾出位置只留「实时」那条，避免被 dedupe_key 直接吃掉
-        _req("DELETE", f"/api/rooms/{ROOM}/imports?source=xml:no_raw.xml")
+        undo('no_raw.xml')
         conn = sqlite3.connect(str(db))
         ts0 = BASE_TS + 11
         conn.execute(
@@ -331,10 +369,11 @@ def main() -> int:
            and target["guard_events"] == 1, target)
         agg_before = q("SELECT COUNT(1), COALESCE(SUM(gift_num),0), COALESCE(SUM(actual_value),0)"
                        " FROM gift_events")[0]
-        code, r = _req("DELETE", f"/api/rooms/{ROOM}/imports?source=xml:with_raw.xml")
+        code, r = _req("DELETE",
+                       f"/api/rooms/{ROOM}/imports?source={quote(target['source'])}")
         ok("撤销成功", code == 200 and r.get("ok"), r.get("error"))
         ok("删掉 2 条礼物 + 1 条上舰", r.get("deleted") == 2 and r.get("guard_deleted") == 1, r)
-        ok("行真的没了", q("SELECT COUNT(1) FROM gift_events WHERE source='xml:with_raw.xml'")[0][0] == 0)
+        ok("行真的没了", q("SELECT COUNT(1) FROM gift_events WHERE source LIKE 'xml:with_raw.xml#%'")[0][0] == 0)
         ok("月度盲盒聚合已清零", q("SELECT COUNT(1) FROM monthly_blindbox_stats WHERE blind_box_count>0")[0][0] == 0)
         # 注意：第 7 步里「实时」那条是用 SQL 直接塞的，不经过月度聚合，所以只比导入行
         agg_after = q("SELECT COUNT(1), COALESCE(SUM(gift_num),0), COALESCE(SUM(actual_value),0)"
@@ -355,7 +394,7 @@ def main() -> int:
         row = q("SELECT is_blind_box, blind_box_cost, actual_value FROM gift_events"
                 " WHERE gift_name='幸运盲盒'")
         ok("落库后 is_blind_box=0、成本 0", row and tuple(row[0]) == (0, 0, 0), row)
-        _req("DELETE", f"/api/rooms/{ROOM}/imports?source=xml:box_name.xml")
+        undo('box_name.xml')
 
         # ── 10. V2 风格的 raw（只有 pb，没有金额）→ 回退价格表 ──
         print("[10] raw 里没有金额字段时回退价格表")
@@ -367,7 +406,7 @@ def main() -> int:
         ok("金额按价格表估 = 小花花 0.1×2 = 0.2 元",
            abs(float(st.get("value_yuan") or 0) - 0.2) < 1e-6, st.get("value_yuan"))
         ok("不算盲盒", st.get("blindbox") == 0, st.get("blindbox"))
-        _req("DELETE", f"/api/rooms/{ROOM}/imports?source=xml:v2raw.xml")
+        undo('v2raw.xml')
 
         # ── 11. 重复导入时上舰计数要分开报 ──
         print("[11] 重复导入的上舰计数")
@@ -380,7 +419,7 @@ def main() -> int:
         st = r.get("stats") or {}
         ok("再次导入不重复计入新增", st.get("guards_inserted") == 0, st.get("guards_inserted"))
         ok("报成「已存在」1 条", st.get("guards_duplicate") == 1, st.get("guards_duplicate"))
-        _req("DELETE", f"/api/rooms/{ROOM}/imports?source=xml:guard_dup.xml")
+        undo('guard_dup.xml')
 
 
         # ── 11bis. V2 真实报文 raw：能还原盲盒与精确金额 ──
@@ -395,9 +434,9 @@ def main() -> int:
            st.get("unknown_price_names"))
         code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_V2_BLIND, "v2blind.xml")
         row = q("SELECT is_blind_box, blind_box_cost, actual_value, profit_value FROM gift_events"
-                " WHERE source='xml:v2blind.xml'")
+                " WHERE source LIKE 'xml:v2blind.xml#%'")
         ok("落库：盲盒 成本50 实际52 盈亏2", row and tuple(row[0]) == (1, 50, 52, 2), row)
-        _req("DELETE", f"/api/rooms/{ROOM}/imports?source=xml:v2blind.xml")
+        undo('v2blind.xml')
 
         # ── 12b. NOT NULL 违规不能被静默吞掉 ──
         print("[12] 真错误要抛出来")
@@ -416,9 +455,41 @@ def main() -> int:
         finally:
             _st._conn.close()
 
-        # ── 13. 权限 ──
 
-        print("[13] 普通用户不能导入")
+        # ── 14. 同名不同内容：两个独立批次，撤销一个不影响另一个 ──
+        print("[14] 同名文件的批次隔离")
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_SAME_A, "same.xml")
+        ok("第一份导入成功", code == 200 and r.get("ok"), r.get("error"))
+        src_a = (r.get("stats") or {}).get("source")
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_SAME_B, "same.xml")
+        ok("第二份也导入成功（不被当成同一批）", code == 200 and r.get("ok"), r.get("error"))
+        src_b = (r.get("stats") or {}).get("source")
+        ok("两份 source 不同", src_a and src_b and src_a != src_b, [src_a, src_b])
+        imports = (_req("GET", f"/api/rooms/{ROOM}/imports")[1] or {}).get("imports") or []
+        same = [i for i in imports if i["name"].startswith("same.xml")]
+        ok("列表里出现两个同名批次", len(same) == 2, [i["name"] for i in same])
+        ok("同名批次名字带摘要区分", all("(" in i["name"] for i in same),
+           [i["name"] for i in same])
+        code, r = _req("DELETE", f"/api/rooms/{ROOM}/imports?source={quote(src_a)}")
+        ok("撤销第一份", code == 200 and r.get("deleted") == 1, r)
+        left = q("SELECT COUNT(1) FROM gift_events WHERE source = ?", (src_b,))[0][0]
+        ok("第二份的数据还在", left == 1, left)
+        _req("DELETE", f"/api/rooms/{ROOM}/imports?source={quote(src_b)}")
+
+        # ── 15. 单价 0 的免费礼物不算「未知价格」 ──
+        print("[15] 免费礼物不误报未知价格")
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_FREE_GIFT, "free.xml", dry_run=1)
+        st = r.get("stats") or {}
+        ok("预检成功", code == 200 and r.get("ok"), r.get("error"))
+        ok("没有未知价格礼物", st.get("unknown_price_events") == 0,
+           st.get("unknown_price_names"))
+        ok("金额记 0", abs(float(st.get("value_yuan") or 0)) < 1e-6, st.get("value_yuan"))
+        ok("数量照常计入", st.get("gift_num") == 5, st.get("gift_num"))
+
+        # ── 16. 权限 ──
+
+
+        print("[16] 普通用户不能导入")
         req = urllib.request.Request(
             f"http://127.0.0.1:{PORT}/api/rooms/{ROOM}/import/danmaku-xml",
             data=XML_NO_RAW.encode(), method="POST",

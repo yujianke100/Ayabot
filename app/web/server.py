@@ -3733,8 +3733,10 @@ def _import_xml_blocking(
             if exists:
                 guards_dup += 1
                 continue
-            if store.record_guard_event(**g):
+            # 一条条写但不单独提交：中途失败时整批上舰回滚，不会留下半套记录
+            if store.record_guard_event(commit=False, **g):
                 guards_in += 1
+        store._conn.commit()
 
         stats.update({
             "inserted": inserted,
@@ -3789,7 +3791,11 @@ async def api_import_danmaku_xml(room_id: str, request: Request):
     filename = Path(filename).name or "danmaku.xml"
     # source 会写进数据库并用于撤销，做个长度与字符收敛
     safe_name = "".join(ch for ch in filename if ch.isprintable())[:120]
-    source = f"xml:{safe_name}"
+    # 关键：同名文件必须能分开。用户很容易把不同场次都叫 danmaku.xml，
+    # 只按文件名当批次的话，撤销一个批次会把另一批的数据一起删掉。
+    # 内容摘要进 source 就天然隔离；同一份文件重复导入仍是同一个批次。
+    digest = hashlib.sha1(raw).hexdigest()[:8]
+    source = f"xml:{safe_name}#{digest}"
 
     if not _GIFT_PRICE_CACHE:
         try:
@@ -8258,6 +8264,7 @@ createApp({
                     if (!data) return;
                     xmlPreview.value.push({
                         name: f.name,
+                        file: f,          // 直接抱 File 引用：按名字反查会在「多目录下同名文件」时拿错
                         ok: !!data.ok,
                         error: data.error || '',
                         stats: data.stats || {},
@@ -8283,7 +8290,7 @@ createApp({
             let gifts = 0, guards = 0, dup = 0, skipped = 0, failed = 0, guardDup = 0;
             try {
                 for (const p of okOnes) {
-                    const f = xmlFiles.value.find((x) => x.name === p.name);
+                    const f = p.file;
                     if (!f) continue;
                     const data = await xmlUpload(f, false);
                     if (!data || !data.ok) { failed++; continue; }
