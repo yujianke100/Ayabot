@@ -115,6 +115,12 @@ def main() -> None:
         "--hidden-import", "app.llm_client",
         "--hidden-import", "app.process_manager",
         "--hidden-import", "app.reset_admin",
+        # 时区数据：Windows 没有系统 tzdb，zoneinfo 靠 tzdata 包的 .zi 文件。
+        # 只写 hidden-import 不够（会漏掉包内的数据文件），必须 collect-data。
+        # 缺了这个，冻结版会静默退回系统本地时区。
+        "--hidden-import", "tzdata",
+        "--collect-data", "tzdata",
+        "--hidden-import", "app.tzutil",
         "--hidden-import", "uvicorn",
         "--hidden-import", "uvicorn.logging",
         "--hidden-import", "uvicorn.loops",

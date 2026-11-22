@@ -16,7 +16,7 @@ import tempfile
 from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
 
 # 关键代码特征（累积：v1.2.0 的修复 + v1.2.1 的修复，防止老代码换版本号重发）
-EXPECTED_MODULES = ("app.gift_v2",)
+EXPECTED_MODULES = ("app.gift_v2", "app.tzutil")
 EXPECTED_STRINGS = {
     "app.bot": ("SEND_GIFT_V2", "record_guard_event", "USER_TOAST_MSG_V2",
                 "bot_status.json", "_recent_guards"),
@@ -37,7 +37,9 @@ EXPECTED_STRINGS = {
                        # v1.2.6: 前端库改为本地内置（CDN 挂了也不至于整页 {{ }} 裸模板）
                        "/vendor/", "_vendor_path", "vendor_asset", "bootfail",
                        # v1.2.7: 机器人配置模板带全同级字段（签文 / 关键词规则 / 冷却限流）
-                       "AyabotBotTpl", "__ayabot_bot_tpl", "botTplSummaryText"),
+                       "AyabotBotTpl", "__ayabot_bot_tpl", "botTplSummaryText",
+                       # v1.2.8: 录播 XML 导入 + 全局时区口径
+                       "danmaku-xml", "ayabot_date", "_day_bounds", "/api/time"),
     "app.auth": ("auth_status.json", "needs_login"),
     # v1.2.5: 新建房间不再依赖根目录模板（多路径查找 + 内置默认值兜底）
     "app.config": ("find_template_config", "write_default_config"),
@@ -88,6 +90,19 @@ def main(exe_path: str) -> int:
         print(f"  {'OK ' if ok else 'MISS'} 资源 {asset}")
         if not ok:
             failures.append(f"缺少资源 {asset}")
+    # 时区数据必须打进去：Windows 没有系统 tzdb，缺了 tzdata 的 .zi 文件，
+    # 冻结版会静默退回系统本地时区（统计/删除全部错位），而且界面上完全看不出来。
+    tz_files = [k for k in arch.toc if "tzdata" in k.replace("\\", "/")]
+    ok = len(tz_files) > 0
+    print(f"  {'OK ' if ok else 'MISS'} tzdata 数据文件（{len(tz_files)} 个）")
+    if not ok:
+        failures.append("exe 里没有 tzdata（ZoneInfo 会失效）")
+    else:
+        has_sh = any(k.replace("\\", "/").endswith("Asia/Shanghai") for k in arch.toc)
+        print(f"  {'OK ' if has_sh else 'MISS'} 含 Asia/Shanghai 时区文件")
+        if not has_sh:
+            failures.append("tzdata 里缺 Asia/Shanghai")
+
     for mod in EXPECTED_MODULES:
         ok = mod in names
         print(f"  {'OK ' if ok else 'MISS'} 模块 {mod}")

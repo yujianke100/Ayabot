@@ -3,6 +3,9 @@ PyYAML>=6.0.1
 aiohttp>=3.9.5
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
+# Windows 没有系统时区库，zoneinfo 全靠这个包；缺了 ZoneInfo("Asia/Shanghai") 会失败，
+# 整个程序会静默退回系统本地时区（时分统计/删除全部错位）。必须显式声明，不要靠传递依赖。
+tzdata>=2024.1; platform_system == "Windows"
 
 # Windows tray .exe 构建依赖
 # pip install pystray pillow pyinstaller

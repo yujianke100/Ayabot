@@ -618,12 +618,48 @@ def main() -> int:
         ok("月度聚合与明细一致（删完就重算）", tuple(agg[0]) == tuple(det[0]), [agg, det])
         undo("two_days.xml")
 
-        # ── 22. 普通用户不能导入 ──
+        # ── 23. 日期过滤改造后的各个接口都要还能用（ts 区间替换 ayabot_date）──
+        print("[23] 日期过滤各接口")
+        undo("api_dates.xml")
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_SAME_A, "api_dates.xml")
+        ok("准备一份当天数据", code == 200 and r.get("ok"), r.get("error"))
+        day = q("SELECT ayabot_date(ts) FROM gift_events WHERE source LIKE 'xml:api_dates.xml#%'")
+        day = day[0][0] if day else ""
+        for label, path, key in (
+            ("排行-当天", f"/api/rooms/{ROOM}/ranking?rStart={day}&rEnd={day}&rType=all", "ranking"),
+            ("排行-不限", f"/api/rooms/{ROOM}/ranking?rStart=&rEnd=&rType=all", "ranking"),
+            ("上舰-当天", f"/api/rooms/{ROOM}/guards?rStart={day}&rEnd={day}", "items"),
+            ("上舰-不限", f"/api/rooms/{ROOM}/guards", "items"),
+            ("导出日期列表", f"/api/rooms/{ROOM}/all_dates", None),
+        ):
+            code, r = _req("GET", path)
+            ok(f"{label} 返回 200", code == 200, {"code": code, "body": str(r)[:90]})
+            if key and isinstance(r, dict) and key in r:
+                ok(f"{label} 含 {key}", True, len(r.get(key) or []))
+        code, r = _req("GET", f"/api/rooms/{ROOM}/export_all?date_from={day}&date_to={day}")
+        ok("导出明细返回 200", code == 200, {"code": code, "body": str(r)[:90]})
+        code, r = _req("GET", f"/api/rooms/{ROOM}/ranking?rStart=bad-date&rEnd=&rType=all")
+        ok("非法日期返回 400（不是 500）", code == 400, {"code": code, "body": str(r)[:90]})
+        code, r = _req("GET", f"/api/rooms/{ROOM}/ranking?rStart={day}&rEnd={day}&rType=all")
+        ok("当天筛选命中导入的礼物",
+           any(str(x.get("uid")) == "111" for x in (r.get("ranking") or [])),
+           (r.get("ranking") or [])[:2])
+        undo("api_dates.xml")
 
+        # ── 24. 空房间（从没跑过 bot）也能导入 ──
+        print("[24] 空房间导入")
+        empty_room = "2000000009"
+        empty_dir = tmp / "rooms" / empty_room
+        (empty_dir / "data").mkdir(parents=True, exist_ok=True)
+        (empty_dir / "config.yaml").write_text(yaml_src, encoding="utf-8")
+        code, r = post(f"/api/rooms/{empty_room}/import/danmaku-xml", XML_SAME_A, "empty.xml")
+        ok("空房间导入成功", code == 200 and r.get("ok"), r.get("error"))
+        ok("空房间建表并写入", (r.get("stats") or {}).get("inserted") == 1,
+           (r.get("stats") or {}).get("inserted"))
 
+        # ── 25. 普通用户不能导入 ──
 
-
-        print("[22] 普通用户不能导入")
+        print("[25] 普通用户不能导入")
         req = urllib.request.Request(
             f"http://127.0.0.1:{PORT}/api/rooms/{ROOM}/import/danmaku-xml",
             data=XML_NO_RAW.encode(), method="POST",

@@ -26,6 +26,35 @@ class GiftEvent:
     raw_json: str
 
 
+def _date_bounds(date_from: str = "", date_to: str = "") -> tuple[int | None, int | None]:
+    """把 `YYYY-MM-DD` 的日期区间换成配置时区的 [起, 止] 时间戳（闭区间）。
+
+    空串表示该侧不限。日期格式不对时抛 ValueError，让调用方按 400 处理。
+    """
+    lo = tzutil.day_range(date_from)[0] if date_from else None
+    hi = tzutil.day_range(date_to)[1] if date_to else None
+    return lo, hi
+
+
+def _date_range_where(date_from: str = "", date_to: str = "") -> tuple[str, list]:
+    """生成 ` WHERE ts >= ? AND ts <= ?` 片段 + 参数。
+
+    之所以不写成 `ayabot_date(ts) >= ?`：SQLite 里调 Python 回调是逐行开销，
+    20 万行要 0.6s（日期区间只走索引是 6ms）。日期口径照样是配置时区。
+    """
+    lo, hi = _date_bounds(date_from, date_to)
+    clauses, params = [], []
+    if lo is not None:
+        clauses.append("ts >= ?")
+        params.append(lo)
+    if hi is not None:
+        clauses.append("ts <= ?")
+        params.append(hi)
+    if not clauses:
+        return "", []
+    return " WHERE " + " AND ".join(clauses), params
+
+
 class StatsStore:
     def __init__(self, db_path: str) -> None:
         p = Path(db_path)
@@ -470,47 +499,25 @@ class StatsStore:
         return [r[0] for r in rows if r[0]]
 
     def get_danmaku_log(self, limit: int = 50, offset: int = 0, date_from: str = "", date_to: str = "", asc: bool = True) -> list[dict[str, int | str]]:
-        where = ""
-        params: list = [limit, offset]
-        if date_from:
-            where = " WHERE ayabot_date(ts) >= ?"
-            params.insert(0, date_from)
-        if date_to:
-            where += " AND ayabot_date(ts) <= ?" if where else " WHERE ayabot_date(ts) <= ?"
-            if date_to:
-                params.insert(0 if not date_from else 1, date_to)
-        # rebuild params: limit/offset are last
-        params = params[:-2] + [limit, offset] if len(params) > 2 else [limit, offset]
+        # 日期过滤一律换算成 ts 区间：既按配置时区算，又能用上 ts 索引。
+        # 不要在 SQL 里写 ayabot_date(ts) —— 那是逐行回调 Python，20 万行要 0.6s，而区间比较是 6ms。
+        where, params = _date_range_where(date_from, date_to)
         order_dir = "ASC" if asc else "DESC"
         sql = f"SELECT id, ts, uid, uname, content FROM danmaku_log{where} ORDER BY id {order_dir} LIMIT ? OFFSET ?"
-        rows = self._conn.execute(sql, params).fetchall()
+        rows = self._conn.execute(sql, [*params, limit, offset]).fetchall()
         return [
             {"id": int(r[0]), "ts": int(r[1]), "uid": int(r[2]), "uname": str(r[3]), "content": str(r[4])}
             for r in rows
         ]
 
     def get_danmaku_log_count(self, date_from: str = "", date_to: str = "") -> int:
-        where = ""
-        params: list = []
-        if date_from:
-            where = " WHERE ayabot_date(ts) >= ?"
-            params.append(date_from)
-        if date_to:
-            where += " AND ayabot_date(ts) <= ?"
-            params.append(date_to)
+        where, params = _date_range_where(date_from, date_to)
         row = self._conn.execute(f"SELECT COUNT(*) FROM danmaku_log{where}", params).fetchone()
         return int(row[0]) if row else 0
 
     def clear_danmaku_log(self, date_from: str = "", date_to: str = "") -> int:
         if date_from or date_to:
-            where = ""
-            params: list = []
-            if date_from:
-                where = " WHERE ayabot_date(ts) >= ?"
-                params.append(date_from)
-            if date_to:
-                where += " AND ayabot_date(ts) <= ?"
-                params.append(date_to)
+            where, params = _date_range_where(date_from, date_to)
             count = self._conn.execute(f"DELETE FROM danmaku_log{where}", params).rowcount
         else:
             count = self._conn.execute("DELETE FROM danmaku_log").rowcount
@@ -523,6 +530,9 @@ class StatsStore:
         result: dict[str, int] = {}
         if gift_days > 0:
             cutoff = now_ts - gift_days * 86400
+            # 先记下会被删到哪些月份，删完才能只重算它们
+            affected_months = {r[0] for r in self._conn.execute(
+                "SELECT DISTINCT month FROM gift_events WHERE ts < ?", (cutoff,))}
             deleted = self._conn.execute(
                 "DELETE FROM gift_events WHERE ts < ?", (cutoff,)
             ).rowcount
@@ -532,6 +542,9 @@ class StatsStore:
             ).rowcount
             result["deleted_guards"] = deleted_guards
             if deleted:
+                # 边界月份只删了一部分明细，聚合是增量累加的，不重算就会一直比明细大。
+                # 受影响月份必须在删除前就查好（删完就查不到了），见上面的 affected_months。
+                self.rebuild_monthly_stats(sorted(affected_months))
                 self._conn.execute(
                     "DELETE FROM monthly_blindbox_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)"
                 )
@@ -601,12 +614,13 @@ class StatsStore:
         """按时间倒序列出上舰记录。"""
         where = ["1=1"]
         params: list[Any] = []
-        if date_from:
-            where.append("ayabot_date(ts) >= date(?)")
-            params.append(date_from)
-        if date_to:
-            where.append("ayabot_date(ts) <= date(?)")
-            params.append(date_to)
+        lo, hi = _date_bounds(date_from, date_to)
+        if lo is not None:
+            where.append("ts >= ?")
+            params.append(lo)
+        if hi is not None:
+            where.append("ts <= ?")
+            params.append(hi)
         params.append(limit)
         rows = self._conn.execute(
             f"""
@@ -658,6 +672,15 @@ class StatsStore:
                 "UNION SELECT DISTINCT month FROM monthly_blindbox_stats "
                 "UNION SELECT DISTINCT month FROM gift_events")]
         months = [m for m in months if m]
+        if not months:
+            return 0
+        # 只重算「明细还在」的月份。保留期清理是整月删聚合、但可能只删掉某月的部分明细；
+        # 如果某个日期区间的明细已经被清空而聚合还在，按明细重算会把它抹成 0 —— 那是数据丢失。
+        # 所以这里主动把「没有任何明细」的月份排除掉（它们原样保留，交给清理逻辑决定）。
+        placeholders0 = ",".join("?" for _ in months)
+        has_detail = {r[0] for r in self._conn.execute(
+            f"SELECT DISTINCT month FROM gift_events WHERE month IN ({placeholders0})", months)}
+        months = [m for m in months if m in has_detail]
         if not months:
             return 0
         placeholders = ",".join("?" for _ in months)
@@ -803,12 +826,13 @@ class StatsStore:
         """上舰数量与价值汇总（value 单位：电池）。"""
         where = ["1=1"]
         params: list[Any] = []
-        if date_from:
-            where.append("ayabot_date(ts) >= date(?)")
-            params.append(date_from)
-        if date_to:
-            where.append("ayabot_date(ts) <= date(?)")
-            params.append(date_to)
+        lo, hi = _date_bounds(date_from, date_to)
+        if lo is not None:
+            where.append("ts >= ?")
+            params.append(lo)
+        if hi is not None:
+            where.append("ts <= ?")
+            params.append(hi)
         row = self._conn.execute(
             f"""
             SELECT COUNT(*), COALESCE(SUM(value), 0),

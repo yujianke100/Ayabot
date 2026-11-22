@@ -337,6 +337,9 @@ def _fallback_read_config() -> None:
             AUTH_PASS = web_ui["password"]
         _API_TOKEN = str(web_ui.get("api_token", ""))
         _API_DOMAIN = str(web_ui.get("api_domain", ""))
+        # 走 fallback 启动（没有现成 AppConfig）时也要把全局时区定下来
+        tzutil.set_config_timezone(
+            (_raw.get("runtime", {}) or {}).get("timezone") or "Asia/Shanghai")
     _CONFIG_YAML_PATH = str(_cfg_path.resolve())
     _ROOMS_BASE_DIR = str(Path(_CONFIG_YAML_PATH).parent.resolve())
     set_rooms_base_dir(_ROOMS_BASE_DIR)
@@ -581,6 +584,18 @@ async def _ensure_gift_cache() -> None:
 # ══════════════════════════════════════════════════════════════════
 #  DB
 # ══════════════════════════════════════════════════════════════════
+
+def _day_bounds(date_from: str = "", date_to: str = "") -> tuple[int | None, int | None]:
+    """`YYYY-MM-DD` → 配置时区的 [起, 止] 时间戳（闭区间，空串表示不限）。
+
+    日期过滤统一走这个换算，而不是在 SQL 里写 `ayabot_date(ts) >= date(?)`：
+    SQLite 调 Python 回调是逐行开销，20 万行要 0.6s，换成 ts 区间只走索引 6ms。
+    日期格式不对时抛 ValueError（接口层转 400）。
+    """
+    lo = tzutil.day_range(date_from)[0] if date_from else None
+    hi = tzutil.day_range(date_to)[1] if date_to else None
+    return lo, hi
+
 
 def _connect(db_path: str | Path) -> sqlite3.Connection:
     """统一建连接：注册按配置时区算日期/月份的 SQL 函数。
@@ -3360,12 +3375,18 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
         where_clauses = ["1=1"]
         params: list[Any] = []
 
-        if rStart:
-            where_clauses.append("ayabot_date(ts) >= date(?)")
-            params.append(rStart)
-        if rEnd:
-            where_clauses.append("ayabot_date(ts) <= date(?)")
-            params.append(rEnd)
+        # 日期过滤换算成 ts 区间：按配置时区算，而且能用 ts 索引
+        # （直接写 ayabot_date(ts) 是逐行回调 Python，20 万行 0.6s vs 6ms）
+        try:
+            lo, hi = _day_bounds(rStart, rEnd)
+        except ValueError:
+            return JSONResponse({"error": "日期格式不对，应为 YYYY-MM-DD"}, status_code=400)
+        if lo is not None:
+            where_clauses.append("ts >= ?")
+            params.append(lo)
+        if hi is not None:
+            where_clauses.append("ts <= ?")
+            params.append(hi)
 
         if rType == "gift":
             where_clauses.append("is_blind_box = 0")
@@ -3417,9 +3438,9 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
         cur.execute(f"""
             SELECT uid, uname, gift_name, gift_num, actual_value, ts, is_blind_box, id, raw_json
             FROM gift_events
-            WHERE uid = ? AND ayabot_date(ts) = date(?) AND event_type = 'SEND_GIFT'{where_extra}
+            WHERE uid = ? AND ts >= ? AND ts <= ? AND event_type = 'SEND_GIFT'{where_extra}
             ORDER BY ts
-        """, (uid, date))
+        """, (uid, *_day_bounds(date, date)))
         rows = cur.fetchall()
         conn.close()
 
@@ -3576,12 +3597,17 @@ async def api_room_export_all(
         conditions = ["event_type = 'SEND_GIFT'"]
         params: list = []
 
-        if date_from:
-            conditions.append("ayabot_date(ts) >= date(?)")
-            params.append(date_from)
-        if date_to:
-            conditions.append("ayabot_date(ts) <= date(?)")
-            params.append(date_to)
+        # 日期过滤换算成 ts 区间（配置时区 + 走索引）；格式不对就当没有过滤
+        try:
+            lo, hi = _day_bounds(date_from, date_to)
+        except ValueError:
+            lo = hi = None
+        if lo is not None:
+            conditions.append("ts >= ?")
+            params.append(lo)
+        if hi is not None:
+            conditions.append("ts <= ?")
+            params.append(hi)
         if gift_type == "gift":
             conditions.append("is_blind_box = 0")
         elif gift_type == "blindbox":
@@ -3699,6 +3725,10 @@ def _import_xml_blocking(
         tz = resolve_tz(_load_cfg(str(_room_cfg)).runtime.timezone)
     except Exception:
         tz = None
+    if tz is None:
+        # 读不到房间配置就用全局配置时区兜底，绝不要退回系统本地时区 ——
+        # 那会让写入的 month 与 SQL 里 ayabot_date() 的口径不一致
+        tz = tzutil.get_tz()
 
     try:
         parsed = parse_danmaku_xml(raw, safe_name)

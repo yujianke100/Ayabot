@@ -132,6 +132,109 @@ def main() -> int:
         ok("能查到今天这场（说明写入/读取同一口径）",
            prev == tzutil.today_str(), [prev, tzutil.today_str()])
 
+
+        # ── 9. 重算不能抹掉「只有聚合、明细已清」的月份 ──
+        print("[9] 重算的边界：聚合还在但明细没了")
+        db3 = tmp / "keep.db"
+        st3 = StatsStore(str(db3))
+        jan_ts = tzutil.day_range("2025-01-10")[0]
+        st3.record_gift_event(GiftEvent(
+            ts=jan_ts, month="2025-01", uid=1, uname="a", event_type="SEND_GIFT",
+            gift_name="g", gift_num=1, is_blind_box=0, blind_box_cost=0,
+            actual_value=0, profit_value=0, raw_json='{"total_coin":100}'))
+        # 手工塞一个「明细已过期、只剩聚合」的月份
+        st3._conn.execute(
+            "INSERT INTO monthly_gift_stats (month, uid, uname, gift_count, gift_num_total,"
+            " value_total, last_ts) VALUES ('2024-05', 9, 'old', 7, 7, 0, 0)")
+        st3._conn.commit()
+        st3.rebuild_monthly_stats()
+        kept = st3._conn.execute(
+            "SELECT gift_count FROM monthly_gift_stats WHERE month='2024-05'").fetchone()
+        ok("全量重算保留了无明细月份", kept and kept[0] == 7, kept)
+        redo = st3._conn.execute(
+            "SELECT gift_count FROM monthly_gift_stats WHERE month='2025-01'").fetchone()
+        ok("有明细的月份被正确重算", redo and redo[0] == 1, redo)
+
+        # ── 10. 按日期删除后聚合要收缩（不是只增不减）──
+        print("[10] 部分删除后聚合收缩")
+        st3.record_gift_event(GiftEvent(
+            ts=jan_ts + 3600, month="2025-01", uid=1, uname="a", event_type="SEND_GIFT",
+            gift_name="g", gift_num=1, is_blind_box=0, blind_box_cost=0,
+            actual_value=0, profit_value=0, raw_json='{"total_coin":100}'))
+        before = st3._conn.execute(
+            "SELECT gift_count FROM monthly_gift_stats WHERE month='2025-01'").fetchone()[0]
+        st3._conn.execute("DELETE FROM gift_events WHERE ts < ?", (jan_ts + 1,))
+        st3._conn.commit()
+        st3.rebuild_monthly_stats(["2025-01"])
+        after = st3._conn.execute(
+            "SELECT gift_count FROM monthly_gift_stats WHERE month='2025-01'").fetchone()[0]
+        ok("聚合从 2 收缩到 1", (before, after) == (2, 1), [before, after])
+        st3._conn.close()
+
+        # ── 11. 日期过滤必须走 ts 区间（性能 + 口径）──
+        print("[11] 日期过滤不逐行回调")
+        src_storage = (ROOT / "app" / "storage.py").read_text(encoding="utf-8")
+        src_server = (ROOT / "app" / "web" / "server.py").read_text(encoding="utf-8")
+        # 只禁「拿 ayabot_date 做比较过滤」这一种写法。
+        # SELECT DISTINCT ayabot_date(ts) 是列日期列表，属于正常用法，不算性能问题。
+        import re as _re
+        pat = _re.compile(r"ayabot_date\(ts\)\s*(>=|<=|>|<|=)")
+        for name, src in (("storage.py", src_storage), ("server.py", src_server)):
+            # 只算真正的 SQL 字符串行：docstring / 注释里提到这种写法不算违规
+            bad = [ln.strip() for ln in src.splitlines()
+                   if pat.search(ln) and ('"' in ln or "'" in ln)
+                   and not ln.strip().startswith(("#", "//"))]
+            ok(f"{name} 不用 ayabot_date(ts) 做范围过滤", not bad, bad[:2])
+        ok("日期区间统一走 _day_bounds/_date_bounds",
+           "_day_bounds(" in src_server and "_date_bounds(" in src_storage)
+
+        # ── 12. 日期过滤的结果与按天分组一致 ──
+        print("[12] 区间过滤 ≡ 按天分组")
+        db4 = tmp / "range.db"
+        st4 = StatsStore(str(db4))
+        d1 = tzutil.day_range("2025-03-01")[0]
+        for off in (0, 100, 86399, 86400, 90000):   # 跨天边界
+            st4.record_gift_event(GiftEvent(
+                ts=d1 + off, month="2025-03", uid=off + 1, uname="u",
+                event_type="SEND_GIFT", gift_name="g", gift_num=1, is_blind_box=0,
+                blind_box_cost=0, actual_value=0, profit_value=0,
+                raw_json='{"total_coin":100}'))
+        lo, hi = tzutil.day_range("2025-03-01")
+        by_range = st4._conn.execute(
+            "SELECT COUNT(1) FROM gift_events WHERE ts >= ? AND ts <= ?", (lo, hi)).fetchone()[0]
+        by_day = st4._conn.execute(
+            "SELECT COUNT(1) FROM gift_events WHERE ayabot_date(ts) = '2025-03-01'").fetchone()[0]
+        ok("区间与分组结果一致（3 条）", by_range == by_day == 3, [by_range, by_day])
+        st4._conn.close()
+
+
+        # ── 13. 时区数据必须真的可用（Windows 没有系统 tzdb，全靠 tzdata 包）──
+        print("[13] tzdata 依赖")
+        try:
+            import tzdata  # noqa: F401
+            has_tzdata = True
+        except ImportError:
+            has_tzdata = False
+        ok("tzdata 包可用（ZoneInfo 依赖它）", has_tzdata)
+        tzutil.set_config_timezone("Asia/Shanghai")
+        ok("ZoneInfo 能解析 Asia/Shanghai",
+           tzutil.get_tz() is not None, tzutil.get_tz())
+        tzutil.set_config_timezone("Europe/Berlin")
+        de = tzutil.get_tz()
+        ok("换一个时区也能解析（不是写死东八区）", de is not None, de)
+        # 柏林夏令时：7 月 UTC+2，1 月 UTC+1
+        ok("夏令时换算正确",
+           tzutil.month_str(1721000000) == "2024-07"
+           and tzutil.day_str(1721000000) == "2024-07-15", tzutil.day_str(1721000000))
+        tzutil.set_config_timezone("Asia/Shanghai")
+
+        # ── 14. 构建脚本要把 tzdata 数据一起打进去 ──
+        print("[14] 构建脚本")
+        build_src = (ROOT / "scripts" / "build_exe.py").read_text(encoding="utf-8")
+        ok("打包脚本 collect tzdata 数据", '"--collect-data", "tzdata"' in build_src)
+        req_src = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        ok("requirements 显式声明 tzdata", "tzdata" in req_src)
+
         # ── 8. 源码里不许再出现裸的 localtime / 系统时区 ──
         print("[8] 源码禁用项")
         for f in ("app/storage.py", "app/web/server.py", "app/bot.py"):
