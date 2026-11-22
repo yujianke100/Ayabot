@@ -317,6 +317,14 @@ def month_of(ts: int, tz=None) -> str:
     return datetime.fromtimestamp(int(ts), tz).strftime("%Y-%m")
 
 
+def current_month(tz=None) -> str:
+    """当前月份（配置时区）。导入时用，与实时链路同口径。"""
+    if tz is not None:
+        return datetime.now(tz).strftime("%Y-%m")
+    from app import tzutil
+    return tzutil.month_str()
+
+
 def dedupe_key_for(*parts) -> str:
     """稳定去重键：同一份 XML 重复导入、或分片重叠时不会重复计数。"""
     return hashlib.sha1("\x1f".join(str(p) for p in parts).encode("utf-8")).hexdigest()

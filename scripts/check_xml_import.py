@@ -179,6 +179,16 @@ XML_SAME_SECOND = """<?xml version="1.0" encoding="utf-8"?>
 """.format(start=BASE_ISO)
 
 
+# 跨两天各一条，用来验证「按日期删除」的边界与聚合重算
+XML_TWO_DAYS = """<?xml version="1.0" encoding="utf-8"?>
+<i>
+  <metadata><record_start_time>2024-12-01T20:00:00+08:00</record_start_time></metadata>
+  <gift ts="0.000" uid="111" user="甲" giftname="小花花" giftcount="2"/>
+  <gift ts="18000.000" uid="222" user="乙" giftname="小花花" giftcount="3"/>
+</i>
+"""
+
+
 def _req(method: str, path: str, body: bytes | None = None,
          headers: dict | None = None) -> tuple[int, dict]:
     req = urllib.request.Request(
@@ -245,8 +255,11 @@ def main() -> int:
 
 
     def q(sql: str, args=()):
+        from app import tzutil
         conn = sqlite3.connect(str(db))
         try:
+            # 测试里的裸连接也要注册时区函数，否则 SQL 里用不了 ayabot_date()
+            tzutil.install_sqlite_functions(conn)
             return conn.execute(sql, args).fetchall()
         finally:
             conn.close()
@@ -573,11 +586,44 @@ def main() -> int:
         for (src,) in q_src:
             _req("DELETE", f"/api/rooms/{ROOM}/imports?source={quote(src)}")
 
-        # ── 20. 权限 ──
+
+        # ── 21. 按日期删除：边界与月度聚合 ──
+        print("[21] 按日期删除（时区边界 + 聚合重算）")
+        undo("two_days.xml")
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_TWO_DAYS, "two_days.xml")
+        ok("导入两天各一条", code == 200 and (r.get("stats") or {}).get("inserted") == 2,
+           (r.get("stats") or {}).get("inserted"))
+        days = [x[0] for x in q("SELECT DISTINCT ayabot_date(ts) FROM gift_events"
+                               " WHERE source LIKE 'xml:two_days.xml#%' ORDER BY 1")]
+        ok("落在两天（配置时区）", days == ["2024-12-01", "2024-12-02"], days)
+        # 删掉 2024-12-01（含当天）→ 只剩 12-02 那条
+        should_del = q("SELECT COUNT(1) FROM gift_events WHERE ayabot_date(ts) <= '2024-12-01'")[0][0]
+        keep_cnt = q("SELECT COUNT(1) FROM gift_events WHERE ayabot_date(ts) > '2024-12-01'")[0][0]
+        code, r = _req("POST", f"/api/rooms/{ROOM}/delete_old",
+                       json.dumps({"date": "2024-12-01", "type": "gift"}).encode(),
+                       {"Content-Type": "application/json"})
+        ok("删除接口成功", code == 200, r)
+        ok("删除条数与当天及更早的行数一致", r.get("deleted_gifts") == should_del,
+           {"deleted": r.get("deleted_gifts"), "expected": should_del})
+        ok("次日及以后的数据没被误删",
+           q("SELECT COUNT(1) FROM gift_events")[0][0] == keep_cnt,
+           {"left": q("SELECT COUNT(1) FROM gift_events")[0][0], "expected": keep_cnt})
+        left = q("SELECT gift_num FROM gift_events WHERE source LIKE 'xml:two_days.xml#%'")
+        ok("剩下的正是次日那条", [x[0] for x in left] == [3], left)
+        agg = q("SELECT COALESCE(SUM(gift_count),0), COALESCE(SUM(gift_num_total),0),"
+                " COALESCE(SUM(value_total),0) FROM monthly_gift_stats"
+                " WHERE month='2024-12'")
+        det = q("SELECT COUNT(1), COALESCE(SUM(gift_num),0), COALESCE(SUM(actual_value),0)"
+                " FROM gift_events WHERE month='2024-12'")
+        ok("月度聚合与明细一致（删完就重算）", tuple(agg[0]) == tuple(det[0]), [agg, det])
+        undo("two_days.xml")
+
+        # ── 22. 普通用户不能导入 ──
 
 
 
-        print("[20] 普通用户不能导入")
+
+        print("[22] 普通用户不能导入")
         req = urllib.request.Request(
             f"http://127.0.0.1:{PORT}/api/rooms/{ROOM}/import/danmaku-xml",
             data=XML_NO_RAW.encode(), method="POST",

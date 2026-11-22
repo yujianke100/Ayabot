@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from app import tzutil
+
 
 @dataclass(slots=True)
 class GiftEvent:
@@ -33,6 +35,8 @@ class StatsStore:
         self._conn.execute("PRAGMA synchronous=NORMAL;")
         # 房间机器人可能同时在写同一个库：等锁而不是直接报 database is locked
         self._conn.execute("PRAGMA busy_timeout=8000;")
+        # SQL 里按天/按月分组要用配置时区，不能用 SQLite 的 localtime（那是系统时区）
+        tzutil.install_sqlite_functions(self._conn)
         self._create_tables()
 
     def _create_tables(self) -> None:
@@ -157,7 +161,8 @@ class StatsStore:
 
     @staticmethod
     def month_of_ts(ts: int) -> str:
-        return datetime.fromtimestamp(ts).strftime("%Y-%m")
+        """时间戳 → YYYY-MM，按配置时区（与实时链路写入的 month 同口径）。"""
+        return tzutil.month_str(ts)
 
     def record_gift_event(self, event: GiftEvent, dedupe_key: str = "", source: str = "",
                           commit: bool = True) -> bool:
@@ -337,7 +342,8 @@ class StatsStore:
 
     def user_checkin(self, uid: int, uname: str) -> tuple[int, int, bool]:
         """ 返回 (连续签到天数, 连续天数排名, 今日是否已签到) """
-        today = datetime.now().strftime("%Y-%m-%d")
+        # 必须与 app/bot.py 里 record_stream_date(_now()) 同口径，否则跨天/时区不一致会误判断签
+        today = tzutil.today_str()
         prev_stream_date = self._get_previous_stream_date(today)
         already_checked = False
 
@@ -459,7 +465,7 @@ class StatsStore:
 
     def get_danmaku_dates(self) -> list[str]:
         rows = self._conn.execute(
-            "SELECT DISTINCT date(ts, 'unixepoch', 'localtime') AS d FROM danmaku_log ORDER BY d"
+            "SELECT DISTINCT ayabot_date(ts) AS d FROM danmaku_log ORDER BY d"
         ).fetchall()
         return [r[0] for r in rows if r[0]]
 
@@ -467,10 +473,10 @@ class StatsStore:
         where = ""
         params: list = [limit, offset]
         if date_from:
-            where = " WHERE date(ts, 'unixepoch', 'localtime') >= ?"
+            where = " WHERE ayabot_date(ts) >= ?"
             params.insert(0, date_from)
         if date_to:
-            where += " AND date(ts, 'unixepoch', 'localtime') <= ?" if where else " WHERE date(ts, 'unixepoch', 'localtime') <= ?"
+            where += " AND ayabot_date(ts) <= ?" if where else " WHERE ayabot_date(ts) <= ?"
             if date_to:
                 params.insert(0 if not date_from else 1, date_to)
         # rebuild params: limit/offset are last
@@ -487,10 +493,10 @@ class StatsStore:
         where = ""
         params: list = []
         if date_from:
-            where = " WHERE date(ts, 'unixepoch', 'localtime') >= ?"
+            where = " WHERE ayabot_date(ts) >= ?"
             params.append(date_from)
         if date_to:
-            where += " AND date(ts, 'unixepoch', 'localtime') <= ?"
+            where += " AND ayabot_date(ts) <= ?"
             params.append(date_to)
         row = self._conn.execute(f"SELECT COUNT(*) FROM danmaku_log{where}", params).fetchone()
         return int(row[0]) if row else 0
@@ -500,10 +506,10 @@ class StatsStore:
             where = ""
             params: list = []
             if date_from:
-                where = " WHERE date(ts, 'unixepoch', 'localtime') >= ?"
+                where = " WHERE ayabot_date(ts) >= ?"
                 params.append(date_from)
             if date_to:
-                where += " AND date(ts, 'unixepoch', 'localtime') <= ?"
+                where += " AND ayabot_date(ts) <= ?"
                 params.append(date_to)
             count = self._conn.execute(f"DELETE FROM danmaku_log{where}", params).rowcount
         else:
@@ -596,10 +602,10 @@ class StatsStore:
         where = ["1=1"]
         params: list[Any] = []
         if date_from:
-            where.append("date(ts, 'unixepoch', 'localtime') >= date(?)")
+            where.append("ayabot_date(ts) >= date(?)")
             params.append(date_from)
         if date_to:
-            where.append("date(ts, 'unixepoch', 'localtime') <= date(?)")
+            where.append("ayabot_date(ts) <= date(?)")
             params.append(date_to)
         params.append(limit)
         rows = self._conn.execute(
@@ -637,6 +643,59 @@ class StatsStore:
             (start_ts, end_ts),
         ).fetchall()
         return [(int(a), int(b), int(c)) for a, b, c in rows]
+
+    def rebuild_monthly_stats(self, months: list[str] | None = None) -> int:
+        """按 gift_events 明细重算月度聚合。
+
+        用于「按日期删除」这种会部分删掉某些月份的场合：聚合是增量累加的，
+        删了几行之后不重算就会比明细偏大，越删越离谱。
+        months=None 表示全量重算（月份很多时慢，只用于修复）。
+        返回重算的月份数。
+        """
+        if months is None:
+            months = [r[0] for r in self._conn.execute(
+                "SELECT DISTINCT month FROM monthly_gift_stats "
+                "UNION SELECT DISTINCT month FROM monthly_blindbox_stats "
+                "UNION SELECT DISTINCT month FROM gift_events")]
+        months = [m for m in months if m]
+        if not months:
+            return 0
+        placeholders = ",".join("?" for _ in months)
+        self._conn.execute(
+            f"DELETE FROM monthly_gift_stats WHERE month IN ({placeholders})", months)
+        self._conn.execute(
+            f"DELETE FROM monthly_blindbox_stats WHERE month IN ({placeholders})", months)
+        # 与 record_gift_event 的累加口径保持一致：
+        #   gift_count = 行数、gift_num_total = SUM(gift_num)、value_total = SUM(actual_value)
+        self._conn.execute(
+            f"""
+            INSERT INTO monthly_gift_stats
+                (month, uid, uname, gift_count, gift_num_total, value_total, last_ts)
+            SELECT month, uid,
+                   (SELECT uname FROM gift_events g2 WHERE g2.month = g.month AND g2.uid = g.uid
+                    ORDER BY id DESC LIMIT 1),
+                   COUNT(1), COALESCE(SUM(gift_num), 0), COALESCE(SUM(actual_value), 0),
+                   COALESCE(MAX(ts), 0)
+            FROM gift_events g
+            WHERE month IN ({placeholders})
+            GROUP BY month, uid
+            """, months)
+        self._conn.execute(
+            f"""
+            INSERT INTO monthly_blindbox_stats
+                (month, uid, uname, blind_box_count, cost_total, actual_total, profit_total, last_ts)
+            SELECT month, uid,
+                   (SELECT uname FROM gift_events g2 WHERE g2.month = g.month AND g2.uid = g.uid
+                    ORDER BY id DESC LIMIT 1),
+                   COALESCE(SUM(gift_num), 0), COALESCE(SUM(blind_box_cost), 0),
+                   COALESCE(SUM(actual_value), 0), COALESCE(SUM(profit_value), 0),
+                   COALESCE(MAX(ts), 0)
+            FROM gift_events g
+            WHERE month IN ({placeholders}) AND is_blind_box = 1
+            GROUP BY month, uid
+            """, months)
+        self._conn.commit()
+        return len(months)
 
     def list_import_sources(self) -> list[dict[str, Any]]:
         """已导入的批次（按 source 归并），供「撤销导入」列表用。"""
@@ -745,10 +804,10 @@ class StatsStore:
         where = ["1=1"]
         params: list[Any] = []
         if date_from:
-            where.append("date(ts, 'unixepoch', 'localtime') >= date(?)")
+            where.append("ayabot_date(ts) >= date(?)")
             params.append(date_from)
         if date_to:
-            where.append("date(ts, 'unixepoch', 'localtime') <= date(?)")
+            where.append("ayabot_date(ts) <= date(?)")
             params.append(date_to)
         row = self._conn.execute(
             f"""

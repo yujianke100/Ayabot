@@ -963,7 +963,8 @@ class LiveRobot:
         # ── UID 黑名单 ──
         bl = self.config.features.uid_blacklist
         if bl:
-            h = datetime.now().hour
+            # 时段规则要按配置时区判断，不能跟系统本地时区走
+            h = _now().hour
             for rule in bl:
                 if rule.get("uid") == uid:
                     ts = rule.get("time_start", 0)
@@ -1475,7 +1476,7 @@ class LiveRobot:
         kf = self.config.features.keyword_filter
         if not kf:
             return text
-        now_h = datetime.now().hour
+        now_h = _now().hour
         for rule in kf:
             kw = rule.get("keyword", "")
             if not kw:
@@ -1668,13 +1669,22 @@ _TZ = ZoneInfo("Asia/Shanghai") if ZoneInfo else None  # type: ignore[misc]
 
 
 def set_bot_timezone(tz_name: str) -> None:
-    """设置 Bot 运行时使用的时区（从 config.runtime.timezone 读取）。"""
+    """设置 Bot 运行时使用的时区（从 config.runtime.timezone 读取）。
+
+    同时同步给 `app.tzutil`：统计/导出/删除那些按日期算的地方都用它，
+    三套时间算法不一致会让跨天数据错位（见 tzutil 模块开头的说明）。
+    """
     global _TZ
     if ZoneInfo:
         try:
             _TZ = ZoneInfo(tz_name)
         except Exception:
             _TZ = None
+    try:
+        from app import tzutil
+        tzutil.set_config_timezone(tz_name)
+    except Exception:
+        pass
 
 
 def _now() -> datetime:

@@ -34,6 +34,7 @@ import uvicorn
 
 from bilibili_api import live
 
+from app import tzutil
 from app.config import DEFAULT_ROOMS_DIR
 from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room, set_rooms_base_dir, start_room_async, stop_room_async, restart_room_async, start_periodic_log_cleanup, cleanup_all_stale_pidfiles, last_exit_code
 from app.version import get_version_display
@@ -269,6 +270,8 @@ def init_app(config: Any = None, config_path: str = "config.yaml") -> None:
     if config is None:
         _fallback_read_config()
         return
+    # 全局时区唯一来源：所有「今天/某月/按日期筛选」都用它
+    tzutil.set_config_timezone(getattr(getattr(config, "runtime", None), "timezone", "") or "Asia/Shanghai")
     AUTH_USER = config.web_ui.username
     AUTH_PASS = config.web_ui.password
     _SESSION_TIMEOUT = config.web_ui.session_timeout
@@ -579,8 +582,19 @@ async def _ensure_gift_cache() -> None:
 #  DB
 # ══════════════════════════════════════════════════════════════════
 
+def _connect(db_path: str | Path) -> sqlite3.Connection:
+    """统一建连接：注册按配置时区算日期/月份的 SQL 函数。
+
+    少了这一步，SQL 里的 `ayabot_date(ts)` / `ayabot_month(ts)` 会直接报
+    「no such function」，所以 server.py 里不要再直接 sqlite3.connect。
+    """
+    conn = sqlite3.connect(str(db_path))
+    tzutil.install_sqlite_functions(conn)
+    return conn
+
+
 def _get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(_DB_PATH)
+    conn = _connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -1046,7 +1060,7 @@ async def api_user_dates(uid: int):
         conn = _get_db()
         rows = conn.execute(
             """
-            SELECT DISTINCT strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime') AS d
+            SELECT DISTINCT ayabot_date(ts) AS d
             FROM gift_events
             WHERE uid = ?
             ORDER BY d DESC
@@ -1060,6 +1074,21 @@ async def api_user_dates(uid: int):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@app.get("/api/time")
+async def api_time():
+    """返回配置时区的当前时间信息。
+
+    前端不能拿 `new Date().toISOString().slice(0,10)` 当「今天」——那取的是 **UTC** 日期，
+    东八区凌晨 0 点到 8 点之间会拿到昨天，导出/查询的默认日期直接错一天。
+    """
+    return {
+        "tz": tzutil.tz_name(),
+        "today": tzutil.today_str(),
+        "month": tzutil.month_str(),
+        "now_ts": int(time.time()),
+    }
+
+
 @app.post("/api/delete_old")
 async def api_delete_old(request: Request):
     """删除指定日期之前的数据."""
@@ -1070,17 +1099,28 @@ async def api_delete_old(request: Request):
 
     date_str = body.get("date", "")
     try:
-        dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-        before_ts = int(dt.timestamp())
+        # 按配置时区解释这个日期，和统计/导出用同一口径
+        before_ts = tzutil.range_before(date_str)
+        cut_month = tzutil.month_str(before_ts)
     except ValueError:
         return JSONResponse({"error": "bad date format, use YYYY-MM-DD"}, status_code=400)
 
     try:
         conn = _get_db()
+        affected = [r[0] for r in conn.execute(
+            "SELECT DISTINCT month FROM gift_events WHERE ts < ?", (before_ts,)).fetchall()]
         deleted = conn.execute("DELETE FROM gift_events WHERE ts < ?", (before_ts,)).rowcount
-        conn.execute("DELETE FROM monthly_blindbox_stats WHERE month < ?", (dt.strftime("%Y-%m"),))
-        conn.execute("DELETE FROM monthly_gift_stats WHERE month < ?", (dt.strftime("%Y-%m"),))
+        conn.execute("DELETE FROM monthly_blindbox_stats WHERE month < ?", (cut_month,))
+        conn.execute("DELETE FROM monthly_gift_stats WHERE month < ?", (cut_month,))
         conn.commit()
+        # 边界月份只删了一部分，聚合要按明细重算，否则会偏大
+        if affected:
+            from app.storage import StatsStore
+            store = StatsStore(_DB_PATH)
+            try:
+                store.rebuild_monthly_stats(affected)
+            finally:
+                store._conn.close()
         return {"deleted_events": deleted}
     except Exception as exc:
         logger.exception("delete failed")
@@ -3314,17 +3354,17 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
         return {"ranking": []}
 
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = _connect(db_path)
         cur = conn.cursor()
 
         where_clauses = ["1=1"]
         params: list[Any] = []
 
         if rStart:
-            where_clauses.append("date(ts, 'unixepoch', 'localtime') >= date(?)")
+            where_clauses.append("ayabot_date(ts) >= date(?)")
             params.append(rStart)
         if rEnd:
-            where_clauses.append("date(ts, 'unixepoch', 'localtime') <= date(?)")
+            where_clauses.append("ayabot_date(ts) <= date(?)")
             params.append(rEnd)
 
         if rType == "gift":
@@ -3365,7 +3405,7 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
         return []
 
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = _connect(db_path)
         cur = conn.cursor()
 
         where_extra = ""
@@ -3377,7 +3417,7 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
         cur.execute(f"""
             SELECT uid, uname, gift_name, gift_num, actual_value, ts, is_blind_box, id, raw_json
             FROM gift_events
-            WHERE uid = ? AND date(ts, 'unixepoch', 'localtime') = date(?) AND event_type = 'SEND_GIFT'{where_extra}
+            WHERE uid = ? AND ayabot_date(ts) = date(?) AND event_type = 'SEND_GIFT'{where_extra}
             ORDER BY ts
         """, (uid, date))
         rows = cur.fetchall()
@@ -3474,10 +3514,10 @@ async def api_room_user_dates(room_id: str, uid: int = 0):
         return []
 
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = _connect(db_path)
         cur = conn.cursor()
         cur.execute(
-            "SELECT DISTINCT date(ts, 'unixepoch', 'localtime') FROM gift_events WHERE uid = ? ORDER BY date(ts, 'unixepoch', 'localtime')",
+            "SELECT DISTINCT ayabot_date(ts) FROM gift_events WHERE uid = ? ORDER BY ayabot_date(ts)",
             (uid,),
         )
         dates = [r[0] for r in cur.fetchall()]
@@ -3494,10 +3534,10 @@ async def api_room_all_dates(room_id: str):
     if not db_path.exists():
         return []
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = _connect(db_path)
         cur = conn.cursor()
         cur.execute(
-            "SELECT DISTINCT date(ts, 'unixepoch', 'localtime') FROM gift_events ORDER BY date(ts, 'unixepoch', 'localtime')"
+            "SELECT DISTINCT ayabot_date(ts) FROM gift_events ORDER BY ayabot_date(ts)"
         )
         dates = [r[0] for r in cur.fetchall()]
         conn.close()
@@ -3530,17 +3570,17 @@ async def api_room_export_all(
         return []
 
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = _connect(db_path)
         cur = conn.cursor()
 
         conditions = ["event_type = 'SEND_GIFT'"]
         params: list = []
 
         if date_from:
-            conditions.append("date(ts, 'unixepoch', 'localtime') >= date(?)")
+            conditions.append("ayabot_date(ts) >= date(?)")
             params.append(date_from)
         if date_to:
-            conditions.append("date(ts, 'unixepoch', 'localtime') <= date(?)")
+            conditions.append("ayabot_date(ts) <= date(?)")
             params.append(date_to)
         if gift_type == "gift":
             conditions.append("is_blind_box = 0")
@@ -3903,19 +3943,37 @@ async def api_room_delete_old(room_id: str, request: Request):
         return {"deleted_gifts": 0, "deleted_danmaku": 0}
 
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = _connect(db_path)
         cur = conn.cursor()
         result = {"deleted_gifts": 0, "deleted_danmaku": 0}
         if data_type in ("gift", "all"):
-            cur.execute("DELETE FROM gift_events WHERE date(ts, 'unixepoch') <= date(?)", (date_str,))
+            # 以前这里用的是 UTC 日期（date(ts,'unixepoch')），而弹幕用的是 localtime，
+            # 在东八区会差 8 小时：删「某日之前」时把当天凌晨到早上 8 点的数据一起删掉。
+            # 统一按配置时区算截止时间戳。
+            cutoff_ts = tzutil.day_range(date_str)[1] + 1
+            # 受影响月份必须在删之前取，删完就查不到了
+            affected_months = [r[0] for r in cur.execute(
+                "SELECT DISTINCT month FROM gift_events WHERE ts < ?", (cutoff_ts,)).fetchall()]
+            cur.execute("DELETE FROM gift_events WHERE ts < ?", (cutoff_ts,))
             result["deleted_gifts"] = cur.rowcount
         if data_type in ("danmaku", "all"):
-            cur.execute("DELETE FROM danmaku_log WHERE date(ts, 'unixepoch', 'localtime') <= date(?)", (date_str,))
+            cur.execute("DELETE FROM danmaku_log WHERE ts < ?",
+                        (tzutil.day_range(date_str)[1] + 1,))
             result["deleted_danmaku"] = cur.rowcount
         conn.commit()
         conn.close()
-        # 清理无数据的月度汇总
+        # 聚合是增量累加的：按日期删掉部分明细后必须重算，否则汇总会一直比明细大。
+        # 先取会受影响的月份（被删掉的那些行的月份），再重算这几个月的聚合。
         if result["deleted_gifts"]:
+            try:
+                from app.storage import StatsStore
+                store = StatsStore(str(db_path))
+                try:
+                    store.rebuild_monthly_stats(affected_months)
+                finally:
+                    store._conn.close()
+            except Exception as exc:
+                logger.warning("rebuild monthly stats failed: %s", exc)
             _clean_orphan_monthly_stats(db_path)
         return result
     except Exception as exc:
@@ -3925,7 +3983,7 @@ async def api_room_delete_old(room_id: str, request: Request):
 def _clean_orphan_monthly_stats(db_path: Path) -> None:
     """删除已无 gift_events 数据的月度汇总行."""
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = _connect(db_path)
         cur = conn.cursor()
         cur.execute("DELETE FROM monthly_blindbox_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)")
         cur.execute("DELETE FROM monthly_gift_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)")
@@ -3989,7 +4047,9 @@ async def api_room_danmaku_export_dates(room_id: str, date_from: str = "", date_
         w = csv.writer(buf)
         w.writerow(["时间", "用户", "UID", "内容"])
         for r in rows:
-            ts = datetime.datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d %H:%M:%S") if r.get("ts") else ""
+            # 导出时间按配置时区呈现，和界面上看到的日期一致
+            ts = (datetime.datetime.fromtimestamp(r["ts"], tzutil.get_tz())
+                  .strftime("%Y-%m-%d %H:%M:%S")) if r.get("ts") else ""
             w.writerow([ts, r.get("uname",""), r.get("uid",""), r.get("content","")])
         fname = f"danmaku_{room_id}"
         if date_from or date_to:
@@ -4077,26 +4137,10 @@ async def api_external_user_stats(
         return JSONResponse({"error": "room data not found"}, status_code=404)
 
     try:
-        now = datetime.datetime.now()
-        ts_now = int(now.timestamp())
+        # 用配置时区算「今天/本周/本月」，否则和 month 列（配置时区写入）口径不一致
+        start_ts, end_ts = tzutil.period_range(period)
 
-        if period == "today":
-            start_ts = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-            end_ts = int(now.replace(hour=23, minute=59, second=59, microsecond=999999).timestamp())
-        elif period == "week":
-            # 周一为每周第一天
-            weekday = now.weekday()
-            monday = now - datetime.timedelta(days=weekday)
-            start_ts = int(monday.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-            end_ts = ts_now
-        elif period == "month":
-            start_ts = int(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
-            end_ts = ts_now
-        else:  # all
-            start_ts = 0
-            end_ts = ts_now
-
-        conn = sqlite3.connect(str(db_path))
+        conn = _connect(db_path)
         conn.row_factory = sqlite3.Row
 
         # 通用礼物统计（含盲盒）- 普通礼物的价值从 raw_json.total_coin 提取
@@ -4405,26 +4449,12 @@ async def api_external_ranking(
         return JSONResponse({"error": "room data not found"}, status_code=404)
 
     try:
-        now = datetime.datetime.now()
-        ts_now = int(now.timestamp())
-        if period == "today":
-            start_ts = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-            end_ts = ts_now
-        elif period == "week":
-            weekday = now.weekday()
-            monday = now - datetime.timedelta(days=weekday)
-            start_ts = int(monday.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-            end_ts = ts_now
-        elif period == "month":
-            start_ts = int(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
-            end_ts = ts_now
-        else:
-            start_ts = 0
-            end_ts = ts_now
+        # 用配置时区算「今天/本周/本月」，与 month 列（配置时区写入）保持同一口径
+        start_ts, end_ts = tzutil.period_range(period)
 
         limit = min(max(limit, 1), 100)
 
-        conn = sqlite3.connect(str(db_path))
+        conn = _connect(db_path)
         cur = conn.cursor()
 
         where = "ts >= ? AND ts <= ?"
@@ -4488,24 +4518,10 @@ async def api_external_room_stats(
         return JSONResponse({"error": "room data not found"}, status_code=404)
 
     try:
-        now = datetime.datetime.now()
-        ts_now = int(now.timestamp())
-        if period == "today":
-            start_ts = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-            end_ts = ts_now
-        elif period == "week":
-            weekday = now.weekday()
-            monday = now - datetime.timedelta(days=weekday)
-            start_ts = int(monday.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-            end_ts = ts_now
-        elif period == "month":
-            start_ts = int(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
-            end_ts = ts_now
-        else:
-            start_ts = 0
-            end_ts = ts_now
+        # 用配置时区算「今天/本周/本月」，与 month 列（配置时区写入）保持同一口径
+        start_ts, end_ts = tzutil.period_range(period)
 
-        conn = sqlite3.connect(str(db_path))
+        conn = _connect(db_path)
         conn.row_factory = sqlite3.Row
 
         # 总览
@@ -6908,8 +6924,29 @@ createApp({
         let accountsPollTimer = null;
 
         // Ranking
-        const rStart = ref(new Date().toISOString().slice(0,10));
-        const rEnd   = ref(new Date().toISOString().slice(0,10));
+        // 「今天」一律用后端配置时区的日期。toISOString() 是 UTC 日期，
+        // 东八区 0~8 点会拿到昨天，导出/查询默认日期就会错一天。
+        const serverToday = ref(new Date().toLocaleDateString('sv-SE'));
+        async function syncServerTime() {
+            const prev = serverToday.value;
+            try {
+                const res = await fetch('/api/time', {credentials: 'include'});
+                if (!res.ok) return;
+                const d = await res.json();
+                if (!d || !d.today || d.today === prev) return;
+                serverToday.value = d.today;
+                // 已经渲染出去的默认日期也得跟着改，否则用户看到的还是浏览器本地那天
+                // （只在用户没手动改过时才覆盖）
+                if (rStart.value === prev) rStart.value = d.today;
+                if (rEnd.value === prev) rEnd.value = d.today;
+                if (eDate.value === prev) eDate.value = d.today;
+                if (eSelectedDates.value.length === 1 && eSelectedDates.value[0] === prev) {
+                    eSelectedDates.value = [d.today];
+                }
+            } catch (e) { /* 拿不到就退回浏览器本地日期 */ }
+        }
+        const rStart = ref(serverToday.value);
+        const rEnd   = ref(serverToday.value);
         const rType  = ref('all');
         const ranking = ref([]);
         const errRanking = ref('');
@@ -6940,8 +6977,8 @@ createApp({
         const eModeAll = ref(false);  // true=所有人模式
         const eUid = ref(0);
         const eName = ref('');
-        const eDate = ref(new Date().toISOString().slice(0,10));
-        const eSelectedDates = ref([new Date().toISOString().slice(0,10)]);  // 数组保证响应式
+        const eDate = ref(serverToday.value);
+        const eSelectedDates = ref([serverToday.value]);  // 数组保证响应式
         const eSelectedSet = Vue.computed(() => new Set(eSelectedDates.value));
         const eDateLabel = Vue.computed(() => {
             const arr = eSelectedDates.value.slice().sort();
@@ -7425,6 +7462,8 @@ createApp({
                 const data = await res.json();
                 loggedIn.value = true;
                 userRole.value = data.role || '';
+                // 校准「今天」：日期默认值要用后端配置时区算出来的那天
+                syncServerTime();
                 if (!loginUser.value && data.username) loginUser.value = data.username;
                 if (data.must_reset_password) {
                     mustResetPwd.value = true;
@@ -7523,8 +7562,8 @@ createApp({
             eModeAll.value = false;
             eUid.value = 0;
             eName.value = '';
-            eDate.value = new Date().toISOString().slice(0,10);
-            eSelectedDates.value = [new Date().toISOString().slice(0,10)];
+            eDate.value = serverToday.value;
+            eSelectedDates.value = [serverToday.value];
             eAllUserDates.value = [];
             eType.value = 'all';
             eSort.value = 'uname';
@@ -7936,8 +7975,8 @@ createApp({
             showCalendar.value = false;
             exportList.value = [];
             errExport.value = '';
-            eSelectedDates.value = eModeAll.value ? [] : [new Date().toISOString().slice(0,10)];
-            eDate.value = new Date().toISOString().slice(0,10);
+            eSelectedDates.value = eModeAll.value ? [] : [serverToday.value];
+            eDate.value = serverToday.value;
             loadUserDates();
         }
         function onUidInput() {
@@ -8179,7 +8218,7 @@ createApp({
             eName.value = uname || '';
             roomSubTab.value = 'export';
             showCalendar.value = false;
-            const today = new Date().toISOString().slice(0,10);
+            const today = serverToday.value;
             eSelectedDates.value = [today];
             eDate.value = today;
             exportDates.value = [];
