@@ -296,6 +296,27 @@ def _safe_float(val) -> float:
         return 0.0
 
 
+def resolve_tz(tz_name: str):
+    """把配置里的时区名解析成 tzinfo；解析不了就返回 None（= 用系统本地时区）。"""
+    if not tz_name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(str(tz_name))
+    except Exception:
+        return None
+
+
+def month_of(ts: int, tz=None) -> str:
+    """按指定时区算 YYYY-MM。
+
+    必须和实时链路用同一个时区（`app/bot.py` 的 `_now()` 用 `config.runtime.timezone`），
+    否则同一场直播的实时数据和导入数据会落到不同的月份桶里，
+    `#盲盒统计` 这类按月查询的功能就查不全。
+    """
+    return datetime.fromtimestamp(int(ts), tz).strftime("%Y-%m")
+
+
 def dedupe_key_for(*parts) -> str:
     """稳定去重键：同一份 XML 重复导入、或分片重叠时不会重复计数。"""
     return hashlib.sha1("\x1f".join(str(p) for p in parts).encode("utf-8")).hexdigest()
@@ -325,13 +346,15 @@ def build_plan(
     source: str,
     *,
     room_name: str = "",
+    tz=None,
 ) -> ImportPlan:
     """把解析结果换算成入库事件。
 
     price_map: 礼物名 → (单价, 币种)，来自 B站礼物配置；查不到时单价记 0。
     source:    写入 gift_events.source 的标记（形如 xml:文件名），用于事后撤销。
+    tz:        房间配置里的时区（config.runtime.timezone），决定月份分桶。必须与实时链路一致。
     """
-    from app.storage import GiftEvent, StatsStore
+    from app.storage import GiftEvent
 
     plan = ImportPlan()
     seq: dict[tuple, int] = {}
@@ -422,7 +445,7 @@ def build_plan(
         plan.gifts.append((
             GiftEvent(
                 ts=rec.ts,
-                month=StatsStore.month_of_ts(rec.ts),
+                month=month_of(rec.ts, tz),
                 uid=rec.uid,
                 uname=rec.uname,
                 event_type="SEND_GIFT",
@@ -454,7 +477,7 @@ def build_plan(
         guard_value_coin += price_coin
         plan.guards.append(dict(
             ts=rec.ts,
-            month=StatsStore.month_of_ts(rec.ts),
+            month=month_of(rec.ts, tz),
             uid=rec.uid,
             uname=rec.uname,
             guard_level=rec.level,

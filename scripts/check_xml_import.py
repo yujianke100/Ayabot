@@ -160,6 +160,25 @@ XML_FREE_GIFT = """<?xml version="1.0" encoding="utf-8"?>
 """.format(start=BASE_ISO)
 
 
+# 跨月边界：UTC 是 2024-12-31 17:00，+08 已经是 2025-01-01 01:00。
+# 用它验证「月份分桶用的是房间配置的时区，而不是系统本地时区」。
+XML_TZ_EDGE = """<?xml version="1.0" encoding="utf-8"?>
+<i>
+  <metadata><record_start_time>2024-12-31T17:00:00+00:00</record_start_time></metadata>
+  <gift ts="10.000" uid="111" user="甲" giftname="小花花" giftcount="1"/>
+</i>
+"""
+
+# 同一秒、同一个人、同一个礼物、同样数量出现两次：这是两笔真实交易，不能合并
+XML_SAME_SECOND = """<?xml version="1.0" encoding="utf-8"?>
+<i>
+  <metadata><record_start_time>{start}</record_start_time></metadata>
+  <gift ts="10.000" uid="111" user="甲" giftname="小花花" giftcount="1"/>
+  <gift ts="10.000" uid="111" user="甲" giftname="小花花" giftcount="1"/>
+</i>
+""".format(start=BASE_ISO)
+
+
 def _req(method: str, path: str, body: bytes | None = None,
          headers: dict | None = None) -> tuple[int, dict]:
     req = urllib.request.Request(
@@ -486,10 +505,79 @@ def main() -> int:
         ok("金额记 0", abs(float(st.get("value_yuan") or 0)) < 1e-6, st.get("value_yuan"))
         ok("数量照常计入", st.get("gift_num") == 5, st.get("gift_num"))
 
-        # ── 16. 权限 ──
+
+        # ── 17. 月份分桶必须跟房间配置的时区 ──
+        print("[17] 月份分桶的时区口径")
+        import yaml as _yaml
+        cfg_file = room_dir / "config.yaml"
+        original = cfg_file.read_text(encoding="utf-8")
+        try:
+            _raw = _yaml.safe_load(original) or {}
+            _raw.setdefault("runtime", {})["timezone"] = "UTC"
+            cfg_file.write_text(_yaml.safe_dump(_raw, allow_unicode=True, sort_keys=False),
+                                encoding="utf-8")
+            code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_TZ_EDGE, "tz_edge.xml")
+            ok("导入成功", code == 200 and r.get("ok"), r.get("error"))
+            month = q("SELECT DISTINCT month FROM gift_events WHERE source LIKE 'xml:tz_edge.xml#%'")
+            ok("按配置的 UTC 落在 2024-12", month and month[0][0] == "2024-12", month)
+            undo("tz_edge.xml")
+
+            _raw.setdefault("runtime", {})["timezone"] = "Asia/Shanghai"
+            cfg_file.write_text(_yaml.safe_dump(_raw, allow_unicode=True, sort_keys=False),
+                                encoding="utf-8")
+            code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_TZ_EDGE, "tz_edge2.xml")
+            month = q("SELECT DISTINCT month FROM gift_events WHERE source LIKE 'xml:tz_edge2.xml#%'")
+            ok("按配置的 Asia/Shanghai 落在 2025-01", month and month[0][0] == "2025-01", month)
+            undo("tz_edge2.xml")
+        finally:
+            cfg_file.write_text(original, encoding="utf-8")
+
+        # ── 18. 同一秒的重复礼物是两笔，不能被去重吃掉 ──
+        print("[18] 同一秒的相同礼物")
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_SAME_SECOND, "same_sec.xml")
+        st = r.get("stats") or {}
+        ok("两条都写入", st.get("inserted") == 2, st.get("inserted"))
+        rows = q("SELECT COUNT(1) FROM gift_events WHERE source LIKE 'xml:same_sec.xml#%'")
+        ok("库里 2 行", rows[0][0] == 2, rows)
+        code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_SAME_SECOND, "same_sec.xml")
+        st = r.get("stats") or {}
+        ok("重复导入仍然是 0 新增", st.get("inserted") == 0, st.get("inserted"))
+        ok("两条都判为重复", st.get("skipped_duplicate") == 2, st.get("skipped_duplicate"))
+        undo("same_sec.xml")
+
+        # ── 19. 并发导入同一份文件：不重复、不锁死 ──
+        print("[19] 并发导入同一份文件")
+        import threading as _th
+        results: list = []
+        lock = _th.Lock()
+
+        def _worker():
+            code, r = post(f"/api/rooms/{ROOM}/import/danmaku-xml", XML_SAME_A, "race.xml")
+            with lock:
+                results.append((code, (r.get("stats") or {}).get("inserted"),
+                                r.get("error")))
+
+        threads = [_th.Thread(target=_worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=90)
+        codes = [c for c, _, _ in results]
+        inserted = sum((i or 0) for _, i, _ in results)
+        ok("4 个请求都成功", codes == [200, 200, 200, 200], results)
+        ok("总共只新增 1 条（其余命中幂等）", inserted == 1, results)
+        rows = q("SELECT COUNT(1) FROM gift_events WHERE source LIKE 'xml:race.xml#%'")
+        ok("库里最终只有 1 条", rows[0][0] == 1, rows)
+        # 清理：same.xml 的那份（第 14 组已撤，这里可能又建了一批）
+        q_src = q("SELECT DISTINCT source FROM gift_events WHERE source LIKE 'xml:race.xml#%'")
+        for (src,) in q_src:
+            _req("DELETE", f"/api/rooms/{ROOM}/imports?source={quote(src)}")
+
+        # ── 20. 权限 ──
 
 
-        print("[16] 普通用户不能导入")
+
+        print("[20] 普通用户不能导入")
         req = urllib.request.Request(
             f"http://127.0.0.1:{PORT}/api/rooms/{ROOM}/import/danmaku-xml",
             data=XML_NO_RAW.encode(), method="POST",

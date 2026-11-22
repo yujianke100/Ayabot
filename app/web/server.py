@@ -3628,6 +3628,7 @@ async def api_room_export_all(
 
 
 def _import_xml_blocking(
+    room_id: str,
     db_path: str,
     raw: bytes,
     safe_name: str,
@@ -3643,8 +3644,21 @@ def _import_xml_blocking(
     直接在 async 端点里跑会卡住 uvicorn 的事件循环，房间守护循环和其它请求都跟着卡。
     sqlite3 连接默认绑定创建它的线程，所以连接也在这里面建、在这里面关。
     """
-    from app.danmaku_xml import DanmakuXmlError, build_plan, parse_danmaku_xml
+    from app.danmaku_xml import (DanmakuXmlError, build_plan, parse_danmaku_xml,
+                                 resolve_tz)
     from app.storage import StatsStore
+
+    # 月份分桶必须和实时链路用同一个时区。实时那边是 config.runtime.timezone
+    # （app/bot.py 的 _now()），这里如果图省事用系统本地时区，用户机器时区不匹配时
+    # 同一场直播的实时数据和导入数据就会落到不同月份，按月查询的功能查不全。
+    tz = None
+    try:
+        from app.config import load_config as _load_cfg
+        from app.config import get_room_path as _get_room_path
+        _room_cfg = _get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "config.yaml"
+        tz = resolve_tz(_load_cfg(str(_room_cfg)).runtime.timezone)
+    except Exception:
+        tz = None
 
     try:
         parsed = parse_danmaku_xml(raw, safe_name)
@@ -3654,7 +3668,7 @@ def _import_xml_blocking(
         logger.warning("import xml parse failed: %s", exc)
         return {"ok": False, "error": f"解析失败：{exc}"}
 
-    plan = build_plan(parsed, price_map, source)
+    plan = build_plan(parsed, price_map, source, tz=tz)
     stats = dict(plan.stats)
 
     store = StatsStore(db_path)
@@ -3789,8 +3803,9 @@ async def api_import_danmaku_xml(room_id: str, request: Request):
 
     filename = (request.headers.get("X-Filename") or "").strip()
     filename = Path(filename).name or "danmaku.xml"
-    # source 会写进数据库并用于撤销，做个长度与字符收敛
-    safe_name = "".join(ch for ch in filename if ch.isprintable())[:120]
+    # source 会写进数据库并用于撤销，做个长度与字符收敛。
+    # `#` 要去掉：source 用 `xml:名字#摘要` 的形式，名字里带 # 会把摘要切错位置。
+    safe_name = "".join(ch for ch in filename if ch.isprintable()).replace("#", "_")[:120]
     # 关键：同名文件必须能分开。用户很容易把不同场次都叫 danmaku.xml，
     # 只按文件名当批次的话，撤销一个批次会把另一批的数据一起删掉。
     # 内容摘要进 source 就天然隔离；同一份文件重复导入仍是同一个批次。
@@ -3809,7 +3824,7 @@ async def api_import_danmaku_xml(room_id: str, request: Request):
 
     try:
         result = await asyncio.to_thread(
-            _import_xml_blocking, str(_room_db_path(room_id)), raw, safe_name,
+            _import_xml_blocking, room_id, str(_room_db_path(room_id)), raw, safe_name,
             source, price_map, dry_run, skip_overlap)
     except Exception as exc:
         logger.warning("import xml failed: %s", exc)
@@ -8307,7 +8322,8 @@ createApp({
                 if (skipped) parts.push(`跳过重叠 ${skipped} 条`);
                 if (guardDup) parts.push(`${guardDup} 条上舰已存在`);
                 if (failed) parts.push(`${failed} 个文件失败`);
-                xmlMsg.value = '✅ 导入完成：' + parts.join('、');
+                // 排行榜要手动点「查询」才会重新拉，这里明说一句，免得用户以为没导进去
+                xmlMsg.value = '✅ 导入完成：' + parts.join('、') + '。到「送礼排行」点「查询」即可看到';
                 xmlMsgOk.value = failed === 0;
                 // 只清预检结果、保留已选文件：用户想再确认一次「重复导入不会重复计数」时直接点预检即可
                 xmlPreview.value = [];
