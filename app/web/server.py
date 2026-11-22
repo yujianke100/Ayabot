@@ -51,6 +51,8 @@ _SESSION_TIMEOUT = 3600
 _HTTP_HOST = "0.0.0.0"
 _HTTP_PORT = int(os.environ.get("AYABOT_PORT", "19810"))
 _DB_PATH = "data/bot.db"
+# 房间库路径缓存：f"{rooms根目录}|{room_id}" → (config.yaml mtime, size, Path)
+_ROOM_DB_PATH_CACHE: dict[str, tuple[float, int, Path]] = {}
 
 # LLM 配置（可变引用，webui 可保存更新）
 _LLM_CONFIG_DICT: dict[str, Any] = {}
@@ -3378,9 +3380,46 @@ async def api_verify_account_credential(uid: str):
 # ══════════════════════════════════════════════════════════════
 
 def _room_db_path(room_id: str) -> Path:
-    """返回房间的 SQLite 数据库路径."""
+    """返回房间的 SQLite 数据库路径（以 config.yaml 的 storage.sqlite_path 为准）。
+
+    **不能写死 `data/bot.db`**。机器人写的是 `config.storage.sqlite_path`，
+    而 WebUI 以前一律读 `data/bot.db`：
+      - 用户改过 sqlite_path（或用了绝对路径）时，两边指向不同文件
+      - `sqlite3.connect()` 会**顺手创建**一个空的 bot.db，于是接口返回空表
+      - 表现出来就是「机器人明明在统计，页面上所有数字都是 0 / 暂无数据」，
+        而真实数据的库就躺在旁边没人读
+    按 mtime+size 缓存，避免每个请求都解析一次 YAML。
+    """
     from app.config import get_room_path
-    return get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "data" / "bot.db"
+
+    room_dir = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR)
+    # 缓存键要带上 rooms 根目录：测试/多实例会把 _ROOMS_BASE_DIR 换掉，
+    # 只按 room_id 缓存会串到另一个根目录下的同名房间。
+    cache_key = f"{Path(_ROOMS_BASE_DIR).resolve()}|{room_id}"
+    cfg_path = room_dir / "config.yaml"
+    try:
+        st = cfg_path.stat()
+    except OSError:
+        return room_dir / "data" / "bot.db"
+
+    cached = _ROOM_DB_PATH_CACHE.get(cache_key)
+    if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+        return cached[2]
+
+    rel = "data/bot.db"
+    try:
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        storage = raw.get("storage") if isinstance(raw, dict) else None
+        if isinstance(storage, dict) and storage.get("sqlite_path"):
+            rel = str(storage["sqlite_path"])
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("read sqlite_path failed (room %s): %s", room_id, exc)
+
+    p = Path(rel)
+    if not p.is_absolute():
+        p = room_dir / p
+    _ROOM_DB_PATH_CACHE[cache_key] = (st.st_mtime, st.st_size, p)
+    return p
 
 
 @app.get("/api/rooms/{room_id}/log/export")
@@ -3470,6 +3509,7 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
 
         cur.execute(f"""
             SELECT uid, uname,
+                   COUNT(1) as cnt,
                    ROUND(SUM(CASE WHEN is_blind_box=1 THEN CAST(actual_value AS REAL) / 10.0 ELSE CAST(json_extract(raw_json, '$.total_coin') AS REAL) / 1000.0 END), 2) as total,
                    ROUND(SUM(CAST(profit_value AS REAL) / 10.0), 2) as total_profit
             FROM gift_events WHERE {where_sql}
@@ -3479,7 +3519,9 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
         conn.close()
 
         ranking = [
-            {"uid": r[0], "uname": r[1], "count": 0, "total": r[2] or 0, "total_profit": r[3] or 0}
+            # count 以前是写死的 0，对外调用方（overlay/脚本）拿到的条数永远是 0
+            {"uid": r[0], "uname": r[1], "count": int(r[2] or 0),
+             "total": r[3] or 0, "total_profit": r[4] or 0}
             for r in rows
         ]
         return {"ranking": ranking}
@@ -4672,8 +4714,12 @@ async def api_external_ranking(
         cur.execute(f"""
             SELECT uid, uname,
                    COALESCE(SUM(gift_num), 0) as total_count,
-                   COALESCE(SUM(CASE WHEN is_blind_box=0 THEN CAST(json_extract(raw_json, '$.total_coin') AS INTEGER) / 100 ELSE actual_value END), 0) as total_value,
-                   COALESCE(SUM(profit_value), 0) as total_profit
+                   COALESCE(SUM(
+                       CASE WHEN is_blind_box = 0
+                            THEN CAST(json_extract(raw_json, '$.total_coin') AS INTEGER) / 1000.0
+                            ELSE CAST(actual_value AS REAL) / 10.0
+                       END), 0) as total_value,
+                   COALESCE(SUM(CAST(profit_value AS REAL) / 10.0), 0) as total_profit
             FROM gift_events
             WHERE {where}
             GROUP BY uid
@@ -4689,8 +4735,10 @@ async def api_external_ranking(
                 "uid": int(r[0]),
                 "uname": str(r[1]),
                 "count": int(r[2]),
-                "value": int(r[3]),
-                "profit": int(r[4]),
+                # 单位统一成「元」：金瓜子 ÷1000、电池 ÷10
+                # （以前写的是 total_coin/100 且盲盒不加换算，金额整体偏大 10 倍）
+                "value": round(float(r[3]), 2),
+                "profit": round(float(r[4]), 2),
             })
         return {"ok": True, "ranking": ranking, "total": len(ranking)}
     except Exception as exc:

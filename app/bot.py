@@ -101,6 +101,9 @@ class LiveRobot:
         self._recent_guards: dict[tuple, float] = {}
         # 统计写入失败计数器（写库被锁/磁盘忙时兜底重试仍失败），进心跳供 WebUI 显示
         self._dropped_stats = 0
+        # 因缺少 uid 而被丢弃的礼物数 + 最近发生时间（凭证失效/匿名连接的信号）
+        self._dropped_no_uid = 0
+        self._no_uid_ts: list[float] = []
         # 后台守护任务（run() 里创建）
         self._heartbeat_task: Optional[asyncio.Task[None]] = None
         self._danmaku_guard_task: Optional[asyncio.Task[None]] = None
@@ -202,6 +205,8 @@ class LiveRobot:
             "queue_depth": self._msg_queue.qsize(),
             # 统计写入失败条数：非 0 说明有礼物/上舰因为写库失败没能记上（日志里有详细信息）
             "dropped_stats": getattr(self, "_dropped_stats", 0),
+            # 因缺少 uid（匿名连接/凭证失效）被丢弃的礼物数：非 0 就是「统计全是 0」的原因
+            "dropped_no_uid": getattr(self, "_dropped_no_uid", 0),
             "credential_status": (
                 self.auth.load_status().get("status") if self.auth is not None else "ok"
             ),
@@ -908,15 +913,33 @@ class LiveRobot:
         return False
 
     def _warn_gift_without_uid(self, uname: str, gift_name: str) -> None:
-        """礼物事件缺少 uid 时给出限流告警（常见原因：凭证失效/匿名连接）。"""
+        """礼物事件缺少 uid：**这就是「统计全是 0」最可能的原因**，要上报。
+
+        B站 在匿名/未登录连接下会把礼物事件的 uid/uname 抹掉，这种事件既无法归属
+        也无法统计。以前这里只打一行 warning，于是：
+          - 用户在页面上看到「所有统计都是 0」
+          - 界面上没有任何提示，日志里也只有一句容易被忽略的 warning
+          - 用户完全不知道是凭证失效，只会以为「统计功能坏了」
+        连续丢了几条就明确判定凭证不可用，写 auth_status → 前端弹重新扫码引导。
+        """
+        self._dropped_no_uid = getattr(self, "_dropped_no_uid", 0) + 1
         now = time.time()
+        # 15 分钟内累计 3 条就认定凭证有问题（单条可能是异常事件，不急着误报）
+        self._no_uid_ts = [t for t in getattr(self, "_no_uid_ts", []) if now - t < 900]
+        self._no_uid_ts.append(now)
+        if len(self._no_uid_ts) >= 3 and self.auth is not None:
+            # 已经是 needs_login 就不要每条礼物都写一次文件（礼物多时是纯磁盘浪费）
+            if self.auth.load_status().get("status") != "needs_login":
+                self.auth.mark_needs_login(
+                    "礼物事件缺少用户信息（当前是未登录/匿名连接），礼物无法统计。"
+                    "请重新扫码登录 B站账号")
         if now - getattr(self, "_last_uid_warn_ts", 0.0) < 60:
             return
         self._last_uid_warn_ts = now
         self.logger.warning(
             "gift ignored: uid missing (uname=%r gift=%r) — 未登录态下 B站会屏蔽用户信息，"
-            "请检查 B站账号凭证是否有效",
-            uname, gift_name,
+            "已累计 %s 条无法统计的礼物（若持续出现请重新登录 B站账号）",
+            uname, gift_name, self._dropped_no_uid,
         )
 
     async def _on_special_gift(self, event: dict[str, Any]) -> None:

@@ -118,6 +118,40 @@ async def main() -> int:
     if pick2 is None:
         failures.append("凭证文件变化后应能拾取新凭证")
 
+    # ── 场景 4: 礼物缺 uid → 判定凭证失效（「统计全是 0」的直接原因） ──
+    import logging
+
+    from app.bot import LiveRobot
+
+    class _BotStub:
+        """只带上 _warn_gift_without_uid 需要的属性。"""
+
+        logger = logging.getLogger("bili-live-robot")
+
+        def __init__(self, auth):
+            self.auth = auth
+            self._dropped_no_uid = 0
+            self._no_uid_ts = []
+            self._last_uid_warn_ts = 0.0
+
+    auth4 = AuthManager(load_config(build_config(cred_path, wait=True)))
+    auth4.mark_ok()
+    stub = _BotStub(auth4)
+    LiveRobot._warn_gift_without_uid(stub, "要***", "辣条")
+    LiveRobot._warn_gift_without_uid(stub, "要***", "小花花")
+    print("after 2 drops:", auth4.load_status().get("status"))
+    if auth4.load_status().get("status") == "needs_login":
+        failures.append("只丢 2 条礼物就误判凭证失效（太敏感）")
+    LiveRobot._warn_gift_without_uid(stub, "要***", "情书")
+    st4 = auth4.load_status()
+    print("after 3 drops:", st4.get("status"), "|", str(st4.get("reason"))[:60])
+    if st4.get("status") != "needs_login":
+        failures.append("连续丢 3 条无 uid 的礼物后没有标记凭证失效")
+    if "匿名" not in str(st4.get("reason")) and "未登录" not in str(st4.get("reason")):
+        failures.append(f"凭证失效原因没说清是未登录/匿名连接: {st4.get('reason')}")
+    if stub._dropped_no_uid != 3:
+        failures.append(f"丢弃计数不对: {stub._dropped_no_uid}")
+
     if failures:
         print("\nFAILED:")
         for f in failures:
