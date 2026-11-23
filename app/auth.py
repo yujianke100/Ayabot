@@ -77,6 +77,16 @@ class AuthManager:
             self.logger.info("credential restored")
         self.write_status(STATUS_OK, "")
 
+    @property
+    def status(self) -> str:
+        """当前状态（**内存值**，不读磁盘）。
+
+        热路径要用这个：`_warn_gift_without_uid` 里每条礼物都会判断一次
+        「是不是已经提示过重新登录了」，调 `load_status()` 会读一遍 JSON 文件；
+        匿名连接下每秒几十条礼物就是每秒几十次磁盘读。
+        """
+        return self._status
+
     def load_status(self) -> dict:
         try:
             path = self.status_path()

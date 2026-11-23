@@ -152,6 +152,25 @@ async def main() -> int:
     if stub._dropped_no_uid != 3:
         failures.append(f"丢弃计数不对: {stub._dropped_no_uid}")
 
+    # 已经 needs_login 之后，后续每条礼物不能再读 auth_status.json
+    # （匿名连接下每秒几十条礼物 = 每秒几十次磁盘读）
+    reads = {"n": 0}
+    real_load = auth4.load_status
+
+    def _counting_load():
+        reads["n"] += 1
+        return real_load()
+
+    auth4.load_status = _counting_load  # type: ignore[assignment]
+    for _ in range(50):
+        LiveRobot._warn_gift_without_uid(stub, "要***", "辣条")
+    auth4.load_status = real_load  # type: ignore[assignment]
+    print(f"needs_login 之后丢弃 50 条礼物，读状态文件 {reads['n']} 次")
+    if reads["n"]:
+        failures.append(f"热路径仍在读磁盘: {reads['n']} 次")
+    if stub._dropped_no_uid != 53:
+        failures.append(f"丢弃计数应累加到 53，实际 {stub._dropped_no_uid}")
+
     if failures:
         print("\nFAILED:")
         for f in failures:

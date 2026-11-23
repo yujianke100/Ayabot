@@ -1132,7 +1132,9 @@ class LiveRobot:
         self._no_uid_ts.append(now)
         if len(self._no_uid_ts) >= 3 and self.auth is not None:
             # 已经是 needs_login 就不要每条礼物都写一次文件（礼物多时是纯磁盘浪费）
-            if self.auth.load_status().get("status") != "needs_login":
+            # 注意用内存态 `auth.status`：`load_status()` 每次都读 JSON 文件，
+            # 匿名连接下每秒几十条礼物 = 每秒几十次磁盘读。
+            if self.auth.status != "needs_login":
                 self.auth.mark_needs_login(
                     "礼物事件缺少用户信息（当前是未登录/匿名连接），礼物无法统计。"
                     "请重新扫码登录 B站账号")

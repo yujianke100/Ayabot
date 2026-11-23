@@ -3668,6 +3668,28 @@ async def api_room_user_dates(room_id: str, uid: int = 0):
         return []
 
 
+def _all_dates_blocking(db_path: Path) -> list[str]:
+    """有送礼记录的日期列表（同步实现，必须在线程里跑）。
+
+    这条 SQL 里 `ayabot_date(ts)` 是**逐行调用的 Python 回调**（为了按配置时区算日期），
+    20 万行实测 0.35s、100 万行约 1.8s。它以前直接跑在事件循环里：
+    exe 模式下 WebUI 和所有房间机器人共用一个循环，管理员打开导出页
+    就会把每个房间卡住一两秒 —— 表现为「点了一下导出，机器人就哑了」。
+    """
+    conn = _connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT ayabot_date(ts) FROM gift_events ORDER BY ayabot_date(ts)"
+        )
+        return [r[0] for r in cur.fetchall() if r[0]]
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @app.get("/api/rooms/{room_id}/all_dates")
 async def api_room_all_dates(room_id: str):
     """获取指定房间内所有用户有送礼记录的日期（去重）."""
@@ -3675,43 +3697,32 @@ async def api_room_all_dates(room_id: str):
     if not db_path.exists():
         return []
     try:
-        conn = _connect(db_path)
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT DISTINCT ayabot_date(ts) FROM gift_events ORDER BY ayabot_date(ts)"
-        )
-        dates = [r[0] for r in cur.fetchall()]
-        conn.close()
-        return dates
-    except Exception:
+        return await asyncio.to_thread(_all_dates_blocking, db_path)
+    except Exception:  # noqa: BLE001
+        logger.warning("room %s all_dates failed", room_id, exc_info=True)
         return []
 
 
-@app.get("/api/rooms/{room_id}/export_all")
-async def api_room_export_all(
-    room_id: str,
-    date_from: str = "",
-    date_to: str = "",
-    gift_type: str = "all",
-    sort: str = "ts",
-    uid: int = 0,
-):
-    """
-    导出指定房间在日期范围内的送礼明细（聚合排序版）。
+def _export_all_blocking(
+    db_path: Path,
+    date_from: str,
+    date_to: str,
+    gift_type: str,
+    sort: str,
+    uid: int,
+) -> list:
+    """导出明细的**同步**实现：全表扫描 + 逐行 json.loads + 合并排序。
 
-    Args:
-        date_from: 起始日期 YYYY-MM-DD（留空不限）
-        date_to: 结束日期 YYYY-MM-DD（留空不限）
-        gift_type: all|gift|blindbox
-        sort: ts|uname|value — 按时间/用户名/价值排序
-        uid: 指定用户 UID（0=所有人）
+    必须放到线程里跑：20 万行实测 0.54s（取数 0.28s + 逐行解析 0.26s），
+    100 万行约 2.7s。exe（冻结）模式下 WebUI 和所有房间机器人**共用同一个事件循环**，
+    在循环里跑这段会让每个房间的发消息/弹幕处理全部卡住 ——
+    用户的感觉就是「一点导出，机器人就不说话了」。
     """
-    db_path = _room_db_path(room_id)
     if not db_path.exists():
         return []
 
+    conn = _connect(db_path)
     try:
-        conn = _connect(db_path)
         cur = conn.cursor()
 
         conditions = ["event_type = 'SEND_GIFT'"]
@@ -3804,9 +3815,42 @@ async def api_room_export_all(
             results.sort(key=lambda x: x["ts"] or 0)
 
         return results
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@app.get("/api/rooms/{room_id}/export_all")
+async def api_room_export_all(
+    room_id: str,
+    date_from: str = "",
+    date_to: str = "",
+    gift_type: str = "all",
+    sort: str = "ts",
+    uid: int = 0,
+):
+    """
+    导出指定房间在日期范围内的送礼明细（聚合排序版）。
+
+    Args:
+        date_from: 起始日期 YYYY-MM-DD（留空不限）
+        date_to: 结束日期 YYYY-MM-DD（留空不限）
+        gift_type: all|gift|blindbox
+        sort: ts|uname|value — 按时间/用户名/价值排序
+        uid: 指定用户 UID（0=所有人）
+    """
+    db_path = _room_db_path(room_id)
+    if not db_path.exists():
+        return []
+
+    try:
+        # 丢到线程里跑：数据库连接必须在线程内创建（sqlite 绑定创建它的线程）
+        return await asyncio.to_thread(
+            _export_all_blocking, db_path, date_from, date_to, gift_type, sort, uid)
     except Exception as exc:
         # 不要 return []：那会让"导出失败"和"没有数据"完全无法区分
-        #（用户看到的是「导出没数据」，而真实原因被吞掉了）
         logger.exception("room %s export failed", room_id)
         return JSONResponse({"error": f"导出失败：{exc}"}, status_code=500)
 
