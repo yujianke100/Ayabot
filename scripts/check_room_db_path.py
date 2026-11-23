@@ -205,6 +205,66 @@ def main() -> int:
         # 默认库的房间也应该正常（不能被自定义路径的修复带坏）
         code, body = _get(f"/api/rooms/{ROOM}/ranking?rStart=&rEnd=&rType=all")
         ok("默认路径房间接口正常", code == 200, code)
+
+        # ── 6. 一行 raw_json 损坏不能把整个统计打挂 ──
+        print("[6] 损坏的 raw_json")
+        # 真实成因：写入被中断 / 手工改库 / 老版本写了空串。
+        # json_extract() 遇到非法 JSON 会直接抛 "malformed JSON"，
+        # 而排行接口以前把这个异常 return 成 200 {"error": ...}，
+        # 前端拿不到 ranking 就显示「暂无数据」—— 用户看到的就是「统计全是 0」。
+        raw_conn = sqlite3.connect(str(p_custom.parent / "my_stats.db"))
+        raw_conn.execute(
+            "INSERT INTO gift_events (ts,month,uid,uname,event_type,gift_name,gift_num,"
+            "is_blind_box,blind_box_cost,actual_value,profit_value,raw_json,dedupe_key,source) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (int(time.time()), time.strftime("%Y-%m"), 2002, "坏数据", "SEND_GIFT",
+             "辣条", 1, 0, 0, 0, 0, "这不是 JSON", "", ""))
+        raw_conn.commit()
+        raw_conn.close()
+
+        code, body = _get(f"/api/rooms/{ROOM_CUSTOM}/ranking?rStart=&rEnd=&rType=all")
+        ok("有损坏 raw_json 时排行仍返回 200", code == 200, f"{code} {body[:120]}")
+        rows2 = (json.loads(body).get("ranking") or []) if code == 200 else []
+        good = [r for r in rows2 if int(r["uid"]) == 1001]
+        ok("正常用户的数据没被损坏行带崩", bool(good) and abs(float(good[0]["total"]) - 10.2) < 0.01,
+           good)
+        bad = [r for r in rows2 if int(r["uid"]) == 2002]
+        ok("损坏行按 0 价值计入，不报错", not bad or float(bad[0]["total"] or 0) == 0.0, bad)
+
+        code, body = _get(f"/api/external/user_stats?room_id={ROOM_CUSTOM}&uid=1001"
+                          f"&period=all&token={API_TOKEN}")
+        ok("user_stats 不受损坏行影响", code == 200 and json.loads(body).get("ok") is True,
+           body[:120])
+        code, body = _get(f"/api/rooms/{ROOM_CUSTOM}/export_all?date_from=&date_to=")
+        ok("导出接口不受损坏行影响", code == 200, f"{code} {body[:80]}")
+        exported = json.loads(body) if code == 200 else []
+        ok("导出仍有数据（不是被吞成空列表）", len(exported) >= 2, len(exported))
+        # 导出按 (uid, batch_combo_id, gift_name) 分行，所以要按 uid 汇总后再比
+        uid_total = sum(float(e.get("actual_value") or 0) for e in exported
+                        if int(e.get("uid") or 0) == 1001)
+        ok("导出里正常用户的金额合计仍是 10.2 元", abs(uid_total - 10.2) < 0.01, uid_total)
+
+        code, body = _get(f"/api/rooms/{ROOM_CUSTOM}/user_gifts?uid=1001"
+                          f"&date={time.strftime('%Y-%m-%d')}&gift_type=all")
+        ok("用户明细接口不受损坏行影响", code == 200, f"{code} {body[:100]}")
+        ok("用户明细返回了 2 件礼物",
+           code == 200 and len(json.loads(body) or []) >= 1, body[:120])
+
+        # raw_json 是合法 JSON 但不是对象（null / 列表）也要扛住
+        raw_conn = sqlite3.connect(str(p_custom.parent / "my_stats.db"))
+        raw_conn.execute(
+            "INSERT INTO gift_events (ts,month,uid,uname,event_type,gift_name,gift_num,"
+            "is_blind_box,blind_box_cost,actual_value,profit_value,raw_json,dedupe_key,source) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (int(time.time()), time.strftime("%Y-%m"), 3003, "null行", "SEND_GIFT",
+             "辣条", 1, 0, 0, 0, 0, "null", "", ""))
+        raw_conn.commit()
+        raw_conn.close()
+        code, body = _get(f"/api/rooms/{ROOM_CUSTOM}/export_all?date_from=&date_to=")
+        ok("raw_json=null 时导出仍正常", code == 200 and len(json.loads(body)) >= 2,
+           f"{code} rows={len(json.loads(body)) if code == 200 else body[:60]}")
+        code, body = _get(f"/api/rooms/{ROOM_CUSTOM}/stats_check")
+        ok("统计自检不受损坏行影响", code == 200, f"{code} {body[:80]}")
     finally:
         try:
             server.should_exit = True

@@ -3512,7 +3512,7 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
         cur.execute(f"""
             SELECT uid, uname,
                    COUNT(1) as cnt,
-                   ROUND(SUM(CASE WHEN is_blind_box=1 THEN CAST(actual_value AS REAL) / 10.0 ELSE CAST(json_extract(raw_json, '$.total_coin') AS REAL) / 1000.0 END), 2) as total,
+                   ROUND(SUM(CASE WHEN is_blind_box=1 THEN CAST(actual_value AS REAL) / 10.0 ELSE CAST(CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.total_coin') END AS REAL) / 1000.0 END), 2) as total,
                    ROUND(SUM(CAST(profit_value AS REAL) / 10.0), 2) as total_profit
             FROM gift_events WHERE {where_sql}
             GROUP BY uid ORDER BY total DESC LIMIT 50
@@ -3528,7 +3528,12 @@ async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType
         ]
         return {"ranking": ranking}
     except Exception as exc:
-        return {"error": str(exc)}
+        # 必须返回 5xx：以前这里 return {"error": ...} 是 200，
+        # 前端 `data.ranking || []` 拿不到列表就显示「暂无数据」——
+        # 用户看到的就是「所有统计都是 0」，而真实原因（比如某行 raw_json 损坏导致
+        # SQLite 报 malformed JSON）被完全吞掉了。
+        logger.exception("room %s ranking failed", room_id)
+        return JSONResponse({"error": f"统计查询失败：{exc}"}, status_code=500)
 
 
 @app.get("/api/rooms/{room_id}/user_gifts")
@@ -3562,12 +3567,7 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
         # 合并字典：key = (batch_combo_id, gift_name) → merged entry
         merged = {}
         for r in rows:
-            raw = {}
-            if r[8]:
-                try:
-                    raw = _json.loads(r[8])
-                except Exception:
-                    raw = {}
+            raw = _parse_raw_json(r[8])
             # 从 raw_json 解析实际价格、舰长等级、头像、礼物图标、batch_combo_id
             guard_level = 0
             avatar = ""
@@ -3596,7 +3596,7 @@ async def api_room_user_gifts(room_id: str, uid: int = 0, date: str = "", gift_t
                 gift_icon = gift_info.get("img_basic", "") or gift_info.get("webp", "") or ""
 
             # 合并 key：batch_combo_id（短时间相同礼物合并）
-            batch_key = r[8] and _json.loads(r[8]).get("batch_combo_id", "") or ""
+            batch_key = raw.get("batch_combo_id") or ""
             merge_key = (batch_key, r[2])
 
             if merge_key in merged:
@@ -3743,12 +3743,7 @@ async def api_room_export_all(
         import json as _json
         merged: dict[tuple, dict] = {}
         for r in rows:
-            raw = {}
-            if r[8]:
-                try:
-                    raw = _json.loads(r[8])
-                except Exception:
-                    raw = {}
+            raw = _parse_raw_json(r[8])
             
             is_blind = bool(r[6])
             guard_level = 0
@@ -3774,7 +3769,7 @@ async def api_room_export_all(
                 gift_info = raw.get("gift_info", {}) or {}
                 gift_icon = gift_info.get("img_basic", "") or gift_info.get("webp", "") or ""
 
-            batch_key = r[8] and _json.loads(r[8]).get("batch_combo_id", "") or ""
+            batch_key = raw.get("batch_combo_id") or ""
             merge_key = (r[0], batch_key, r[2])  # (uid, batch_combo_id, gift_name)
 
             if merge_key in merged:
@@ -3802,8 +3797,27 @@ async def api_room_export_all(
             results.sort(key=lambda x: x["ts"] or 0)
 
         return results
+    except Exception as exc:
+        # 不要 return []：那会让"导出失败"和"没有数据"完全无法区分
+        #（用户看到的是「导出没数据」，而真实原因被吞掉了）
+        logger.exception("room %s export failed", room_id)
+        return JSONResponse({"error": f"导出失败：{exc}"}, status_code=500)
+
+
+def _parse_raw_json(value) -> dict:
+    """把 raw_json 列安全地解析成 dict。
+
+    三种坏情况都会真实出现：写入被中断留下的半截 JSON、老版本写的空串、
+    手工改库/迁移脚本写进来的 `null` 或列表。以前直接 `json.loads(...).get(...)`，
+    一行坏数据就能让整个导出/明细接口抛异常（导出甚至是静默返回空列表）。
+    """
+    if not value:
+        return {}
+    try:
+        obj = json.loads(value)
     except Exception:
-        return []
+        return {}
+    return obj if isinstance(obj, dict) else {}
 
 
 def _import_xml_blocking(
@@ -4234,8 +4248,10 @@ def _clean_orphan_monthly_stats(db_path: Path) -> None:
     try:
         conn = _connect(db_path)
         cur = conn.cursor()
-        cur.execute("DELETE FROM monthly_blindbox_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)")
-        cur.execute("DELETE FROM monthly_gift_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)")
+        cur.execute("DELETE FROM monthly_blindbox_stats WHERE month NOT IN "
+            "(SELECT DISTINCT month FROM gift_events WHERE event_type = 'SEND_GIFT')")
+        cur.execute("DELETE FROM monthly_gift_stats WHERE month NOT IN "
+            "(SELECT DISTINCT month FROM gift_events WHERE event_type = 'SEND_GIFT')")
         conn.commit()
         conn.close()
     except Exception:
@@ -4398,7 +4414,7 @@ async def api_external_user_stats(
             SELECT
                 COUNT(1) as total_events,
                 COALESCE(SUM(gift_num), 0) as total_gift_count,
-                COALESCE(SUM(CASE WHEN is_blind_box=0 THEN CAST(json_extract(raw_json, '$.total_coin') AS INTEGER) / 100 ELSE actual_value END), 0) as total_value
+                COALESCE(SUM(CASE WHEN is_blind_box=0 THEN CAST(CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.total_coin') END AS INTEGER) / 100 ELSE actual_value END), 0) as total_value
             FROM gift_events
             WHERE uid = ? AND ts >= ? AND ts <= ?
             """,
@@ -4424,14 +4440,14 @@ async def api_external_user_stats(
             """
             SELECT g.gift_name,
                    COALESCE(SUM(g.gift_num), 0) as total_num,
-                   COALESCE(SUM(CAST(json_extract(g.raw_json, '$.total_coin') AS INTEGER)), 0) / 100 as total_value,
+                   COALESCE(SUM(CAST(CASE WHEN json_valid(g.raw_json) THEN json_extract(g.raw_json, '$.total_coin') END AS INTEGER)), 0) / 100 as total_value,
                    COALESCE(
-                       (SELECT json_extract(sub.raw_json, '$.gift_info.img_basic')
+                       (SELECT CASE WHEN json_valid(sub.raw_json) THEN json_extract(sub.raw_json, '$.gift_info.img_basic') END
                         FROM gift_events sub
                         WHERE sub.uid = g.uid AND sub.gift_name = g.gift_name
                           AND sub.is_blind_box = 0 AND sub.ts >= ? AND sub.ts <= ?
-                          AND json_extract(sub.raw_json, '$.gift_info.img_basic') IS NOT NULL
-                          AND json_extract(sub.raw_json, '$.gift_info.img_basic') != ''
+                          AND CASE WHEN json_valid(sub.raw_json) THEN json_extract(sub.raw_json, '$.gift_info.img_basic') END IS NOT NULL
+                          AND CASE WHEN json_valid(sub.raw_json) THEN json_extract(sub.raw_json, '$.gift_info.img_basic') END != ''
                         ORDER BY sub.ts DESC LIMIT 1),
                    ''
                    ) as gift_icon
@@ -4447,19 +4463,19 @@ async def api_external_user_stats(
         blind_detail_rows = conn.execute(
             """
             SELECT
-                json_extract(raw_json, '$.blind_gift.original_gift_name') as box_name,
-                json_extract(raw_json, '$.blind_gift.gift_name') as box_gift_name,
+                CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.blind_gift.original_gift_name') END as box_name,
+                CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.blind_gift.gift_name') END as box_gift_name,
                 gift_name as item_name,
                 COALESCE(SUM(gift_num), 0) as total_num,
                 COALESCE(SUM(blind_box_cost), 0) as total_cost,
                 COALESCE(SUM(profit_value), 0) as total_profit,
                 COALESCE(
-                    (SELECT json_extract(sub2.raw_json, '$.gift_info.img_basic')
+                    (SELECT CASE WHEN json_valid(sub2.raw_json) THEN json_extract(sub2.raw_json, '$.gift_info.img_basic') END
                      FROM gift_events sub2
                      WHERE sub2.uid = g.uid AND sub2.gift_name = g.gift_name
                        AND sub2.is_blind_box = 1 AND sub2.ts >= ? AND sub2.ts <= ?
-                       AND json_extract(sub2.raw_json, '$.gift_info.img_basic') IS NOT NULL
-                       AND json_extract(sub2.raw_json, '$.gift_info.img_basic') != ''
+                       AND CASE WHEN json_valid(sub2.raw_json) THEN json_extract(sub2.raw_json, '$.gift_info.img_basic') END IS NOT NULL
+                       AND CASE WHEN json_valid(sub2.raw_json) THEN json_extract(sub2.raw_json, '$.gift_info.img_basic') END != ''
                      ORDER BY sub2.ts DESC LIMIT 1),
                     ''
                 ) as item_icon
@@ -4488,20 +4504,20 @@ async def api_external_user_stats(
             """
             SELECT uname,
                    COALESCE(
-                       json_extract(raw_json, '$.sender_uinfo.base.face'),
-                       json_extract(raw_json, '$.face'),
+                       CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.base.face') END,
+                       CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.face') END,
                        ''
                    ) as avatar,
                    COALESCE(
-                       json_extract(raw_json, '$.sender_uinfo.guard.level'),
-                       json_extract(raw_json, '$.sender_uinfo.medal.guard_level'),
+                       CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.guard.level') END,
+                       CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.medal.guard_level') END,
                        0
                    ) as guard_level
             FROM gift_events WHERE uid = ? AND raw_json IS NOT NULL AND raw_json != ''
             ORDER BY
                 CASE
-                    WHEN json_extract(raw_json, '$.sender_uinfo.guard.level') IS NOT NULL AND json_extract(raw_json, '$.sender_uinfo.guard.level') > 0 THEN 0
-                    WHEN json_extract(raw_json, '$.sender_uinfo.medal.guard_level') IS NOT NULL AND json_extract(raw_json, '$.sender_uinfo.medal.guard_level') > 0 THEN 1
+                    WHEN CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.guard.level') END IS NOT NULL AND CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.guard.level') END > 0 THEN 0
+                    WHEN CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.medal.guard_level') END IS NOT NULL AND CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.medal.guard_level') END > 0 THEN 1
                     ELSE 2
                 END,
                 ts DESC
@@ -4718,7 +4734,7 @@ async def api_external_ranking(
                    COALESCE(SUM(gift_num), 0) as total_count,
                    COALESCE(SUM(
                        CASE WHEN is_blind_box = 0
-                            THEN CAST(json_extract(raw_json, '$.total_coin') AS INTEGER) / 100
+                            THEN CAST(CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.total_coin') END AS INTEGER) / 100
                             ELSE actual_value
                        END), 0) as total_value,
                    COALESCE(SUM(profit_value), 0) as total_profit
@@ -4791,7 +4807,7 @@ async def api_external_room_stats(
                 COUNT(DISTINCT uid) as total_users,
                 COUNT(1) as total_events,
                 COALESCE(SUM(gift_num), 0) as total_gifts,
-                COALESCE(SUM(CASE WHEN is_blind_box=0 THEN CAST(json_extract(raw_json, '$.total_coin') AS INTEGER) / 100 ELSE actual_value END), 0) as total_value,
+                COALESCE(SUM(CASE WHEN is_blind_box=0 THEN CAST(CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.total_coin') END AS INTEGER) / 100 ELSE actual_value END), 0) as total_value,
                 COALESCE(SUM(CASE WHEN is_blind_box=1 THEN 1 ELSE 0 END), 0) as blind_users,
                 COALESCE(SUM(CASE WHEN is_blind_box=1 THEN gift_num ELSE 0 END), 0) as blind_count,
                 COALESCE(SUM(CASE WHEN is_blind_box=1 THEN blind_box_cost ELSE 0 END), 0) as blind_cost,

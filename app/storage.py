@@ -564,10 +564,10 @@ class StatsStore:
                 # 受影响月份必须在删除前就查好（删完就查不到了），见上面的 affected_months。
                 self.rebuild_monthly_stats(sorted(affected_months))
                 self._conn.execute(
-                    "DELETE FROM monthly_blindbox_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)"
+                    "DELETE FROM monthly_blindbox_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events WHERE event_type = 'SEND_GIFT')"
                 )
                 self._conn.execute(
-                    "DELETE FROM monthly_gift_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)"
+                    "DELETE FROM monthly_gift_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events WHERE event_type = 'SEND_GIFT')"
                 )
         if danmaku_days > 0:
             cutoff = now_ts - danmaku_days * 86400
@@ -1029,11 +1029,11 @@ class StatsStore:
         ).fetchall()
         
         deleted_blind = self._conn.execute(
-            "DELETE FROM monthly_blindbox_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)"
+            "DELETE FROM monthly_blindbox_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events WHERE event_type = 'SEND_GIFT')"
         ).rowcount
         
         deleted_gift_stats = self._conn.execute(
-            "DELETE FROM monthly_gift_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events)"
+            "DELETE FROM monthly_gift_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events WHERE event_type = 'SEND_GIFT')"
         ).rowcount
         
         self._conn.commit()
