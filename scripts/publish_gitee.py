@@ -229,13 +229,32 @@ def _sync_repo(args, token: str) -> int:
     return 0
 
 
+#: 永远不能参与轮换的发行版 tag。
+#: `latest` 是**版本无关的固定下载地址**，官网、文档、软件内更新全都指向它；
+#: 它的附件被删掉 = 所有用户的下载链接 404。以前能活下来纯粹是因为
+#: `_replace_asset` 每版重传把它顶到了列表前面 —— 依赖副作用，迟早出事。
+PROTECTED_TAGS = ("latest",)
+
+
 def rotate(token: str, owner: str, repo: str, keep: int) -> None:
-    """删除旧版本的附件，避免超过单仓库 1G 的附件上限。"""
+    """删除旧版本的附件，避免超过单仓库 1G 的附件上限。
+
+    `PROTECTED_TAGS` 里的发行版**永不参与轮换**，也不占用 keep 名额
+    （keep=4 就该保留 4 个真实版本的附件，而不是 3 个 + latest）。
+    """
     code, releases = _req("GET", f"/repos/{owner}/{repo}/releases?per_page=100", token)
     if code != 200 or not isinstance(releases, list):
         print("  （跳过轮换：读不到发行版列表）")
         return
-    for rel in releases[keep:]:
+    protected = {t.lower() for t in PROTECTED_TAGS}
+    versioned = [
+        rel for rel in releases
+        if str(rel.get("tag_name") or "").lower() not in protected
+    ]
+    skipped = len(releases) - len(versioned)
+    if skipped:
+        print(f"  （轮换跳过 {skipped} 个受保护发行版：{', '.join(PROTECTED_TAGS)}）")
+    for rel in versioned[keep:]:
         for att in list_attachments(token, owner, repo, rel["id"]):
             c, _ = _req(
                 "DELETE",
@@ -254,6 +273,68 @@ def _replace_asset(token: str, owner: str, repo: str, release: dict, exe: Path) 
     upload(token, owner, repo, release["id"], exe)
 
 
+_ASSET_URL = "https://gitee.com/{owner}/{repo}/releases/download/{tag}/{name}"
+
+
+def _head(url: str, timeout: int = 30) -> tuple[int, int | None]:
+    """HEAD 一个下载地址，返回 (HTTP 状态, Content-Length 或 None)。
+
+    Gitee 的 releases/download 先 302 到 foruda.gitee.com，所以必须跟随跳转；
+    跳转响应本身没有 Content-Length，最终文件才有。用 urllib 默认的跟随行为。
+    """
+    req = urllib.request.Request(url, method="HEAD",
+                                headers={"User-Agent": "Ayabot-release"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            length = resp.headers.get("Content-Length")
+            return resp.status, (int(length) if length and length.isdigit() else None)
+    except urllib.error.HTTPError as exc:
+        return exc.code, None
+    except Exception as exc:  # noqa: BLE001
+        print(f"    探测 {url} 失败：{type(exc).__name__}: {exc}")
+        return 0, None
+
+
+def verify_assets(owner: str, repo: str, version: str, exe: Path,
+                  *, alias: bool = True, attempts: int = 6) -> bool:
+    """回读验证：版本地址与固定地址都必须真的能下载，且大小一致。
+
+    **这是发版脚本唯一能证明「用户真的能下载」的步骤。**
+    以前上传完只打印一句拼出来的 URL 就算完成，而实测 v1.2.6 / v1.2.7 的版本
+    地址是 404 —— 声明成功不等于成功。Gitee 的 CDN 会有几秒延迟，因此重试。
+    """
+    want = exe.stat().st_size
+    targets = [("版本地址", f"v{version}")]
+    if alias:
+        targets.append(("固定地址", "latest"))
+    all_ok = True
+    for label, tag in targets:
+        url = _ASSET_URL.format(owner=owner, repo=repo, tag=tag, name=ASSET_NAME)
+        reachable = False
+        got_size: int | None = None
+        for attempt in range(1, attempts + 1):
+            code, size = _head(url)
+            if code in (200, 301, 302, 303, 307, 308):
+                reachable = True
+                got_size = size
+                break
+            if attempt < attempts:
+                time.sleep(3)
+        if not reachable:
+            print(f"  ✗ {label} 下载失败（{tag}）：{url}")
+            all_ok = False
+            continue
+        # 大小未知（服务器没给 Content-Length）**不等于**下载不了，
+        # 只说明这一项校验降级成「能连上」。
+        if got_size is not None and got_size != want:
+            print(f"  ✗ {label} 大小不一致（{tag}）：{got_size} != 本地 {want}")
+            all_ok = False
+            continue
+        note = "" if got_size is not None else "（未返回 Content-Length，仅确认可下载）"
+        print(f"  ✓ {label} 可下载（{tag}）{want} B{note}")
+    return all_ok
+
+
 def probe(token: str, owner: str, repo: str, target: str) -> int:
     """最小验证：建一个临时发行版 + 上传 1KB 文件 + 读回确认 + 清理。
 
@@ -261,7 +342,10 @@ def probe(token: str, owner: str, repo: str, target: str) -> int:
     与「大文件能不能传（看链路）」分开排查。
     """
     tag = "probe-ci"
-    tmp = Path("probe-ci.txt")
+    # 用临时目录：以前写在当前目录（仓库根），中途失败就留一个 probe-ci.txt 在那里
+    import tempfile
+    tmpdir = Path(tempfile.mkdtemp(prefix="ayabot_probe_"))
+    tmp = tmpdir / "probe-ci.txt"
     tmp.write_text("ayabot probe " + uuid.uuid4().hex, encoding="utf-8")
     print("① 建临时发行版")
     rel = ensure_release(token, owner, repo, tag, tag, "CI 探测用，可删", target)
@@ -280,7 +364,8 @@ def probe(token: str, owner: str, repo: str, target: str) -> int:
         print(f"   删附件 HTTP {code}")
     code, _ = _req("DELETE", f"/repos/{owner}/{repo}/releases/{rel['id']}", token)
     print(f"   删发行版 HTTP {code}")
-    tmp.unlink(missing_ok=True)
+    import shutil as _shutil
+    _shutil.rmtree(tmpdir, ignore_errors=True)
     print("PROBE OK（令牌有效、可建发行版、可上传、可读回、可删除）" if ok
           else "PROBE FAILED：上传后读不到附件")
     return 0 if ok else 1
@@ -306,6 +391,8 @@ def main() -> int:
                     help="发布后不把源码仓库同步到 Gitee（默认会同步）")
     ap.add_argument("--sync-repo-only", action="store_true",
                     help="只同步源码仓库，不发安装包")
+    ap.add_argument("--no-verify", action="store_true",
+                    help="发布后不回读下载地址（默认会验证，失败则返回非 0）")
     args = ap.parse_args()
 
     token = os.environ.get("GITEE_TOKEN", "").strip()
@@ -370,10 +457,25 @@ def main() -> int:
     print(f"完成：https://gitee.com/{args.owner}/{args.repo}/releases/download/{tag}/{ASSET_NAME}")
     print(f"固定：https://gitee.com/{args.owner}/{args.repo}/releases/download/latest/{ASSET_NAME}")
 
+    verify_ok = True
+    if not args.prune_only:
+        if args.no_verify:
+            print("（已跳过下载地址回读验证）")
+        else:
+            print("回读验证下载地址 …")
+            verify_ok = verify_assets(
+                args.owner, args.repo, ver, exe,
+                alias=not args.no_latest_alias,
+            )
+
     # 安装包发完了，再把源码仓库也推一遍：Gitee 上的代码原来靠「仓库镜像」拉，
     # 受 GitHub 可达性影响会落后，出现「包是新的、代码还是旧的」。这里直接推，不靠镜像。
     if not args.no_sync_repo:
         _sync_repo(args, token)
+    if not verify_ok:
+        # 必须让 CI 红：包传上去了但用户下不下来，等于没发。
+        print("::error::下载地址回读验证失败（上传成功但用户可能下载不了）", file=sys.stderr)
+        return 1
     return 0
 
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -28,6 +29,24 @@ from pathlib import Path
 API = "https://gitee.com/api/v5"
 DEFAULT_OWNER = "yujianke100"
 DEFAULT_REPO = "Ayabot"
+
+
+def redact(text: str, token: str) -> str:
+    """把日志里的令牌抹掉 —— 包括 **URL 编码后** 的形式。
+
+    以前只做 `text.replace(token, "***")`，而推送 URL 里放的是
+    `urllib.parse.quote(token, safe="")`。令牌含非字母数字字符时两种形式不同，
+    推送失败时 git 的错误输出里会带着编码后的令牌原样打到日志上。
+    """
+    if not token:
+        return text
+    out = text.replace(token, "***")
+    encoded = urllib.parse.quote(token, safe="")
+    if encoded and encoded != token:
+        out = out.replace(encoded, "***")
+    # 兜底：把 https://<user>:<secret>@gitee.com 里的凭据整段抹掉
+    out = re.sub(r"(https://[^/:@\s]+:)[^@\s]+(@gitee\.com)", r"\1***\2", out)
+    return out
 
 
 def read_token(explicit: str = "") -> str:
@@ -147,7 +166,7 @@ def main() -> int:
         out = (r.stdout + r.stderr).strip()
         for line in out.splitlines():
             if line.strip():
-                print("   ", line.replace(token, "***"))
+                print("   ", redact(line, token))
         if r.returncode != 0:
             print("推送分支失败")
             return 1
@@ -158,7 +177,7 @@ def main() -> int:
         out = (r.stdout + r.stderr).strip()
         for line in out.splitlines()[-4:]:
             if line.strip():
-                print("   ", line.replace(token, "***"))
+                print("   ", redact(line, token))
         # tag 推送失败不算致命（例如受保护 tag），但要提示
         if r.returncode != 0:
             print("    部分 tag 推送失败（分支已同步）")
