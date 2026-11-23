@@ -5917,6 +5917,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     <label class="text-xs text-gray-500">回复延迟(秒)
                         <input type="number" v-model="roomConfig.rate_limit.reply_delay_seconds" step="0.1" class="border p-2 rounded w-full text-sm mt-1">
                     </label>
+                    <label class="text-xs text-gray-500">单条弹幕上限(字)
+                        <input type="number" v-model.number="roomConfig.rate_limit.max_text_len" class="border p-2 rounded w-full text-sm mt-1">
+                        <span class="text-[11px] text-gray-400">B站普通账号只能发 20 字（2024-03 已取消 30 字特权），设得过大时超长回复会发送失败。大航海账号可试 30。</span>
+                    </label>
                 </div>
 
                 <hr>

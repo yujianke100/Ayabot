@@ -99,6 +99,12 @@ class RateLimitConfig:
     retry_count: int
     max_queue_size: int = 50
     reply_delay_seconds: float = 1.0
+    # 单条弹幕的最大字符数。B站 2024-03 下线了 UL 成就的「30 字」特权：
+    # 所有没拿过该成就的账号（几乎所有人）现在**只能发 20 字**，
+    # 超长会被拒（code 1003212 超出限制长度）。以前这里写死 30，
+    # 于是「感谢 <用户名> 的 <礼物> xN」「本月盲盒共…」这类默认文案在
+    # 用户名/金额稍长时直接发送失败，用户看到的是「机器人不回复」。
+    max_text_len: int = 20
 
 
 @dataclass(slots=True)
@@ -338,6 +344,14 @@ def load_config(path: str = "config.yaml") -> AppConfig:
         rate_limit=RateLimitConfig(
             send_interval_seconds=float(rate_limit.get("send_interval_seconds", 1.2)),
             retry_count=int(rate_limit.get("retry_count", 2)),
+            # 这两项以前**没有从 config.yaml 读**，一直用 dataclass 默认值：
+            # WebUI 里改 `reply_delay_seconds`（默认模板写的是 3.0）保存后界面显示 3.0，
+            # 但机器人实际仍按 1.0 发 —— 发得比配置的快 3 倍，更容易撞「发送频率过快」，
+            # 表现为「机器人有时不回」。UI 能改的字段必须在 load 时真读到。
+            max_queue_size=int(rate_limit.get("max_queue_size", 50)),
+            reply_delay_seconds=float(rate_limit.get("reply_delay_seconds", 1.0)),
+            # B站 2024-03 起普通账号弹幕上限 20 字（旧的 UL 30 字特权已下线）
+            max_text_len=int(rate_limit.get("max_text_len", 20)),
         ),
         runtime=RuntimeConfig(
             poll_interval_seconds=int(runtime.get("poll_interval_seconds", 20)),
@@ -490,6 +504,7 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
         },
         "rate_limit": {
             "send_interval_seconds": config.rate_limit.send_interval_seconds,
+            "max_text_len": config.rate_limit.max_text_len,
             "retry_count": config.rate_limit.retry_count,
             "max_queue_size": config.rate_limit.max_queue_size,
             "reply_delay_seconds": config.rate_limit.reply_delay_seconds,

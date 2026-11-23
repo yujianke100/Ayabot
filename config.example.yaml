@@ -50,6 +50,10 @@ rate_limit:
   retry_count: 2
   max_queue_size: 50
   reply_delay_seconds: 3.0
+  # 单条弹幕最大字符数。B站 2024-03 起取消了 UL 成就的 30 字特权，
+  # 普通账号只能发 20 字，超长会被拒绝（code 1003212）。
+  # 大航海（舰长/提督/总督）账号可尝试 30。
+  max_text_len: 20
 
 runtime:
   poll_interval_seconds: 20

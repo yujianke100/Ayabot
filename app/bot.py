@@ -356,6 +356,32 @@ class LiveRobot:
 
     # ── 凭证热更新（运行中失效 → 重新扫码 → 自动恢复） ───────
 
+    #: 这些错误重试没有意义，只会多打几次接口、加速触发限流
+    _FATAL_SEND_MARKERS = (
+        "1003212",                          # 弹幕超长（B站普通账号 20 字）
+        "10031", "频率", "太快", "过快",      # 频率限制：重试只会更糟
+        "封禁", "10030", "无权限",            # 被封 / 无发送权限
+    )
+
+    @classmethod
+    def _is_fatal_send_error(cls, err: str) -> bool:
+        """这次发送失败值不值得重试。
+
+        弹幕超长（1003212）重试一百次也一样超长；频率过快（10031）立刻重试
+        只会让冷却更久。这两种都必须立刻放弃并给出可操作的日志，
+        而不是白白打 9 次接口（3 次内层重试 × 3 次重新入队）。
+
+        超长文案的措辞不固定（「超出限制长度」「弹幕长度超过限制」「超过长度限制」
+        「文字太长」…），所以不能只匹配某一个短语：只要同时出现「长/字数」和
+        「限制/超出/超过/太长」就按超长处理。
+        """
+        low = err.lower()
+        if any(m.lower() in low for m in cls._FATAL_SEND_MARKERS):
+            return True
+        about_length = ("长度" in low) or ("字数" in low) or ("太长" in low) or ("超长" in low)
+        too_much = any(w in low for w in ("超出", "超过", "限制", "太长", "超长", "过长"))
+        return about_length and too_much
+
     def _note_send_failure(self, err: str) -> None:
         if self.auth is None:
             return
@@ -567,13 +593,21 @@ class LiveRobot:
                 continue
             msg.text = filtered
 
-            # Truncate to stay within Bilibili's danmaku length limit (~30 Chinese chars)
-            MAX_TEXT_LEN = 30
-            if len(msg.text) > MAX_TEXT_LEN:
+            # 截断到 B站允许的长度。
+            # 2024-03 起 B站 下线了 UL 成就的「30 字」特权，普通账号**只能发 20 字**，
+            # 超长直接拒（code 1003212 超出限制长度）。以前写死 30，
+            # 于是默认的「感谢 {uname} 的 {gift_name} x{num}」「本月盲盒共…」在
+            # 用户名或金额稍长时全部发送失败 —— 用户看到的是「机器人不回复」。
+            max_len = max(int(getattr(self.config.rate_limit, "max_text_len", 20) or 20), 1)
+            if len(msg.text) > max_len:
+                original_len = len(msg.text)
+                # 留一个字符给省略号，别把句子截在半截数字上还看不出被截过
+                head = msg.text[: max_len - 1] if max_len >= 2 else msg.text[:max_len]
+                msg.text = (head + "…") if max_len >= 2 else head
                 self.logger.warning(
-                    "message truncated: len=%d > %d text=%s", len(msg.text), MAX_TEXT_LEN, msg.text
+                    "message truncated: %d -> %d 字（B站上限 %d）text=%s",
+                    original_len, len(msg.text), max_len, msg.text,
                 )
-                msg.text = msg.text[:MAX_TEXT_LEN]
 
             # Wait for rate limit interval
             wait_s = current_interval - (time.time() - last_sent)
@@ -600,6 +634,15 @@ class LiveRobot:
                         err_str = str(exc)
                         # 登录态失效时给出明确的「重新登录」引导，而不是无限重试
                         self._note_send_failure(err_str)
+                        if self._is_fatal_send_error(err_str):
+                            # 重试也不可能成功：直接丢掉并说清怎么改，别打 9 次接口
+                            self.logger.error(
+                                "send danmaku 永久失败（不重试）：reply_uid=%s len=%d "
+                                "err=%s text=%s | 如果是超长，请把模板改短（B站上限 %s 字）",
+                                msg.reply_uid, len(msg.text), err_str[:120], msg.text,
+                                getattr(self.config.rate_limit, "max_text_len", 20),
+                            )
+                            break
                         # Rate-limited or server error → back off
                         if attempt < retries:
                             backoff = 1.0 * (attempt + 1) + random.uniform(0, 0.5)
