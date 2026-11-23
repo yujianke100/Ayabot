@@ -3039,14 +3039,19 @@ async def api_list_rooms(request: Request):
         decode_fail = int(hb.get("gift_dropped_decode") or 0)
         no_uname = int(hb.get("gift_dropped_no_uname") or 0)
         no_uid = int(hb.get("dropped_no_uid") or 0)
-        if decode_fail or (seen > 0 and recorded == 0):
+        dup = int(hb.get("gift_dropped_dup") or 0)
+        # 「收到但一件都没记上」才算问题。但**全部被去重**是正常的：
+        # 灰度期同一件礼物会同时走新旧协议推两次，seen 涨而 recorded 不涨。
+        # 只有「丢掉的比重复的多」才说明真的丢了东西。
+        really_dropped = (seen - recorded - dup) > 0
+        if decode_fail or (seen > 0 and recorded == 0 and really_dropped):
             r["gift_issue"] = {
                 "seen": seen,
                 "recorded": recorded,
                 "decode_failed": decode_fail,
                 "no_uid": no_uid,
                 "no_uname": no_uname,
-                "dup": int(hb.get("gift_dropped_dup") or 0),
+                "dup": dup,
             }
         # 上次崩溃记录
         crash = _read_crash_info(rid)

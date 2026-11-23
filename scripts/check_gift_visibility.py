@@ -176,6 +176,7 @@ def main() -> int:
     ok("WebUI 有 gift_issue", 'r["gift_issue"] = {' in SRV_SRC)
     ok("UI 横幅解释四类", "解码失败 {{ selectedRoom.gift_issue.decode_failed }}" in SRV_SRC)
     ok("解码失败给出行动建议", "B站换了礼物协议" in SRV_SRC)
+    ok("全部重复时不误报", "really_dropped = (seen - recorded - dup) > 0" in SRV_SRC)
 
     # ── 6. 真实 SQLite 端到端：礼物写进去后，关键词统计能查到 ──
     print("[6] 关键词统计链路（聚合表）端到端")
@@ -200,6 +201,72 @@ def main() -> int:
     ok("礼物活跃度非 0", act[0] >= 1, act)
     st.close()
     shutil.rmtree(tmp, ignore_errors=True)
+
+    # ── 7. 房间列表接口：gift_issue 的判定（含误报防护）──
+    print("[7] 房间列表里的 gift_issue")
+    import json as _json
+    import threading as _threading
+    import time as _time
+    import urllib.error as _urlerr
+    import urllib.request as _urlreq
+
+    import uvicorn
+
+    from app.web import server as srv
+
+    PORT = 19889
+    TOK = "tok-giftvis"
+    tmp2 = Path(tempfile.mkdtemp(prefix="ayabot_giftissue_"))
+    room_dup, room_bad = "1900025001", "1900025002"
+    for rid, hb in (
+        (room_dup, {"gift_seen": 5, "gift_recorded": 0, "gift_dropped_dup": 5,
+                    "gift_dropped_decode": 0, "gift_dropped_no_uname": 0,
+                    "dropped_no_uid": 0}),
+        (room_bad, {"gift_seen": 9, "gift_recorded": 0, "gift_dropped_dup": 1,
+                    "gift_dropped_decode": 6, "gift_dropped_no_uname": 2,
+                    "dropped_no_uid": 0}),
+    ):
+        d = tmp2 / "rooms" / rid
+        (d / "data").mkdir(parents=True, exist_ok=True)
+        (d / "config.yaml").write_text(raw, encoding="utf-8")
+        payload = {"ts": int(_time.time()), "pid": 1, "phase": "running",
+                   "room_display_id": int(rid), "danmaku_connected": True}
+        payload.update(hb)
+        (d / "data" / "bot_status.json").write_text(
+            _json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    srv._ROOMS_BASE_DIR = str(tmp2)
+    srv.set_rooms_base_dir(str(tmp2))
+    srv._ROOM_DB_PATH_CACHE.clear()
+    srv._rate_limited = lambda ip: False
+    srv._login_limited = lambda ip, username="": False
+    srv._SESSIONS[TOK] = (_time.time() + 900, "root", "admin", [])
+
+    server = uvicorn.Server(uvicorn.Config(srv.app, host="127.0.0.1", port=PORT,
+                                          log_level="critical"))
+    _threading.Thread(target=server.run, daemon=True).start()
+    for _ in range(80):
+        if server.started:
+            break
+        _time.sleep(0.25)
+    try:
+        req = _urlreq.Request(f"http://127.0.0.1:{PORT}/api/rooms",
+                              headers={"Cookie": f"session={TOK}"})
+        with _urlreq.urlopen(req, timeout=20) as resp:
+            rooms = _json.loads(resp.read().decode())["rooms"]
+        by_id = {r["room_id"]: r for r in rooms}
+        ok("全部去重时**不**报故障", "gift_issue" not in by_id.get(room_dup, {}),
+           by_id.get(room_dup, {}).get("gift_issue"))
+        bad = by_id.get(room_bad, {}).get("gift_issue") or {}
+        ok("解码失败时必报", bool(bad), bad)
+        ok("四类计数都带上",
+           bad.get("seen") == 9 and bad.get("recorded") == 0
+           and bad.get("decode_failed") == 6 and bad.get("no_uname") == 2
+           and bad.get("dup") == 1, bad)
+    finally:
+        server.should_exit = True
+        _time.sleep(0.4)
+        shutil.rmtree(tmp2, ignore_errors=True)
 
     print()
     if fails:

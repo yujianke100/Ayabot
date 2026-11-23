@@ -114,8 +114,40 @@ def main() -> int:
             _wb.open = real_open  # type: ignore[assignment]
         ok("打开了已有实例的后台", any(str(port) in u for u in opened), opened)
 
-        # ── 3. 结构断言 ──
-        print("[3] 结构断言")
+        # ── 3. 日志轮转：旧实现在「行数不多但字节很大」时永远裁不掉 ──
+        print("[3] 日志轮转（长行 / 超字节）")
+        import logging
+
+        h = tray._RotatingFileHandler(tray.DATA_DIR / "rot.log",
+                                     max_lines=100, max_bytes=10_000)
+        lg = logging.getLogger("rot_probe")
+        lg.setLevel(logging.INFO)
+        lg.handlers = [h]
+        lg.propagate = False
+        # 60 行 × 2KB ≈ 120KB，但行数（60）远小于 max_lines（100）。
+        # 旧实现只在「行数 > max_lines」时裁剪 → 这 120KB 永远裁不掉。
+        long_line = "y" * 2000
+        for i in range(60):
+            lg.info("%03d %s", i, long_line)
+        rot = tray.DATA_DIR / "rot.log"
+        size = rot.stat().st_size
+        # 超限上界 = max_bytes + 检查周期 + 单行长度
+        bound = 10_000 + h._check_bytes + 2500
+        ok("长行大文件被裁到字节上限附近", size <= bound,
+           f"{size}B (max_bytes=10000, 检查周期={h._check_bytes}B)")
+        ok("确实裁过（远小于 60×2KB=120KB）", size < 60_000, f"{size}B")
+        text = rot.read_text(encoding="utf-8")
+        ok("裁剪后仍是完整 UTF-8（没有半行）", text.endswith("\n"))
+        ok("保留的是最新的行", text.rstrip().splitlines()[-1].startswith("059"))
+
+        # 再灌一批，验证不会无限增长
+        for i in range(600):
+            lg.info("%03d %s", i, long_line)
+        size2 = rot.stat().st_size
+        ok("继续写入也不会无限增长", size2 <= bound, f"{size2}B")
+
+        # ── 4. 结构断言 ──
+        print("[4] 结构断言")
         ok("_create_tray_icon 返回 bool",
            "def _create_tray_icon() -> bool" in SRC)
         ok("依赖缺失返回 False 而不是裸 return",
@@ -126,6 +158,10 @@ def main() -> int:
         ok("告诉用户后台地址", "后台服务正常运行" in SRC)
         ok("重复启动会打开已有实例", "已经在运行" in SRC and "webbrowser.open" in SRC)
         ok("嵌入式配置用原子写", "atomic_write_text(dst" in SRC)
+        ok("日志轮转按字节判断", "_MAX_LOG_BYTES" in SRC and "_need_truncate" in SRC)
+        ok("不再每次写入都读全文", "_check_bytes" in SRC and "self._written" in SRC)
+        ok("轮转有锁", "self._lock = threading.RLock()" in SRC)
+        ok("裁剪保留字节上限", "total > self._max_bytes" in SRC)
     finally:
         tray._stop_event.set()
         try:

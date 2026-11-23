@@ -248,6 +248,12 @@ def main() -> int:
            or ("payLoad" in text2), "见 run_conflict.log")
         ok("没有把占用端口当成成功（不该出现 Uvicorn running on）",
            "Uvicorn running on" not in text2)
+        ok("没有打开别人的页面（不该出现 browser opened）",
+           "browser opened" not in text2,
+           "端口被别人占用时打开浏览器 = 把用户送到陌生程序的界面上")
+        ok("绑定失败只尝试一次（不空转重启）",
+           text2.count("Started server process") <= 1,
+           text2.count("Started server process"))
         _kill_exe_tree(EXE)
     finally:
         busy.close()

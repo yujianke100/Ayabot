@@ -173,8 +173,24 @@ def main() -> int:
         tray.time.sleep = real_sleep
         ok("主动停止时不自动重启", calls == [], calls)
 
-        # 5b. 非主动停止 + 线程已死 → 要重启
+        # 5a2. 从未成功启动过（端口被占用）→ 不该空转重启
         tray._start_webui._intentional_stop = False
+        tray._start_webui._ever_started = False   # 模拟「启动就失败」
+        tray._start_webui._server = FakeServer(False)
+        calls.clear()
+        tray._stop_event.clear()
+        tray.time.sleep = fast_sleep
+        th = threading.Thread(target=tray._webui_watchdog, daemon=True)
+        th.start()
+        time.sleep(0.4)
+        tray._stop_event.set()
+        th.join(timeout=5)
+        tray.time.sleep = real_sleep
+        ok("启动就失败时看门狗不空转", calls == [], calls)
+
+        # 5b. 曾经成功启动过 + 线程已死 → 要重启
+        tray._start_webui._intentional_stop = False
+        tray._start_webui._ever_started = True
         tray._start_webui._server = FakeServer(False)
         calls.clear()
         tray._stop_event.clear()
@@ -187,6 +203,30 @@ def main() -> int:
         tray.time.sleep = real_sleep
         tray._restart_webui = real_restart
         ok("检测到线程已死会重启", len(calls) >= 1, len(calls))
+
+        # ── 5c. 浏览器：只有自家 WebUI 就绪才打开 ──
+        # 端口被别人占用时 create_connection 一样会成功，旧实现会把浏览器
+        # 打开到那个陌生程序上（实测）。这里用「有人监听但 started=False」复现。
+        print("[5c] 启动浏览器")
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        other_port = listener.getsockname()[1]
+        tray._port = other_port
+        opened: list[int] = []
+        tray._open_webui = lambda: opened.append(1)  # type: ignore[assignment]
+        tray.time.sleep = fast_sleep
+
+        tray._start_webui._ever_started = False
+        tray._delayed_open_browser()
+        ok("别人的端口在监听也不打开浏览器", opened == [], opened)
+
+        tray._start_webui._ever_started = True
+        tray._delayed_open_browser()
+        ok("自家 WebUI 就绪后才打开浏览器", opened == [1], opened)
+        tray.time.sleep = real_sleep
+        listener.close()
 
         # ── 6. port.txt 原子写 ──
         print("[6] 端口文件原子写")
@@ -216,6 +256,11 @@ def main() -> int:
         ok("退出时会先停 WebUI", "icon.stop()" in SRC and "_stop_webui()" in SRC)
         ok("命令行端口会落盘", 'if getattr(args, "port", None):' in SRC
            and "_save_port(_port)" in SRC)
+        ok("区分「启动失败」与「跑起来后死了」", "_ever_started" in SRC)
+        ok("看门狗跳过从未启动成功的情况",
+           'if not getattr(_start_webui, "_ever_started", False):' in SRC)
+        ok("浏览器只在自家就绪后打开",
+           "WebUI 未就绪，未打开浏览器" in SRC)
     finally:
         if busy_sock is not None:
             busy_sock.close()

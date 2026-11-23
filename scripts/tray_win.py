@@ -73,35 +73,86 @@ def _save_port(port: int) -> None:
     atomic_write_text(_PORT_FILE, str(port))
 
 
-# ── 日志（自动轮转，最多保留 5000 行） ──
+# ── 日志（真·自动轮转：行数上限 + 字节上限） ──
 log_path = DATA_DIR / "ayabot.log"
 _MAX_LOG_LINES = 5000
+_MAX_LOG_BYTES = 2 * 1024 * 1024   # 行数没超但字节超了也要裁，否则会一直涨
+#: 累计写入多少字节才做一次统计/裁剪检查（避免每行一次系统调用）。
+#: 同时是「超限量」的上界：文件最多比 max_bytes 超出这么多 + 一行。
+_CHECK_EVERY = 200                 # 保留：极短行时的兜底周期（行数）
 
 
 class _RotatingFileHandler(logging.Handler):
-    """限制日志文件行数，超出时截断末尾。"""
-    def __init__(self, path: Path, max_lines: int = _MAX_LOG_LINES) -> None:
+    """限制日志文件大小：行数上限 + 字节上限，超出时保留尾部。
+
+    三个坑都在旧实现里踩过：
+      1. 每个 `emit` 都 `stat()` —— 每行一次系统调用，日志密集时很浪费；
+      2. 只有「字节 > 512KB」才会去裁，而裁剪条件是「行数 > 5000」——
+         不足 5000 行的超大文件（长行 / traceback / access log）
+         **永远裁不掉**，而且每次 emit 都要读一遍全文，越写越卡；
+      3. 没有锁，WebUI 线程和托盘线程同时写会把内容搅在一起。
+    """
+    def __init__(self, path: Path, max_lines: int = _MAX_LOG_LINES,
+                 max_bytes: int = _MAX_LOG_BYTES) -> None:
         super().__init__()
         self._path = path
         self._max_lines = max_lines
+        self._max_bytes = max_bytes
+        self._emits = 0
+        self._written = 0
+        # 检查周期：max_bytes 的 1/8，且不少于 4KB。
+        # 只按行数检查会在「行很少但每行巨大」时长期不裁（实测 60×2KB=120KB 一行没裁）。
+        self._check_bytes = max(4096, max_bytes // 8)
+        self._lock = threading.RLock()
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            with self._path.open("a", encoding="utf-8") as f:
-                f.write(self.format(record) + "\n")
-            # 超出限制时截断（惰性，避免每次写入都检查）
-            if self._path.stat().st_size > 512 * 1024:  # 约 5000 行
-                self._truncate()
+            line = self.format(record) + "\n"
+            with self._lock:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                with self._path.open("a", encoding="utf-8") as f:
+                    f.write(line)
+                self._emits += 1
+                self._written += len(line.encode("utf-8"))
+                if (self._written >= self._check_bytes
+                        or self._emits >= _CHECK_EVERY):
+                    self._emits = 0
+                    self._written = 0
+                    if self._need_truncate():
+                        self._truncate()
         except Exception:
             self.handleError(record)
 
-    def _truncate(self) -> None:
+    def _need_truncate(self) -> bool:
         try:
-            lines = self._path.read_text(encoding="utf-8").splitlines()
+            st = self._path.stat()
+        except OSError:
+            return False
+        # 字节超限就一定要裁（不管行数），否则长行会把文件撑爆
+        return st.st_size > self._max_bytes
+
+    def _truncate(self) -> None:
+        """保留尾部，同时满足行数与字节上限。"""
+        try:
+            with self._lock:
+                text = self._path.read_text(encoding="utf-8", errors="replace")
+            lines = text.splitlines()
             if len(lines) > self._max_lines:
-                tail = lines[-self._max_lines:]
-                self._path.write_text("\n".join(tail) + "\n", encoding="utf-8")
+                lines = lines[-self._max_lines:]
+            # 再按字节从后往前收，保证结果一定小于上限
+            kept: list[str] = []
+            total = 0
+            for ln in reversed(lines):
+                total += len(ln.encode("utf-8")) + 1
+                if total > self._max_bytes:
+                    break
+                kept.append(ln)
+            kept.reverse()
+            # 惰性导入：托盘要在「app 包都导入不了」的情况下也能写日志
+            from app.config import atomic_write_text  # noqa: PLC0415
+            with self._lock:
+                atomic_write_text(self._path, "\n".join(kept) + "\n")
+                self._written = 0
         except Exception:
             pass
 
@@ -237,6 +288,8 @@ def _start_webui(config_path: str | None = None) -> bool:
         return False
 
     _start_webui._intentional_stop = False
+    if not hasattr(_start_webui, "_ever_started"):
+        _start_webui._ever_started = False
     _start_webui._last_error = ""
     logger.info("starting WebUI in-process: port=%s", _port)
 
@@ -270,6 +323,9 @@ def _start_webui(config_path: str | None = None) -> bool:
         server = getattr(_start_webui, "_server", None)
         if getattr(server, "started", False):
             logger.info("WebUI started (in-process) on port %s", _port)
+            # 「本进程内成功启动过」——看门狗据此区分「跑着跑着死了」和「压根没起来」。
+            # 后者（典型是端口被占用）已经弹窗提示改端口，再自动重启只是刷日志。
+            _start_webui._ever_started = True
             return True
         if not t.is_alive():
             break
@@ -318,7 +374,11 @@ def _stop_webui() -> None:
 def _restart_webui(config_path: str | None = None) -> bool:
     """停掉再起，返回新实例是否真的起来了。"""
     _stop_webui()
-    return _start_webui(config_path or str(_RESOLVED_CONFIG_PATH))
+    ok = _start_webui(config_path or str(_RESOLVED_CONFIG_PATH))
+    if ok:
+        # 换端口/重启成功后重置「已放弃」语义（看门狗的下次判断从头算）
+        logger.info("WebUI 已重新就绪（port=%s）", _port)
+    return ok
 
 
 def _webui_watchdog() -> None:
@@ -334,6 +394,12 @@ def _webui_watchdog() -> None:
         time.sleep(20)
         try:
             if getattr(_start_webui, "_intentional_stop", False):
+                continue
+            if not getattr(_start_webui, "_ever_started", False):
+                # 启动就没成功的（端口被占用 / 配置读不出来）：
+                # main() 已经弹窗告诉用户怎么处理了，这里再重启只会
+                # 「Started server process → uvicorn exited: 1」无限刷日志，
+                # 最后还多弹一个「已放弃自动重启」。等用户改好端口重启软件即可。
                 continue
             server = getattr(_start_webui, "_server", None)
             if server is None:
@@ -922,9 +988,17 @@ def main() -> None:
 
 
 def _delayed_open_browser() -> None:
-    """延迟几秒后打开浏览器，最多等 30 秒."""
+    """等 WebUI 真的就绪后再打开浏览器，最多等 30 秒。
+
+    **不能只看端口能不能连**：端口被别的程序占用时，`create_connection` 会立刻成功，
+    于是浏览器被打开到那个陌生程序上（实测如此）。必须确认监听方是我们自己 ——
+    用 `_start_webui._ever_started`（本进程内 uvicorn 真的 startup 过）判断。
+    """
     time.sleep(2)
     for _ in range(30):
+        if not getattr(_start_webui, "_ever_started", False):
+            time.sleep(1)
+            continue
         try:
             with socket.create_connection(("127.0.0.1", _port), timeout=2):
                 _open_webui()
@@ -932,6 +1006,8 @@ def _delayed_open_browser() -> None:
                 return
         except (ConnectionRefusedError, OSError):
             time.sleep(1)
+    logger.warning("WebUI 未就绪，未打开浏览器（错误：%s）",
+                   getattr(_start_webui, "_last_error", "") or "超时")
 
 
 if __name__ == "__main__":
