@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import sqlite3
+from collections import OrderedDict
 from contextlib import suppress
 import json
 import logging
@@ -35,6 +36,13 @@ _HEARTBEAT_INTERVAL = 15.0
 _DANMAKU_GUARD_INTERVAL = 60.0
 # 后台任务（发消息/定时消息/心跳/凭证）巡检间隔（秒）
 _BG_GUARD_INTERVAL = 30.0
+# 以 uid 为键的内存表上限。机器人要连续跑几个月，这些表不清就会一直涨：
+# 实测 1 万 UID × 10 条 AI 上下文 ≈ 20MB，一个热闹直播间跑半个月就能上百 MB。
+# 32/64 位 Windows 上内存涨到一定程度会 MemoryError → 进程直接退出，
+# 用户看到的就是「机器人莫名其妙关了」。
+_MAX_TRACKED_UIDS = 3000            # 冷却/点赞等纯标量表（每条 8~24 字节）
+_MAX_CHAT_CONTEXTS = 800            # AI 上下文（每条上限 10 条消息，实际占用大得多）
+_MAX_CONTEXT_MESSAGES = 50          # 单个上下文最多保留多少条（配置写大了也夹住）
 # 同一后台任务在窗口内最多重建多少次；超了就放弃（避免永久崩溃的任务
 # 每 30 秒重建一次、日志被刷爆、CPU 白烧）
 _BG_MAX_RESTARTS = 5
@@ -127,7 +135,9 @@ class LiveRobot:
         # 回复文案同为「无盲盒记录」→ 只有第一个入队）。
         # 用户视角就是「机器人不回复我」。
         self._pending_texts: set[tuple[str, Optional[int]]] = set()
-        self._chat_contexts: dict[int, list[dict[str, str]]] = {}
+        # OrderedDict 用于按「最久未用」淘汰：单纯 dict 在 Python 3.7+ 也有序，
+        # 但这里需要显式 move_to_end，用 OrderedDict 语义更清楚
+        self._chat_contexts: "OrderedDict[int, list[dict[str, str]]]" = OrderedDict()
 
         self._admin_uids: set[int] = set()
         self._periodic_task: Optional[asyncio.Task[None]] = None
@@ -273,10 +283,49 @@ class LiveRobot:
             await asyncio.sleep(_BG_GUARD_INTERVAL)
             try:
                 self._check_background_tasks()
+                trimmed = self._trim_tracking_tables()
+                if trimmed:
+                    self.logger.debug("tracking tables trimmed: %s", trimmed)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 self.logger.error("background guard error: %s", exc, exc_info=True)
+
+    def _trim_tracking_tables(self) -> dict[str, int]:
+        """给以 uid 为键的内存表封顶，返回每张表被清掉的条数。
+
+        机器人设计上要连续跑几个月。这些表全都按 uid 记录、从不清理：
+          - `_last_thanks_ts` / `_keyword_reply_cooldown_ts` / `_last_welcome_ts`：冷却时间戳
+          - `_like_counts`：点赞累计
+        一个热闹直播间跑半个月就有几万 UID，几十 MB 常驻内存。
+        值是时间戳的表按「最旧优先」丢（它们的冷却基本早就过期了，丢了等价于
+        「下次重新计时」）；`_like_counts` 按插入顺序丢最旧的。
+        宁可偶尔多回一句，也不要内存无限涨到 MemoryError 把进程搞崩。
+        """
+        trimmed: dict[str, int] = {}
+        ts_tables = (
+            ("_last_thanks_ts", self._last_thanks_ts),
+            ("_keyword_reply_cooldown_ts", self._keyword_reply_cooldown_ts),
+            ("_last_welcome_ts", self._last_welcome_ts),
+            ("_last_share_ts", self._last_share_ts),
+        )
+        for name, table in ts_tables:
+            over = len(table) - _MAX_TRACKED_UIDS
+            if over <= 0:
+                continue
+            # 按时间戳从小到大丢（最久没触发的先丢）
+            victims = sorted(table.items(), key=lambda kv: kv[1])[:over]
+            for uid, _ts in victims:
+                table.pop(uid, None)
+            trimmed[name] = len(victims)
+
+        over = len(self._like_counts) - _MAX_TRACKED_UIDS
+        if over > 0:
+            victims = list(self._like_counts)[:over]   # dict 保持插入顺序
+            for uid in victims:
+                self._like_counts.pop(uid, None)
+            trimmed["_like_counts"] = over
+        return trimmed
 
     def _check_background_tasks(self) -> list[str]:
         """检查并重建已崩溃的后台任务，返回被重建的任务名。"""
@@ -1423,13 +1472,22 @@ class LiveRobot:
             ctx_enabled = ctx_cfg.get("enabled", True)
             ctx_mode = ctx_cfg.get("mode", "isolated")  # "isolated" or "merged"
             ctx_content = ctx_cfg.get("content", "llm_only")  # "llm_only" or "all"
-            ctx_max = ctx_cfg.get("max_messages", 10)
+            # 与 _record_chat_context 用同一套夹取规则（0/负数/超大都夹到合法区间，
+            # 否则 `history[-0:]` 会取到整张表）
+            try:
+                ctx_max = int(ctx_cfg.get("max_messages", 10))
+            except (TypeError, ValueError):
+                ctx_max = 10
+            ctx_max = max(1, min(ctx_max, _MAX_CONTEXT_MESSAGES))
 
             history: list[dict[str, str]] = []
             if ctx_enabled:
                 ctx_key = 0 if ctx_mode == "merged" else uid
                 history = self._chat_contexts.get(ctx_key, [])
                 history = history[-ctx_max:] if len(history) > ctx_max else history
+                if history:
+                    # 读也算「使用过」，让 LRU 淘汰反映真实的活跃度
+                    self._chat_contexts.move_to_end(ctx_key)
 
             reply = await client.chat(
                 user_text=arg, uname=uname,
@@ -1866,12 +1924,28 @@ class LiveRobot:
         if ctx_cfg.get("content", "llm_only") != "all":
             return
         ctx_key = 0 if ctx_cfg.get("mode", "isolated") == "merged" else uid
-        ctx_max = ctx_cfg.get("max_messages", 10)
-        history = self._chat_contexts.get(ctx_key, [])
+        # 上限必须夹住：ctx_max=0 时 `history[-0:]` 等于 `history[0:]`（整表返回），
+        # 列表会越滚越大且永不收敛 —— 实测 50 条 → 55 条 → 一直涨。
+        # 负数更糟（`history[5:]` 只裁头不裁尾）。配置写错不能让内存无限涨。
+        try:
+            ctx_max = int(ctx_cfg.get("max_messages", 10))
+        except (TypeError, ValueError):
+            ctx_max = 10
+        ctx_max = max(1, min(ctx_max, _MAX_CONTEXT_MESSAGES))
+
+        history = self._chat_contexts.get(ctx_key)
+        if history is None:
+            history = []
         history.append({"role": "user", "content": f'用户"{uname}"说: {text}'})
         if len(history) > ctx_max:
             history = history[-ctx_max:]
         self._chat_contexts[ctx_key] = history
+        self._chat_contexts.move_to_end(ctx_key)
+        # 长时间运行 + 大量不同观众时，这个表会一直涨（每人一份历史）。
+        # 超过上限就按「最久没说话的人」淘汰 —— 他被淘汰后下次说话会重新开始记，
+        # 对 AI 回复质量影响很小，但内存有确定上限。
+        while len(self._chat_contexts) > _MAX_CHAT_CONTEXTS:
+            self._chat_contexts.popitem(last=False)
 
 
 def _safe_int(value: Any) -> int:
