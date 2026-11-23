@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import datetime
 import hashlib
+import ipaddress
+import urllib.parse
 import json
 import logging
 import os
@@ -489,6 +491,21 @@ _PUBLIC_EXTERNAL_GETS: frozenset[str] = frozenset({
     "/api/external/api_token",   # 只返回掩码状态，给插件探测用
 })
 
+#: 只有管理员能读的接口：响应里含**明文**密钥。
+_SECRET_PATHS: frozenset[str] = frozenset({
+    "/api/general_config",
+    "/api/llm_config",
+    "/api/llm_config/export",
+    "/api/templates",
+})
+
+#: 允许 `/api/proxy_image` 代理的域名后缀（B站图片 CDN）。
+_ALLOWED_IMAGE_SUFFIXES: tuple[str, ...] = (
+    ".hdslb.com", ".hdslb.org", ".bilibili.com", ".bilivideo.com", ".biliimg.com",
+)
+#: 单张图片上限：足够覆盖礼物图标/头像，又不会被拿来当文件下载器
+_MAX_PROXY_IMAGE_BYTES = 5 * 1024 * 1024
+
 #: `/api/rooms/{id}` 或 `/api/rooms/{id}/xxx`
 _ROOM_PATH_RE = re.compile(r"^/api/rooms/([^/]+)(/.*)?$")
 
@@ -567,6 +584,8 @@ _GIFT_ICON_CACHE: dict[int, str] = {}
 _GIFT_NAME_CACHE: dict[str, str] = {}
 _GIFT_PRICE_CACHE: dict[str, tuple[int, str]] = {}   # 礼物名 → (单价, 币种)；导入历史数据时用于估算金额
 _GIFT_CACHE_BUILT = False
+_GIFT_CACHE_RETRY_AT = 0.0          # 构建失败后的重试时间点（0 = 立即可以重试）
+_GIFT_CACHE_RETRY_SECONDS = 300     # 失败后 5 分钟再试，别让每个请求都等 8 秒超时
 _GIFT_PRICE_PATH = "data/gift_prices.json"           # 相对 _ROOMS_BASE_DIR，缓存一份供离线导入用
 
 
@@ -605,20 +624,25 @@ def _save_gift_prices_to_disk(prices: dict[str, tuple[int, str]]) -> None:
 
 
 async def _build_gift_cache() -> None:
-    global _GIFT_ICON_CACHE, _GIFT_NAME_CACHE, _GIFT_PRICE_CACHE, _GIFT_CACHE_BUILT
+    global _GIFT_ICON_CACHE, _GIFT_NAME_CACHE, _GIFT_PRICE_CACHE, _GIFT_CACHE_BUILT, _GIFT_CACHE_RETRY_AT
     if _GIFT_CACHE_BUILT:
+        return
+    # 失败后不要把 `_GIFT_CACHE_BUILT` 永久置 True：以前启动时网络抖一下，
+    # 礼物图标就整个进程生命周期都缺失（只能重启软件才恢复）。
+    # 改成 5 分钟后再试一次，期间不发请求（避免每个请求都等 8 秒超时）。
+    if time.time() < _GIFT_CACHE_RETRY_AT:
         return
     if not _GIFT_PRICE_CACHE:
         _GIFT_PRICE_CACHE = _load_gift_prices_from_disk()
     try:
         data = await asyncio.wait_for(live.get_gift_config(), timeout=8)
     except asyncio.TimeoutError:
-        logger.warning("get_gift_config timed out (network issue)")
-        _GIFT_CACHE_BUILT = True
+        logger.warning("get_gift_config timed out (network issue), retry in %ds", _GIFT_CACHE_RETRY_SECONDS)
+        _GIFT_CACHE_RETRY_AT = time.time() + _GIFT_CACHE_RETRY_SECONDS
         return
     except Exception as exc:
-        logger.warning("get_gift_config failed: %s", exc)
-        _GIFT_CACHE_BUILT = True
+        logger.warning("get_gift_config failed: %s (retry in %ds)", exc, _GIFT_CACHE_RETRY_SECONDS)
+        _GIFT_CACHE_RETRY_AT = time.time() + _GIFT_CACHE_RETRY_SECONDS
         return
 
     cache_id: dict[int, str] = {}
@@ -648,7 +672,7 @@ async def _build_gift_cache() -> None:
 
 
 async def _ensure_gift_cache() -> None:
-    if not _GIFT_CACHE_BUILT:
+    if not _GIFT_CACHE_BUILT and time.time() >= _GIFT_CACHE_RETRY_AT:
         await _build_gift_cache()
 
 
@@ -997,9 +1021,10 @@ async def _auth_middleware(request: Request, call_next):
 
     # Allow login page, auth endpoint, image proxy, and static icons without auth
     path = request.url.path
+    # 注意：`/api/proxy_image` **不在这里**。它是带 url 参数的代理接口，
+    # 免登录等于给全世界的开放代理（还能 SSRF 打内网），必须要求登录。
     if (path in ("/", "/api/login", "/favicon.ico", "/icon-192.png")
-            or path.startswith("/vendor/")
-            or path.startswith("/api/proxy_image")):
+            or path.startswith("/vendor/")):
         return await call_next(request)
 
     # 外部查询接口：**只**放行「自身带 token 校验的只读查询」。
@@ -1030,8 +1055,16 @@ async def _auth_middleware(request: Request, call_next):
     if role == "admin":
         return await call_next(request)
 
-    # Regular user restrictions
-    if role == "user":
+    # 非管理员一律按最小权限处理。
+    #
+    # 以前这里写的是 `if role == "user":`，而 WebUI 的「新增主播账号」表单
+    # 写入的 role 是 **"streamer"**（见 saveStreamer 的 body.role）。
+    # 于是每个由界面创建的主播账号都既不等于 admin、也不等于 user，
+    # 直接落到最后 `return await call_next(request)` —— 上一轮加的
+    # 房间 ACL / 写操作白名单对它们**完全不生效**，等于全权限。
+    # 现在改成「只有 admin 是特权角色」，未知角色也一律收紧。
+    if role != "admin":
+        username_early, _, _ = _get_current_role(request)
         # Blocked paths for regular users
         if path.startswith("/api/admin/"):
             return JSONResponse({"error": "forbidden"}, status_code=403)
@@ -1044,6 +1077,14 @@ async def _auth_middleware(request: Request, call_next):
             return JSONResponse({"error": "forbidden"}, status_code=403)
         # 新建房间是管理员操作
         if path.rstrip("/") == "/api/rooms" and method == "POST":
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+
+        # 全局密钥类接口：这些响应里带**明文** LLM api_key
+        # （/api/general_config 的 llm.api_key、/api/llm_config 的 api_key、
+        #   /api/llm_config/export 整份导出、/api/templates 里保存的模板）
+        # 普通账号只需要管自己的房间，不该看到管理员的密钥。
+        if path in _SECRET_PATHS:
+            logger.warning("ACL deny: user=%s 读取全局密钥接口 %s", username_early, path)
             return JSONResponse({"error": "forbidden"}, status_code=403)
 
         # ── 房间级 ACL + 写操作默认拒绝 ──
@@ -1326,10 +1367,45 @@ async def api_delete_old(request: Request):
 #  Image proxy
 # ══════════════════════════════════════════════════════════════════
 
+def _check_proxy_image_url(url: str) -> str:
+    """校验 `/api/proxy_image` 的目标 URL，返回错误原因（空串表示通过）。
+
+    以前这里**完全不校验**：`url` 想填什么就填什么，而接口又是免登录的。
+    实测 `/api/proxy_image?url=http://127.0.0.1:8799/internal` 会把本机
+    任意 HTTP 服务的响应原样返回（内网探测 + 读内网服务），同时它还能被当作
+    公开图片代理去刷服务器带宽。现在只放行 http(s) + B站图片 CDN 域名。
+    """
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except Exception:
+        return "invalid url"
+    if parsed.scheme not in ("http", "https"):
+        return "scheme not allowed"
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return "missing host"
+    # 禁止直连 IP / localhost（哪怕后面的后缀规则被绕过）
+    try:
+        ipaddress.ip_address(host)
+        return "ip literal not allowed"
+    except ValueError:
+        pass
+    if host in ("localhost", "localhost.localdomain") or host.endswith(".localhost"):
+        return "localhost not allowed"
+    if not any(host == suf.lstrip(".") or host.endswith(suf) for suf in _ALLOWED_IMAGE_SUFFIXES):
+        return f"host not allowed: {host}"
+    return ""
+
+
 @app.get("/api/proxy_image")
 async def api_proxy_image(url: str):
-    # 1. 检查磁盘缓存
-    cached = _load_image_cache(url)
+    reason = _check_proxy_image_url(url)
+    if reason:
+        logger.warning("proxy_image rejected (%s): %s", reason, url[:200])
+        return JSONResponse({"error": f"url not allowed: {reason}"}, status_code=400)
+
+    # 1. 检查磁盘缓存（读盘放线程里：exe 模式下 WebUI 和所有房间共用一条事件循环）
+    cached = await asyncio.to_thread(_load_image_cache, url)
     if cached is not None:
         return Response(
             content=cached,
@@ -1341,14 +1417,17 @@ async def api_proxy_image(url: str):
             },
         )
 
-    # 2. 请求去重：同一个 URL 正在请求中则等待结果
-    if url in _PROXY_IN_FLIGHT:
+    # 2. 请求去重：同一个 URL 正在请求中则等待结果。
+    #    等待要带超时 —— 发起方如果被取消（客户端断开/进程收尾），
+    #    以前等待方会永远挂在 `await future` 上，占住请求和连接。
+    waiter = _PROXY_IN_FLIGHT.get(url)
+    if waiter is not None:
         try:
-            result = await _PROXY_IN_FLIGHT[url]
-            if result is not None:
-                return result
+            result = await asyncio.wait_for(asyncio.shield(waiter), timeout=20)
         except Exception:
-            pass
+            result = None
+        if result is not None:
+            return result
 
     # 3. 发起请求（限制并发）
     future: asyncio.Future = asyncio.Future()
@@ -1373,10 +1452,18 @@ async def api_proxy_image(url: str):
                                 continue
                             if resp.status != 200:
                                 raise ValueError(f"HTTP {resp.status}")
-                            body = await resp.read()
+                            # 边读边限长：以前是 resp.read() 全量进内存，
+                            # 一个超大响应就能把进程撑爆（接口还是免登录的）
+                            body = bytearray()
+                            async for chunk in resp.content.iter_chunked(65536):
+                                body.extend(chunk)
+                                if len(body) > _MAX_PROXY_IMAGE_BYTES:
+                                    raise ValueError(
+                                        f"image too large (> {_MAX_PROXY_IMAGE_BYTES} bytes)")
+                            body = bytes(body)
                             ct = resp.content_type or "image/jpeg"
                             # 写入磁盘缓存（异步不阻塞）
-                            _save_image_cache(url, body)
+                            await asyncio.to_thread(_save_image_cache, url, body)
                             result = Response(
                                 content=body,
                                 media_type=ct,
@@ -1401,6 +1488,9 @@ async def api_proxy_image(url: str):
         future.set_result(result)
         return result
     finally:
+        # 无论怎么退出（含 CancelledError）都必须唤醒等待者，否则它们会一直挂着
+        if not future.done():
+            future.set_result(None)
         _PROXY_IN_FLIGHT.pop(url, None)
 
 
@@ -1769,8 +1859,9 @@ async def api_list_users(request: Request):
     """列出所有用户（不包含密码哈希）. 管理员可看全部，普通用户只能看自己."""
     _, role, _ = _get_current_role(request)
     users_raw = _load_users()
-    if role == "user":
-        # 普通用户只能看到自己的信息
+    if role != "admin":
+        # 非管理员只能看到自己的信息
+        # （这里原来写的是 `role == "user"`，主播账号会掉进下面「看全部」的分支）
         token = request.cookies.get("session", "")
         username, _, _ = _user_role(token)
         filtered = {}
@@ -2864,8 +2955,30 @@ async def api_delete_room(room_id: str):
     return {"ok": True}
 
 
+def _redact_llm_key(data: Any, request: Request) -> Any:
+    """非管理员看到的房间配置里，把 llm.api_key 抹掉。
+
+    房间的 config.yaml 在创建时会把全局 LLM 配置整段抄进来，里面带**明文**
+    api_key。主播账号能合法读自己房间的配置，于是能顺带读到管理员的密钥。
+    前端本来就支持 `********` 掩码（保存时不会把掩码写回去）。
+    """
+    try:
+        _, role, _ = _user_role(request.cookies.get("session", ""))
+        if role == "admin" or not isinstance(data, dict):
+            return data
+        llm = data.get("llm")
+        if isinstance(llm, dict) and llm.get("api_key"):
+            llm = dict(llm)
+            llm["api_key"] = "********"
+            data = dict(data)
+            data["llm"] = llm
+    except Exception:  # 脱敏失败也不能把请求打挂，但要保守：整体不给
+        return {}
+    return data
+
+
 @app.get("/api/rooms/{room_id}/config")
-async def api_get_room_config(room_id: str):
+async def api_get_room_config(room_id: str, request: Request):
     """获取房间配置."""
     from app.config import get_room_path
     cfg_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "config.yaml"
@@ -2874,7 +2987,7 @@ async def api_get_room_config(room_id: str):
     from app.config import load_config, config_to_dict
     try:
         cfg = load_config(str(cfg_path))
-        return config_to_dict(cfg)
+        return _redact_llm_key(config_to_dict(cfg), request)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
@@ -2896,7 +3009,7 @@ async def api_save_room_config(room_id: str, request: Request):
 
 
 @app.get("/api/rooms/{room_id}/config/export")
-async def api_room_config_export(room_id: str):
+async def api_room_config_export(room_id: str, request: Request):
     """导出房间配置为 JSON 下载。"""
     from app.config import get_room_path
     cfg_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "config.yaml"
@@ -2905,7 +3018,7 @@ async def api_room_config_export(room_id: str):
     try:
         from app.config import load_config, config_to_dict
         cfg = load_config(str(cfg_path))
-        data = config_to_dict(cfg)
+        data = _redact_llm_key(config_to_dict(cfg), request)
         return JSONResponse(data)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
