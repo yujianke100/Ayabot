@@ -263,7 +263,6 @@ def main() -> int:
         return _req("POST", full, xml.encode("utf-8"), {"X-Filename": name,
                                                         "Content-Type": "text/xml"})
 
-    import sqlite3
     db = room_dir / "data" / "bot.db"
 
 
