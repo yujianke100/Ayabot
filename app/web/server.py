@@ -2600,6 +2600,11 @@ async def api_list_rooms(request: Request):
         r["heartbeat"] = hb
         if hb.get("ts"):
             r["heartbeat_age"] = now - int(hb["ts"])
+        # 后台任务彻底停摆（必现故障被限流放弃）：进程和心跳都正常，
+        # 但某项功能已经不再工作 —— 最典型的是「机器人开着但一句话都不说」。
+        dead = hb.get("bg_dead") or []
+        if isinstance(dead, list) and dead:
+            r["bg_dead"] = [str(x) for x in dead]
         # 上次崩溃记录
         crash = _read_crash_info(rid)
         if crash:
@@ -2611,6 +2616,8 @@ async def api_list_rooms(request: Request):
             r["recent_crash"] = False
         if r.get("status") == "running" and r["auth_status"] == "needs_login":
             r["status_note"] = "运行中（等待重新登录）"
+        elif r.get("status") == "running" and r.get("bg_dead"):
+            r["status_note"] = "运行中（部分功能已停摆）"
     # 根据用户角色过滤
     token = request.cookies.get("session", "")
     _, role, allowed = _user_role(token)
@@ -5424,6 +5431,22 @@ INDEX_HTML = r"""<!DOCTYPE html>
             </button>
         </div>
 
+        <!-- 后台功能停摆提示（进程/心跳都正常，但某项功能已经不工作） -->
+        <div v-if="selectedRoom && selectedRoom.bg_dead && selectedRoom.bg_dead.length"
+             class="bg-orange-50 border border-orange-200 rounded-xl p-3 mb-4 text-xs text-orange-800">
+            <div class="font-bold">⚠️ 部分后台功能反复崩溃，已停止自动重建</div>
+            <div class="mt-1 break-all">
+                已停摆：{{ selectedRoom.bg_dead.map(bgDeadLabel).join('、') }}
+            </div>
+            <div class="mt-1" v-if="selectedRoom.bg_dead.includes('_message_worker')">
+                <div><strong>「发消息」停摆 = 机器人不会再说任何话</strong></div>
+                <div>感谢、关键词回复、签到、定时消息全部失效，但进程和统计都还正常，很容易误以为「机器人没坏」。</div>
+            </div>
+            <div class="mt-1">
+                请重启房间；反复出现时到「日志」里搜「后台任务」，那里有具体异常。
+            </div>
+        </div>
+
         <!-- 异常退出提示（自动守护已恢复 / 或已暂停自动重启） -->
         <div v-if="selectedRoom && selectedRoom.recent_crash"
              class="border rounded-xl p-3 mb-4 text-xs"
@@ -5495,6 +5518,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
                         <option value="blindbox">盲盒</option>
                     </select>
                     <button @click="loadRanking" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm w-full sm:w-auto">查询</button>
+                    <!-- 默认区间是「今天」，当天没收到礼物就会显示「暂无数据」，
+                         极容易被当成「统计坏了」。给一个显式的「全部时间」入口。 -->
+                    <button @click="loadRankingAllTime" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded text-sm w-full sm:w-auto whitespace-nowrap">全部时间</button>
                 </div>
                 <div v-if="errRanking" class="text-red-500 text-sm mb-2">{{ errRanking }}</div>
                 <div class="overflow-y-auto max-h-[520px]" v-if="ranking.length">
@@ -8287,6 +8313,12 @@ createApp({
         }
 
         // ── Ranking ──
+        async function loadRankingAllTime() {
+            // 清空两个日期 = 不限区间（后端 _day_bounds 收到空串就不过滤）
+            rStart.value = '';
+            rEnd.value = '';
+            await loadRanking();
+        }
         async function loadRanking() {
             errRanking.value = '';
             ranking.value = [];
@@ -8587,6 +8619,15 @@ createApp({
                 if (container.parentNode) container.parentNode.removeChild(container);
             }
         }
+        // 后台任务内部名 → 用户能看懂的功能名
+        const BG_TASK_LABELS = {
+            _message_worker: '发消息',
+            _periodic_message_loop: '定时消息',
+            _heartbeat_loop: '心跳上报',
+            _credential_watch_loop: '凭证刷新',
+        };
+        function bgDeadLabel(name) { return BG_TASK_LABELS[name] || name; }
+
         function fmtDateTime(ts, showDate) {
             if (!ts) return '';
             const d = new Date(ts * 1000);
@@ -10263,7 +10304,7 @@ createApp({
                 adminUsers, showUserForm, editingUser, userFormUsername, userFormPassword,
                 userFormRole, userFormRooms, showUserRoomDropdown, savingUserForm, userFormMsg, userFormOk,
                 openAddUser, editUser, saveUserForm, deleteUser, toggleUserRoom,
-                rStart, rEnd, rType, ranking, errRanking, loadRanking,
+                rStart, rEnd, rType, ranking, errRanking, loadRanking, loadRankingAllTime,
                 guardItems, guardTotals, loadGuards, fmtGuardTime,
                 eUid, eName, eDate, eType, ePerCol, eColWidth, exportList, exportDates, exportCols, errExport, loadingExport,
                 loadExport, gotoExport, loadUserDates, onUidInput, onModeChange,
@@ -10272,7 +10313,7 @@ createApp({
                 eMergeGifts, exporting, startingRooms, fmtDateTime,
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
-                delDate, delResult, confirmDelete,
+                delDate, delResult, confirmDelete, bgDeadLabel,
                 statsBusy, statsMsg, statsOk, statsRows, statsDirty, statsCheck, statsRepair,
                 xmlFiles, xmlBusy, xmlPreview, xmlMsg, xmlMsgOk, xmlError, xmlImports,
                 xmlSkipOverlap, onXmlFilesPicked, xmlDryRun, xmlDoImport,

@@ -33,6 +33,12 @@ HEARTBEAT_FILE = "bot_status.json"
 _HEARTBEAT_INTERVAL = 15.0
 # 弹幕连接守护间隔（秒）
 _DANMAKU_GUARD_INTERVAL = 60.0
+# 后台任务（发消息/定时消息/心跳/凭证）巡检间隔（秒）
+_BG_GUARD_INTERVAL = 30.0
+# 同一后台任务在窗口内最多重建多少次；超了就放弃（避免永久崩溃的任务
+# 每 30 秒重建一次、日志被刷爆、CPU 白烧）
+_BG_MAX_RESTARTS = 5
+_BG_RESTART_WINDOW = 300.0
 # 凭证热更新检查间隔（秒）
 _CREDENTIAL_CHECK_INTERVAL = 15.0
 
@@ -104,7 +110,13 @@ class LiveRobot:
         # 因缺少 uid 而被丢弃的礼物数 + 最近发生时间（凭证失效/匿名连接的信号）
         self._dropped_no_uid = 0
         self._no_uid_ts: list[float] = []
+        # 后台任务异常退出后自动重启的次数（进心跳，便于排查"机器人不说话"）
+        self._bg_restarts = 0
+        # 每个任务的重建时间戳（限流用），以及已放弃重建的任务名
+        self._bg_restart_hist: dict[str, list[float]] = {}
+        self._bg_dead: list[str] = []
         # 后台守护任务（run() 里创建）
+        self._bg_guard_task: Optional[asyncio.Task[None]] = None
         self._heartbeat_task: Optional[asyncio.Task[None]] = None
         self._danmaku_guard_task: Optional[asyncio.Task[None]] = None
         self._credential_task: Optional[asyncio.Task[None]] = None
@@ -158,6 +170,7 @@ class LiveRobot:
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         self._danmaku_guard_task = asyncio.create_task(self._danmaku_guard_loop())
         self._credential_task = asyncio.create_task(self._credential_watch_loop())
+        self._bg_guard_task = asyncio.create_task(self._background_guard_loop())
 
         try:
             while True:
@@ -207,6 +220,10 @@ class LiveRobot:
             "dropped_stats": getattr(self, "_dropped_stats", 0),
             # 因缺少 uid（匿名连接/凭证失效）被丢弃的礼物数：非 0 就是「统计全是 0」的原因
             "dropped_no_uid": getattr(self, "_dropped_no_uid", 0),
+            # 后台任务异常退出被自动重建的次数：非 0 说明曾经「活着但不说话」
+            "bg_restarts": getattr(self, "_bg_restarts", 0),
+            # 已放弃重建的任务（必现故障）：非空说明某项功能已彻底停摆
+            "bg_dead": list(getattr(self, "_bg_dead", [])),
             "credential_status": (
                 self.auth.load_status().get("status") if self.auth is not None else "ok"
             ),
@@ -226,6 +243,80 @@ class LiveRobot:
             await asyncio.sleep(_HEARTBEAT_INTERVAL)
 
     # ── 弹幕连接守护 ────────────────────────────────────────
+
+    # ── 后台任务守护（发消息/定时消息/心跳/凭证）──────────────
+
+    #: 需要长期存活的后台任务：(属性名, 重建用的工厂方法名)
+    _BG_TASKS: tuple[tuple[str, str], ...] = (
+        ("_msg_worker_task", "_message_worker"),
+        ("_periodic_task", "_periodic_message_loop"),
+        ("_heartbeat_task", "_heartbeat_loop"),
+        ("_credential_task", "_credential_watch_loop"),
+    )
+
+    async def _background_guard_loop(self) -> None:
+        """后台任务异常退出后自动重建。
+
+        为什么需要：`asyncio.create_task()` 起的这些任务**没有人 await**，
+        里面抛一次异常它们就永久消失，而进程、心跳、WebUI 状态全都还显示「运行中」。
+        最要命的是 `_message_worker`：它一死，机器人在直播间里再也不说一句话
+        （感谢、关键词回复、签到、定时消息全部静默失效），但用户看到的是
+        「机器人开着但没反应」，很容易被当成「机器人挂了」。
+        以前只有弹幕连接有守护，其余四个任务完全没人管。
+        """
+        while True:
+            await asyncio.sleep(_BG_GUARD_INTERVAL)
+            try:
+                self._check_background_tasks()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self.logger.error("background guard error: %s", exc, exc_info=True)
+
+    def _check_background_tasks(self) -> list[str]:
+        """检查并重建已崩溃的后台任务，返回被重建的任务名。"""
+        restarted: list[str] = []
+        for attr, factory_name in self._BG_TASKS:
+            task = getattr(self, attr, None)
+            if task is None or not task.done() or task.cancelled():
+                continue
+            exc: Optional[BaseException] = None
+            try:
+                exc = task.exception()
+            except Exception:  # noqa: BLE001
+                exc = None
+            if exc is None:
+                # 正常返回（例如定时消息没配置时 `_periodic_message_loop` 直接 return）
+                # 不算故障，绝不能重建 —— 否则会变成每 30 秒起一个空任务。
+                continue
+            # 限流：同一个任务在窗口内反复崩，说明是必现故障（不是偶发网络抖动）。
+            # 无限重建只会把日志刷爆、白白烧 CPU，还会掩盖真正的原因，所以放弃并上报。
+            now = time.time()
+            hist = [t for t in self._bg_restart_hist.get(factory_name, [])
+                    if now - t < _BG_RESTART_WINDOW]
+            if len(hist) >= _BG_MAX_RESTARTS:
+                self._bg_restart_hist[factory_name] = hist
+                if factory_name not in self._bg_dead:
+                    self._bg_dead.append(factory_name)
+                    self.logger.error(
+                        "后台任务 %s 在 %d 秒内已崩溃重建 %d 次，放弃重建（最后一次错误：%r）",
+                        factory_name, int(_BG_RESTART_WINDOW), len(hist), exc,
+                    )
+                continue
+            hist.append(now)
+            self._bg_restart_hist[factory_name] = hist
+            self._bg_restarts += 1
+            self.logger.error(
+                "后台任务 %s 异常退出：%r — 自动重建（第 %s 次）",
+                factory_name, exc, self._bg_restarts,
+            )
+            try:
+                new_task = asyncio.create_task(getattr(self, factory_name)())
+                setattr(self, attr, new_task)
+                restarted.append(factory_name)
+            except Exception as exc2:  # noqa: BLE001
+                self.logger.error("重建后台任务 %s 失败：%s", factory_name, exc2)
+        return restarted
 
     async def _danmaku_guard_loop(self) -> None:
         """弹幕任务异常结束（但进程还活着）时自动重连。"""
@@ -310,7 +401,7 @@ class LiveRobot:
             pass
         await self._stop_danmaku()
         for name in ("_msg_worker_task", "_periodic_task", "_heartbeat_task",
-                     "_danmaku_guard_task", "_credential_task"):
+                     "_danmaku_guard_task", "_credential_task", "_bg_guard_task"):
             task = getattr(self, name, None)
             if task is None:
                 continue
