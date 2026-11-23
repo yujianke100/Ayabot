@@ -744,6 +744,18 @@ class LiveRobot:
 
     async def _on_gift(self, event: dict[str, Any]) -> None:
         """旧协议礼物事件（SEND_GIFT / COMBO_SEND / UNIVERSAL_EVENT_GIFT*）。"""
+        # COMBO_SEND 是**连击汇总**，不是一件新礼物：B站 在连击结束时补发一条，
+        # 只带 combo_num / combo_total_coin，没有 giftName / total_coin。
+        # 用真实数据核对过（连击汇总金额 == 前面 N 条 SEND_GIFT 之和，误差 0）：
+        #   combo_total_coin=2000 ← 10×1000 + 10×1000
+        #   combo_total_coin=900  ← 9×100
+        # 如果照旧记一条，就会给每个连击多记 1 条 0 元礼物，
+        # 把「礼物数」抬高、并在排行榜里塞进一条 0 价值的记录（老版本还会写成名字叫
+        # "gift" 的假记录）。所以这里直接跳过统计与致谢。
+        if str(event.get("type") or "") == "COMBO_SEND":
+            self.logger.debug("COMBO_SEND is a combo summary, skipped (already counted per-item)")
+            return
+
         gift = _extract_gift_payload(event)
         if gift is None:
             return

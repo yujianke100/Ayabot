@@ -1036,6 +1036,43 @@ def main() -> int:
         ok("只剩聚合的月份不会被抹掉", kept == 1, kept)
         ds._conn.close()
 
+        # ── 36. 老库里的连击汇总行（COMBO_SEND）不能污染统计 ──
+        print("[36] COMBO_SEND 不计入统计")
+        combo_db = str(room_dir / "data" / "combo.db")
+        cs = StatsStore(combo_db)
+        # 逐条礼物（正确数据）
+        for i in range(3):
+            cs.record_gift_event(GiftEvent(
+                ts=1735664400 + i, month="2024-12", uid=4004, uname="戊",
+                event_type="SEND_GIFT", gift_name="人气票", gift_num=1,
+                is_blind_box=0, blind_box_cost=0, actual_value=10, profit_value=0,
+                raw_json="{}"), dedupe_key=f"c{i}", source="xml:combo.xml#c")
+        before_agg = cs._conn.execute(
+            "SELECT gift_count, gift_num_total, value_total FROM monthly_gift_stats "
+            "WHERE month='2024-12' AND uid=4004").fetchone()
+        # 连击汇总（老版本会把它当礼物写进来）
+        cs.record_gift_event(GiftEvent(
+            ts=1735664500, month="2024-12", uid=4004, uname="戊",
+            event_type="COMBO_SEND", gift_name="人气票", gift_num=20,
+            is_blind_box=0, blind_box_cost=0, actual_value=0, profit_value=0,
+            raw_json='{"combo_total_coin": 300}'), dedupe_key="combo1", source="")
+        after_agg = cs._conn.execute(
+            "SELECT gift_count, gift_num_total, value_total FROM monthly_gift_stats "
+            "WHERE month='2024-12' AND uid=4004").fetchone()
+        ok("COMBO_SEND 行写进明细但不进月度聚合",
+           tuple(before_agg) == tuple(after_agg), {"before": tuple(before_agg),
+                                                   "after": tuple(after_agg)})
+        # 重算也只认 SEND_GIFT：否则修复会把 COMBO 行算回聚合
+        cs.rebuild_monthly_stats(["2024-12"])
+        rebuilt = cs._conn.execute(
+            "SELECT gift_count, gift_num_total FROM monthly_gift_stats "
+            "WHERE month='2024-12' AND uid=4004").fetchone()
+        ok("重算后仍是 3 条（不含 COMBO_SEND）", tuple(rebuilt) == (3, 3), tuple(rebuilt))
+        rep2 = cs.consistency_report()
+        ok("自检认为一致（明细口径同样只认 SEND_GIFT）", rep2["ok"] is True,
+           rep2["gift_mismatch"][:2])
+        cs.close()
+
         # 接口层：管理员可用、普通用户 403
         code, r = _req("GET", f"/api/rooms/{ROOM}/stats_check")
         ok("自检接口返回 200", code == 200 and "gift_mismatch_count" in r, code)

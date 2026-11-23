@@ -56,6 +56,17 @@ def _date_range_where(date_from: str = "", date_to: str = "") -> tuple[str, list
 
 
 class StatsStore:
+    """统计存储。
+
+    `STATS_EVENT_TYPE` 是「算进统计的事件类型」的唯一口径。
+    历史上 `gift_events.event_type` 存的是原始协议名（SEND_GIFT / COMBO_SEND / …），
+    后来又统一成 SEND_GIFT。为了让老库里的连击汇总行（COMBO_SEND）不再污染统计，
+    所有聚合/排行/导出一律只看 SEND_GIFT —— 那些行本来就是前面若干条 SEND_GIFT 的
+    合计副本（连击汇总金额与逐条之和完全相等，已用真实数据核对）。
+    """
+
+    STATS_EVENT_TYPE = "SEND_GIFT"
+
     def __init__(self, db_path: str) -> None:
         p = Path(db_path)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -199,7 +210,11 @@ class StatsStore:
 
         dedupe_key 为空 = 实时事件，不做去重（保持原有行为）。
         导入历史数据时传稳定的 dedupe_key，同一份 XML 重复导入不会重复计数。
+
+        只有 `STATS_EVENT_TYPE`（SEND_GIFT）才更新月度聚合：老库里可能残留
+        连击汇总行（COMBO_SEND），它们是重复副本，不能让它们再进聚合。
         """
+        counts_in_stats = event.event_type == self.STATS_EVENT_TYPE
         cur = self._conn.execute(
             """
             INSERT INTO gift_events (
@@ -234,7 +249,7 @@ class StatsStore:
                 self._conn.commit()
             return False
 
-        if event.is_blind_box:
+        if event.is_blind_box and counts_in_stats:
             self._conn.execute(
                 """
                 INSERT INTO monthly_blindbox_stats (
@@ -262,28 +277,29 @@ class StatsStore:
             )
 
         # Also update monthly gift stats (both regular and blindbox gifts)
-        self._conn.execute(
-            """
-            INSERT INTO monthly_gift_stats (
-                month, uid, uname, gift_count, gift_num_total, value_total, last_ts
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(month, uid) DO UPDATE SET
-                uname=excluded.uname,
-                gift_count=monthly_gift_stats.gift_count + 1,
-                gift_num_total=monthly_gift_stats.gift_num_total + excluded.gift_num_total,
-                value_total=monthly_gift_stats.value_total + excluded.value_total,
-                last_ts=MAX(monthly_gift_stats.last_ts, excluded.last_ts)
-            """,
-            (
-                event.month,
-                event.uid,
-                event.uname,
-                1,
-                event.gift_num,
-                event.actual_value,
-                event.ts,
-            ),
-        )
+        if counts_in_stats:
+            self._conn.execute(
+                """
+                INSERT INTO monthly_gift_stats (
+                    month, uid, uname, gift_count, gift_num_total, value_total, last_ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(month, uid) DO UPDATE SET
+                    uname=excluded.uname,
+                    gift_count=monthly_gift_stats.gift_count + 1,
+                    gift_num_total=monthly_gift_stats.gift_num_total + excluded.gift_num_total,
+                    value_total=monthly_gift_stats.value_total + excluded.value_total,
+                    last_ts=MAX(monthly_gift_stats.last_ts, excluded.last_ts)
+                """,
+                (
+                    event.month,
+                    event.uid,
+                    event.uname,
+                    1,
+                    event.gift_num,
+                    event.actual_value,
+                    event.ts,
+                ),
+            )
 
         if commit:
             self._conn.commit()
@@ -321,7 +337,7 @@ class StatsStore:
             """
             SELECT COUNT(1), COALESCE(SUM(gift_num), 0)
             FROM gift_events
-            WHERE month = ? AND uid = ?
+            WHERE month = ? AND uid = ? AND event_type = 'SEND_GIFT'
             """,
             (month, uid),
         ).fetchone()
@@ -426,7 +442,7 @@ class StatsStore:
             SELECT COALESCE(SUM(gift_num), 0), COALESCE(SUM(blind_box_cost), 0),
                    COALESCE(SUM(actual_value), 0), COALESCE(SUM(profit_value), 0)
             FROM gift_events
-            WHERE ts >= ? AND ts < ? AND is_blind_box = 1
+            WHERE ts >= ? AND ts < ? AND is_blind_box = 1 AND event_type = 'SEND_GIFT'
             """,
             (start_ts, end_ts),
         ).fetchone()
@@ -441,6 +457,7 @@ class StatsStore:
                    COALESCE(SUM(actual_value), 0), COALESCE(SUM(profit_value), 0)
             FROM gift_events
             WHERE ts >= ? AND ts < ? AND uid = ? AND is_blind_box = 1
+              AND event_type = 'SEND_GIFT'
             """,
             (start_ts, end_ts, uid),
         ).fetchone()
@@ -457,6 +474,7 @@ class StatsStore:
                    COALESCE(SUM(actual_value), 0), COALESCE(SUM(profit_value), 0)
             FROM gift_events
             WHERE ts >= ? AND ts < ? AND uname = ? AND is_blind_box = 1
+              AND event_type = 'SEND_GIFT'
             GROUP BY uid
             ORDER BY SUM(blind_box_cost) DESC
             LIMIT 1
@@ -474,7 +492,7 @@ class StatsStore:
             """
             SELECT COUNT(1), COALESCE(SUM(gift_num), 0)
             FROM gift_events
-            WHERE ts >= ? AND ts < ? AND uid = ?
+            WHERE ts >= ? AND ts < ? AND uid = ? AND event_type = 'SEND_GIFT'
             """,
             (start_ts, end_ts, uid),
         ).fetchone()
@@ -642,6 +660,7 @@ class StatsStore:
             """
             SELECT uid, gift_name, gift_num, ts FROM gift_events
             WHERE dedupe_key = '' AND ts BETWEEN ? AND ?
+              AND event_type = 'SEND_GIFT'
             """,
             (start_ts, end_ts),
         ).fetchall()
@@ -679,7 +698,8 @@ class StatsStore:
         # 所以这里主动把「没有任何明细」的月份排除掉（它们原样保留，交给清理逻辑决定）。
         placeholders0 = ",".join("?" for _ in months)
         has_detail = {r[0] for r in self._conn.execute(
-            f"SELECT DISTINCT month FROM gift_events WHERE month IN ({placeholders0})", months)}
+            f"SELECT DISTINCT month FROM gift_events "
+            f"WHERE month IN ({placeholders0}) AND event_type = 'SEND_GIFT'", months)}
         months = [m for m in months if m in has_detail]
         if not months:
             return 0
@@ -700,7 +720,7 @@ class StatsStore:
                    COUNT(1), COALESCE(SUM(gift_num), 0), COALESCE(SUM(actual_value), 0),
                    COALESCE(MAX(ts), 0)
             FROM gift_events g
-            WHERE month IN ({placeholders})
+            WHERE month IN ({placeholders}) AND event_type = 'SEND_GIFT'
             GROUP BY month, uid
             """, months)
         self._conn.execute(
@@ -715,6 +735,7 @@ class StatsStore:
                    COALESCE(MAX(ts), 0)
             FROM gift_events g
             WHERE month IN ({placeholders}) AND is_blind_box = 1
+              AND event_type = 'SEND_GIFT'
             GROUP BY month, uid
             """, months)
         self._conn.commit()
@@ -737,7 +758,7 @@ class StatsStore:
                 """
                 SELECT month, uid, COUNT(1), COALESCE(SUM(gift_num), 0),
                        COALESCE(SUM(actual_value), 0)
-                FROM gift_events GROUP BY month, uid
+                FROM gift_events WHERE event_type = 'SEND_GIFT' GROUP BY month, uid
                 """)
         }
         agg = {
@@ -754,7 +775,8 @@ class StatsStore:
                 SELECT month, uid, COALESCE(SUM(gift_num), 0),
                        COALESCE(SUM(blind_box_cost), 0), COALESCE(SUM(actual_value), 0),
                        COALESCE(SUM(profit_value), 0)
-                FROM gift_events WHERE is_blind_box = 1 GROUP BY month, uid
+                FROM gift_events WHERE is_blind_box = 1 AND event_type = 'SEND_GIFT'
+                GROUP BY month, uid
                 """)
         }
         blind_agg = {
@@ -888,7 +910,7 @@ class StatsStore:
                 """
                 SELECT month, uid, is_blind_box, gift_num, blind_box_cost,
                        actual_value, profit_value, ts
-                FROM gift_events WHERE source = ?
+                FROM gift_events WHERE source = ? AND event_type = 'SEND_GIFT'
                 """,
                 (source,),
             ).fetchall()

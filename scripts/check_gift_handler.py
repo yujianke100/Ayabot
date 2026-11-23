@@ -64,12 +64,26 @@ async def run_case(thanks: bool) -> tuple[int, int, list[str]]:
     await robot._handle_gift_payload(dict(PAYLOAD), "SEND_GIFT")
     # 只有 uid 缺失的匿名事件，应被丢弃
     await robot._handle_gift_payload({**PAYLOAD, "uid": 0, "uname": "要***"}, "SEND_GIFT")
+    # 连击汇总（COMBO_SEND）必须整条忽略：它是前面若干条 SEND_GIFT 的合计副本。
+    # 真实事件形如 {"type":"COMBO_SEND","data":{"cmd":"COMBO_SEND","data":{...}}}
+    combo_event = {"type": "COMBO_SEND", "data": {"cmd": "COMBO_SEND", "data": {
+        "uid": 123456, "uname": "测试用户", "combo_num": 20, "batch_combo_num": 20,
+        "total_num": 20, "gift_num": 0, "combo_total_coin": 2000, "coin_type": "gold",
+        "action": "投喂",
+    }}}
+    await robot._on_gift(combo_event)
 
     import sqlite3
     conn = sqlite3.connect(db)
     rows = conn.execute("SELECT COUNT(*), SUM(blind_box_cost), SUM(actual_value) FROM gift_events").fetchone()
+    agg = conn.execute("SELECT SUM(gift_count), SUM(gift_num_total), SUM(value_total) "
+                       "FROM monthly_gift_stats").fetchone()
+    combo_rows = conn.execute("SELECT COUNT(1) FROM gift_events "
+                              "WHERE event_type <> 'SEND_GIFT'").fetchone()[0]
     conn.close()
     robot.store.close()
+    run_case.agg = (int(agg[0] or 0), int(agg[1] or 0), int(agg[2] or 0))  # type: ignore[attr-defined]
+    run_case.combo_rows = combo_rows  # type: ignore[attr-defined]
     return int(rows[0]), int(rows[1] or 0), sent
 
 
@@ -86,6 +100,14 @@ async def main() -> int:
         failures.append(f"盲盒花费应为 150，实际 {cost_off}")
     if sent_off:
         failures.append("关闭感谢时不应发送消息")
+    agg_off = getattr(run_case, "agg", (0, 0, 0))
+    combo_off = getattr(run_case, "combo_rows", -1)
+    print(f"  COMBO_SEND 额外行={combo_off} 月度聚合={agg_off}")
+    if combo_off != 0:
+        failures.append(f"COMBO_SEND 不应落库，实际多出 {combo_off} 行")
+    # value_total 记的是「爆出礼物价值」(actual_value=160 电池)，成本是 150 电池
+    if agg_off != (1, 1, 160):
+        failures.append(f"月度聚合应只有 1 条/1 件/160 电池，实际 {agg_off}")
 
     count_on, cost_on, sent_on = await run_case(thanks=True)
     print(f"thanks=on  -> rows={count_on} cost={cost_on} messages={sent_on}")
