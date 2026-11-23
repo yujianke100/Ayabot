@@ -479,6 +479,35 @@ def _check_auth(request: Request) -> bool:
     return False
 
 
+#: 免登录但**自身校验 token** 的只读外部查询接口。
+#: 增删这里要非常小心：曾经 `/api/external/` 整个前缀都在免登录名单里，
+#: 导致重置/清空 API 密钥的 POST 也无需任何凭证。
+_PUBLIC_EXTERNAL_GETS: frozenset[str] = frozenset({
+    "/api/external/ranking",
+    "/api/external/user_stats",
+    "/api/external/room_stats",
+    "/api/external/api_token",   # 只返回掩码状态，给插件探测用
+})
+
+#: `/api/rooms/{id}` 或 `/api/rooms/{id}/xxx`
+_ROOM_PATH_RE = re.compile(r"^/api/rooms/([^/]+)(/.*)?$")
+
+#: 普通账号（role=user）**允许**对自己名下房间做的写操作。
+#: 其余一切写操作默认只有管理员能做 —— 这是有意选择「默认拒绝」：
+#: 以前是「默认放行 + 少数黑名单」，结果 `/api/rooms/{id}/*` 的 24 个接口
+#: （删房间、删历史数据、清弹幕、重写配置、重置 API 密钥）任何登录用户
+#: 都能对任意房间调用，只要知道房间号（典型 IDOR）。新加接口也不会再默默敞口。
+_USER_ROOM_MUTATIONS: frozenset[str] = frozenset({
+    "/start",     # 启自己的机器人
+    "/stop",      # 停自己的机器人
+    "/restart",   # 重启自己的机器人
+    "/config",    # 改自己房间的模板/关键词等配置
+})
+
+#: 普通账号唯一允许的非房间写操作：改自己的登录密码
+_USER_GLOBAL_MUTATIONS: frozenset[str] = frozenset({"/api/user/password"})
+
+
 def _rate_limited(ip: str) -> bool:
     now = time.time()
     if ip not in _RATE_LIMIT:
@@ -489,6 +518,45 @@ def _rate_limited(ip: str) -> bool:
         return True
     _RATE_LIMIT[ip].append(now)
     return False
+
+
+def _purge_stale_state() -> dict[str, int]:
+    """清掉会话/限流/扫码会话里的过期条目，返回各类清除数量。
+
+    这三个字典都以「外部输入」为键、只增不减：
+      - `_RATE_LIMIT`：每个访问过的 IP 留一个条目，空列表也**从不删除**
+      - `_SESSIONS`：只有被再次使用的过期 token 才会被 pop；用户登出后
+        再也没用过的那批旧 token 一直留着（每个 64 字节 + 用户名/角色）
+      - `_BILI_LOGIN_SESSIONS`：打开扫码页但不扫码，QrCodeLogin 对象就永久留着
+    机器人是常驻服务，跑几个月这些都会慢慢涨；端口如果被扫描到，
+    `_RATE_LIMIT` 会被扫出成百上千个条目。
+    """
+    now = time.time()
+    purged = {"rate_limit_ips": 0, "sessions": 0, "qr_sessions": 0}
+
+    for ip in list(_RATE_LIMIT):
+        times = [t for t in _RATE_LIMIT.get(ip, []) if now - t < 60]
+        if times:
+            _RATE_LIMIT[ip] = times
+        else:
+            _RATE_LIMIT.pop(ip, None)
+            purged["rate_limit_ips"] += 1
+
+    for token in list(_SESSIONS):
+        entry = _SESSIONS.get(token)
+        if not entry or entry[0] <= now:
+            _SESSIONS.pop(token, None)
+            purged["sessions"] += 1
+
+    for sid in list(_BILI_LOGIN_SESSIONS):
+        sess = _BILI_LOGIN_SESSIONS.get(sid) or {}
+        created = float(sess.get("created_at") or 0)
+        # B站 二维码 180s 失效，留 10 分钟足够扫码 + 落盘
+        if not created or now - created > 600:
+            _BILI_LOGIN_SESSIONS.pop(sid, None)
+            purged["qr_sessions"] += 1
+
+    return purged
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -905,6 +973,9 @@ async def _supervise_loop() -> None:
     while True:
         try:
             await _supervise_once()
+            purged = _purge_stale_state()
+            if any(purged.values()):
+                logger.debug("purged stale webui state: %s", purged)
         except Exception as exc:  # noqa: BLE001
             logger.error("supervisor error: %s", exc, exc_info=True)
         await asyncio.sleep(_SUPERVISE_INTERVAL)
@@ -928,8 +999,15 @@ async def _auth_middleware(request: Request, call_next):
     path = request.url.path
     if (path in ("/", "/api/login", "/favicon.ico", "/icon-192.png")
             or path.startswith("/vendor/")
-            or path.startswith("/api/external/")
             or path.startswith("/api/proxy_image")):
+        return await call_next(request)
+
+    # 外部查询接口：**只**放行「自身带 token 校验的只读查询」。
+    # 以前这里是 `path.startswith("/api/external/")` —— 整个前缀免登录，
+    # 于是 `POST /api/external/api_token`（重置密钥，响应里带明文新密钥）、
+    # `clear_key`、`api_domain`、`restart` 全部**不需要任何凭证**，
+    # 任何一个能碰到 WebUI 端口的设备都能改掉别人的外部 API 配置。
+    if request.method == "GET" and path in _PUBLIC_EXTERNAL_GETS:
         return await call_next(request)
 
     if _rate_limited(client_ip):
@@ -964,6 +1042,38 @@ async def _auth_middleware(request: Request, call_next):
         if path in ("/api/users", "/api/users/update", "/api/users/admin_password") or \
            path.startswith("/api/users/"):
             return JSONResponse({"error": "forbidden"}, status_code=403)
+        # 新建房间是管理员操作
+        if path.rstrip("/") == "/api/rooms" and method == "POST":
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+
+        # ── 房间级 ACL + 写操作默认拒绝 ──
+        # 以前这里**完全没校验 allowed_rooms**：`/api/rooms/{id}/*` 的 24 个接口
+        # （含删除房间、删历史数据、清弹幕、重写配置、重置 API 密钥）任何登录用户
+        # 都能对**任意房间**调用，只要知道房间号。allowed_rooms 只用来过滤房间列表，
+        # 属于形同虚设的权限模型（典型 IDOR）。
+        username, _, allowed = _get_current_role(request)
+        allowed_set = set(allowed or [])
+        m = _ROOM_PATH_RE.match(path)
+        suffix = (m.group(2) or "").rstrip("/") if m else ""
+
+        # 1) 房间归属：只要路径里带 room_id，就必须在自己名下
+        if m and m.group(1) not in allowed_set:
+            logger.warning(
+                "ACL deny: user=%s room=%s path=%s (allowed=%s)",
+                username, m.group(1), path, allowed,
+            )
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+
+        # 2) 写操作默认拒绝，只放行明确白名单
+        if method in ("POST", "PUT", "PATCH", "DELETE"):
+            permitted = (suffix in _USER_ROOM_MUTATIONS) if m \
+                else (path.rstrip("/") in _USER_GLOBAL_MUTATIONS)
+            if not permitted:
+                logger.warning(
+                    "ACL deny: user=%s 无权执行 %s %s（普通账号只允许启停/改自己房间与改密码）",
+                    username, method, path,
+                )
+                return JSONResponse({"error": "forbidden"}, status_code=403)
 
     return await call_next(request)
 
@@ -2621,8 +2731,11 @@ async def api_list_rooms(request: Request):
     # 根据用户角色过滤
     token = request.cookies.get("session", "")
     _, role, allowed = _user_role(token)
-    if role in ("user", "streamer") and allowed:
-        rooms = [r for r in rooms if r["room_id"] in allowed]
+    if role != "admin":
+        # 非管理员一律按 allowed_rooms 过滤。
+        # 以前是 `if role in ("user", "streamer") and allowed:` —— allowed 为空时
+        # **不过滤**，于是「一个房间都没分配」的账号反而能看到所有房间。
+        rooms = [r for r in rooms if r["room_id"] in (allowed or [])]
     return {"rooms": rooms}
 
 
