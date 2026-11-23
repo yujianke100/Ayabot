@@ -38,7 +38,8 @@ import uvicorn
 from bilibili_api import live
 
 from app import tzutil
-from app.config import DEFAULT_ROOMS_DIR
+from app.config import DEFAULT_ROOMS_DIR, atomic_write_text
+from app.danmaku_xml import MAX_XML_BYTES as _MAX_XML_BYTES
 from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room, set_rooms_base_dir, start_room_async, stop_room_async, restart_room_async, start_periodic_log_cleanup, cleanup_all_stale_pidfiles, last_exit_code
 from app.version import get_version_display
 
@@ -128,9 +129,8 @@ def _save_room_states() -> None:
             rid = r["room_id"]
             states[rid] = room_status(rid) == "running"
         Path(_ROOMS_BASE_DIR).resolve().joinpath(_ROOM_STATES_PATH).parent.mkdir(parents=True, exist_ok=True)
-        Path(_ROOMS_BASE_DIR).resolve().joinpath(_ROOM_STATES_PATH).write_text(
-            json.dumps(states, ensure_ascii=False), encoding="utf-8"
-        )
+        atomic_write_text(Path(_ROOMS_BASE_DIR).resolve().joinpath(_ROOM_STATES_PATH),
+                          json.dumps(states, ensure_ascii=False))
     except Exception as exc:
         logger.warning("save room states failed: %s", exc)
 
@@ -230,7 +230,9 @@ def _save_desired_states(states: dict[str, bool]) -> None:
     try:
         p = _desired_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(states, ensure_ascii=False), encoding="utf-8")
+        # 原子写：这个文件决定「重启后要不要把机器人拉起来」，
+        # 截断成半截 JSON 会让所有房间的期望状态丢掉（用户看到「机器人没自动恢复」）。
+        atomic_write_text(p, json.dumps(states, ensure_ascii=False))
     except Exception as exc:
         logger.warning("save desired states failed: %s", exc)
 
@@ -412,14 +414,39 @@ def _migrate_old_users(old_file: Path, users: dict) -> dict:
     return users
 
 
+#: users.json 存在但解析失败时置 True —— 用来阻止「静默重建默认账号」。
+_USERS_CORRUPT = False
+
+
 def _load_users() -> dict:
-    """加载用户配置. 返回 {username: {password_hash, role, allowed_rooms}}"""
+    """加载用户配置. 返回 {username: {password_hash, role, allowed_rooms}}
+
+    **解析失败不能当成「没有用户」**：以前这里 `except: pass` → 返回 {}，
+    紧接着 `_init_users()` 会认为「全新安装」并把默认账号 `ayabot/123456`
+    （管理员）写回去 —— 也就是一次文件损坏会静默恢复一个弱口令后门，
+    同时把用户自己设的密码/主播账号全部抹掉。现在损坏时备份原文件、
+    打错误日志、并置 `_USERS_CORRUPT` 阻止重建默认账号。
+    """
+    global _USERS_CORRUPT
     p = Path(_ROOMS_BASE_DIR).resolve() / _AUTH_CONFIG_PATH
     if p.exists():
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+            raise ValueError(f"users.json 顶层不是对象（{type(data).__name__}）")
+        except Exception as exc:
+            _USERS_CORRUPT = True
+            try:
+                backup = p.with_name(p.name + ".corrupt-" + time.strftime("%Y%m%d%H%M%S"))
+                backup.write_bytes(p.read_bytes())
+                logger.error(
+                    "users.json 解析失败（%s），已备份到 %s；"
+                    "为避免静默恢复默认弱口令账号，本次**不会**重建默认账号。"
+                    "请人工检查该文件。", exc, backup)
+            except Exception:
+                logger.error("users.json 解析失败（%s），且备份失败；不重建默认账号。", exc)
+            return {}
     # Migrate old auth/users.json if present
     old_p = Path(_ROOMS_BASE_DIR).resolve() / "auth" / "users.json"
     if old_p.exists():
@@ -441,12 +468,18 @@ def _save_users(users: dict) -> None:
         if info.get("must_reset_password"):
             entry["must_reset_password"] = True
         clean[uname] = entry
-    p.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 原子写：这个文件被截断 = 所有账号丢失，而 _init_users 会把默认
+    # ayabot/123456 管理员写回去（等于静默降级成弱口令）。
+    atomic_write_text(p, json.dumps(clean, ensure_ascii=False, indent=2), backup=True)
 
 
 def _init_users() -> None:
     """初始化 users.json：创建默认账号但不覆盖已通过 WebUI 修改过的密码。"""
     users = _load_users()
+    if _USERS_CORRUPT:
+        # 文件坏了就别往里写：写了等于用默认弱口令账号覆盖掉用户的账号表。
+        logger.error("跳过默认账号初始化（users.json 损坏，见上一条错误日志）")
+        return
     default_pw_hash = _hash_password("123456")
     # AUTH_USER（config.yaml 管理员账号）不存在则创建
     if AUTH_USER not in users:
@@ -537,6 +570,51 @@ def _rate_limited(ip: str) -> bool:
     return False
 
 
+#: 单个请求体上限（弹幕 XML 导入路径单独放行到导入模块自己的上限）
+_MAX_REQUEST_BYTES = 8 * 1024 * 1024
+
+#: 登录失败记录：`ip:<ip>` / `user:<用户名>` → [失败时间戳]
+_LOGIN_FAILS: dict[str, list[float]] = {}
+_LOGIN_WINDOW = 300.0        # 5 分钟窗口
+_LOGIN_MAX_IP_FAILS = 20     # 同一 IP 窗口内最多 20 次失败
+_LOGIN_MAX_USER_FAILS = 12   # 同一用户名窗口内最多 12 次失败（防撞库）
+_LOGIN_MAX_BODY = 4096       # 登录请求体上限：真实请求只有几十字节
+
+
+def _login_key_allowed(key: str, now: float, limit: int) -> bool:
+    fails = [t for t in _LOGIN_FAILS.get(key, []) if now - t < _LOGIN_WINDOW]
+    _LOGIN_FAILS[key] = fails
+    return len(fails) < limit
+
+
+def _login_limited(ip: str, username: str = "") -> bool:
+    """登录专用限速：按 IP 和按用户名各算一份。
+
+    以前 `/api/login` 在中间件里**先于** `_rate_limited` 返回，
+    于是唯一一个不需要登录的写接口也是唯一一个完全没有限速的接口 ——
+    可以把字典当爆破目标（60 次/分钟只是别的接口的限制，这里一次都没有）。
+    两个维度都要限：只限 IP 挡不住换 IP，只限用户名挡不住撞库。
+    """
+    now = time.time()
+    if not _login_key_allowed(f"ip:{ip}", now, _LOGIN_MAX_IP_FAILS):
+        return True
+    if username and not _login_key_allowed(
+            f"user:{username.lower()}", now, _LOGIN_MAX_USER_FAILS):
+        return True
+    return False
+
+
+def _login_record_fail(ip: str, username: str) -> None:
+    now = time.time()
+    for key in (f"ip:{ip}", f"user:{username.lower()}"):
+        _LOGIN_FAILS.setdefault(key, []).append(now)
+
+
+def _login_clear(ip: str, username: str) -> None:
+    _LOGIN_FAILS.pop(f"ip:{ip}", None)
+    _LOGIN_FAILS.pop(f"user:{username.lower()}", None)
+
+
 def _purge_stale_state() -> dict[str, int]:
     """清掉会话/限流/扫码会话里的过期条目，返回各类清除数量。
 
@@ -549,7 +627,15 @@ def _purge_stale_state() -> dict[str, int]:
     `_RATE_LIMIT` 会被扫出成百上千个条目。
     """
     now = time.time()
-    purged = {"rate_limit_ips": 0, "sessions": 0, "qr_sessions": 0}
+    purged = {"rate_limit_ips": 0, "sessions": 0, "qr_sessions": 0, "login_fails": 0}
+
+    for key in list(_LOGIN_FAILS):
+        hits = [t for t in _LOGIN_FAILS.get(key, []) if now - t < _LOGIN_WINDOW]
+        if hits:
+            _LOGIN_FAILS[key] = hits
+        else:
+            _LOGIN_FAILS.pop(key, None)
+            purged["login_fails"] += 1
 
     for ip in list(_RATE_LIMIT):
         times = [t for t in _RATE_LIMIT.get(ip, []) if now - t < 60]
@@ -615,10 +701,10 @@ def _save_gift_prices_to_disk(prices: dict[str, tuple[int, str]]) -> None:
     try:
         p = _gift_price_file()
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(
+        atomic_write_text(p, json.dumps(
             {"updated_at": int(time.time()),
              "prices": {k: [v[0], v[1]] for k, v in prices.items()}},
-            ensure_ascii=False), encoding="utf-8")
+            ensure_ascii=False))
     except Exception as exc:  # 缓存写不进去不影响主流程
         logger.warning("save gift prices failed: %s", exc)
 
@@ -842,7 +928,7 @@ def _write_crash_info(room_id: str, reason: str, exit_code: Optional[int] = None
             "paused": bool(paused),
             "retry_at": int(retry_at or 0),
         }
-        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False))
     except Exception as exc:  # noqa: BLE001
         logger.debug("write crash info failed: %s", exc)
 
@@ -1023,9 +1109,28 @@ async def _auth_middleware(request: Request, call_next):
     path = request.url.path
     # 注意：`/api/proxy_image` **不在这里**。它是带 url 参数的代理接口，
     # 免登录等于给全世界的开放代理（还能 SSRF 打内网），必须要求登录。
-    if (path in ("/", "/api/login", "/favicon.ico", "/icon-192.png")
+    if path == "/api/login":
+        # 登录是唯一免鉴权的写接口，必须在这里自己限速（下面那句
+        # `_rate_limited` 在它之后，管不到它）。
+        if _login_limited(client_ip):
+            return JSONResponse({"error": "尝试过于频繁，请稍后再试"}, status_code=429)
+        return await call_next(request)
+
+    if (path in ("/", "/favicon.ico", "/icon-192.png")
             or path.startswith("/vendor/")):
         return await call_next(request)
+
+    # 全局请求体上限：真正需要大 body 的只有弹幕 XML 导入
+    # （`/api/rooms/{id}/danmaku/import` 自己另有 64MB 校验，必须放行），
+    # 其余接口给 8MB 足够；不设上限时一个未登录的大 POST 就能把内存吃满。
+    try:
+        _cl = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        _cl = 0
+    _body_cap = (_MAX_XML_BYTES if path.endswith("/danmaku/import")
+                 else _MAX_REQUEST_BYTES)
+    if _cl > _body_cap:
+        return JSONResponse({"error": "payload too large"}, status_code=413)
 
     # 外部查询接口：**只**放行「自身带 token 校验的只读查询」。
     # 以前这里是 `path.startswith("/api/external/")` —— 整个前缀免登录，
@@ -1125,13 +1230,30 @@ async def _auth_middleware(request: Request, call_next):
 
 @app.post("/api/login")
 async def api_login(request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+
+    # 登录是最容易被拿来做两件事的接口：爆破密码、塞超大 body 吃内存。
+    try:
+        cl = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        cl = 0
+    if cl > _LOGIN_MAX_BODY:
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
 
-    username = body.get("username", "")
-    password = body.get("password", "")
+    username = str(body.get("username", "") or "")
+    password = str(body.get("password", "") or "")
+
+    # 用户名维度限速（IP 维度在中间件里已经查过）
+    if _login_limited(client_ip, username):
+        return JSONResponse(
+            {"error": "登录失败次数过多，请 5 分钟后再试"}, status_code=429)
 
     # 检查多用户配置（使用密码哈希比对）
     users = _load_users()
@@ -1139,23 +1261,31 @@ async def api_login(request: Request):
     must_reset = False
     if user_info:
         stored_hash = user_info.get("password_hash", "")
-        if stored_hash and stored_hash == _hash_password(password):
+        # compare_digest：普通 == 会在第一个不同字节就返回，理论上可测时序
+        if stored_hash and secrets.compare_digest(stored_hash, _hash_password(password)):
             role = user_info.get("role", "user")
             allowed_rooms = user_info.get("allowed_rooms", [])
             must_reset = user_info.get("must_reset_password", False)
         else:
+            _login_record_fail(client_ip, username)
             return JSONResponse({"error": "wrong credentials"}, status_code=403)
-    elif username == AUTH_USER and password == AUTH_PASS:
+    elif AUTH_USER and username == AUTH_USER and password == AUTH_PASS:
         # 兼容旧配置（config.yaml 中的账号密码）
         role = "admin"
         allowed_rooms = []
     else:
+        _login_record_fail(client_ip, username)
         return JSONResponse({"error": "wrong credentials"}, status_code=403)
+
+    _login_clear(client_ip, username)
 
     token = secrets.token_hex(32)
     _SESSIONS[token] = (time.time() + _SESSION_TIMEOUT, username, role, allowed_rooms)
 
-    resp = JSONResponse({"ok": True, "token": token, "role": role, "username": username, "must_reset_password": must_reset})
+    # 不再在响应体里回传 token：cookie 是 httponly 的，回传一份到 JS
+    # 等于撤销了 httponly 的保护（任何 XSS 都能把它读走）。
+    resp = JSONResponse({"ok": True, "role": role, "username": username,
+                         "must_reset_password": must_reset})
     resp.set_cookie(
         key="session", value=token,
         max_age=_SESSION_TIMEOUT,
@@ -1565,8 +1695,14 @@ async def api_save_llm_config(request: Request):
             "max_messages": _LLM_CONFIG_DICT.get("context", {}).get("max_messages", 10),
         }
 
-        # 手动写 YAML 保留锚点和格式
-        cfg_path.write_text(yaml.dump(raw, default_flow_style=False, allow_unicode=True), encoding="utf-8")
+        # 手动写 YAML 保留锚点和格式。
+        # 必须原子写：直接 write_text 被中断会留下截断的 config.yaml，
+        # 而截断的 YAML 有时**仍能解析**（尾巴整段没了）→ 房间照常启动、
+        # 关键词/签文静默消失。第十一轮只修了 update_config_from_dict 与
+        # 房间配置，`_CFG_ATOMIC_MISSED` 里那 5 条全局路径漏了。
+        atomic_write_text(cfg_path,
+                          yaml.dump(raw, default_flow_style=False, allow_unicode=True),
+                          backup=True)
         logger.info("llm config saved to %s", cfg_path)
     except Exception as exc:
         logger.warning("failed to save config.yaml: %s", exc)
@@ -1748,7 +1884,7 @@ def _load_templates() -> dict:
 def _save_templates(data: dict) -> None:
     p = Path(_ROOMS_BASE_DIR).resolve() / _TEMPLATES_PATH
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(p, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 @app.get("/api/templates")
@@ -3206,7 +3342,9 @@ async def api_llm_config_import(request: Request):
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
         raw["llm"] = {k: _LLM_CONFIG_DICT.get(k) for k in ("enabled","provider","api_key","base_url","model","wake_word","temperature","top_p","max_tokens","system_prompt")}
         raw["llm"]["context"] = _LLM_CONFIG_DICT.get("context", {})
-        cfg_path.write_text(yaml.dump(raw, default_flow_style=False, allow_unicode=True), encoding="utf-8")
+        atomic_write_text(cfg_path,
+                          yaml.dump(raw, default_flow_style=False, allow_unicode=True),
+                          backup=True)
     except Exception as exc:
         return JSONResponse({"error": f"save failed: {exc}"}, status_code=500)
     return {"ok": True}
@@ -3581,7 +3719,7 @@ async def api_update_account_nickname(uid: str, request: Request):
     except Exception:
         meta = {}
     meta["nickname"] = nickname
-    meta_path.write_text(yaml.dump(meta, allow_unicode=True), encoding="utf-8")
+    atomic_write_text(meta_path, yaml.dump(meta, allow_unicode=True))
     return {"ok": True, "nickname": nickname}
 
 
@@ -4921,9 +5059,10 @@ async def api_external_generate_key(request: Request):
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
         web_ui = raw.setdefault("web_ui", {})
         web_ui["api_token"] = new_key
-        cfg_path.write_text(
+        atomic_write_text(
+            cfg_path,
             yaml.dump(raw, default_flow_style=False, allow_unicode=True),
-            encoding="utf-8",
+            backup=True,
         )
         logger.info("api_token saved to %s", cfg_path)
     except Exception as exc:
@@ -4950,9 +5089,10 @@ async def api_external_clear_key():
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
         web_ui = raw.setdefault("web_ui", {})
         web_ui["api_token"] = ""
-        cfg_path.write_text(
+        atomic_write_text(
+            cfg_path,
             yaml.dump(raw, default_flow_style=False, allow_unicode=True),
-            encoding="utf-8",
+            backup=True,
         )
         logger.info("api_token cleared")
     except Exception as exc:
@@ -5131,9 +5271,10 @@ async def api_external_save_domain(request: Request):
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
         web_ui = raw.setdefault("web_ui", {})
         web_ui["api_domain"] = domain
-        cfg_path.write_text(
+        atomic_write_text(
+            cfg_path,
             yaml.dump(raw, default_flow_style=False, allow_unicode=True),
-            encoding="utf-8",
+            backup=True,
         )
         logger.info("api_domain saved: %s", domain or "(empty, auto-detect)")
     except Exception as exc:
@@ -7867,9 +8008,16 @@ createApp({
                 }
             }
         }
+        function escapeHtml(s) {
+            return String(s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
         function renderMarkdown(text) {
             if (!text) return '';
-            return text
+            // 先整体转义：更新日志来自远端（GitHub Release），
+            // 之前是直接把原文塞进 v-html —— 正文里一个 <img onerror> 就能执行。
+            return escapeHtml(text)
                 // 标题
                 .replace(/^#### (.*$)/gm, '<h4 class="font-bold text-sm mt-3 mb-1">$1</h4>')
                 .replace(/^### (.*$)/gm, '<h3 class="font-bold text-base mt-3 mb-1">$1</h3>')
@@ -7882,7 +8030,12 @@ createApp({
                 // 无序列表
                 .replace(/^- (.*$)/gm, '<li class="ml-4 list-disc">$1</li>')
                 // 链接
-                .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" class="text-blue-500 hover:underline">$1</a>')
+                .replace(/\[([^\]]+)\]\(([^)]+)\)/g, function (m, label, href) {
+                    // 只放行 http(s)/mailto，杜绝 javascript: / data: 伪协议
+                    if (!/^(https?:|mailto:)/i.test(href)) return label;
+                    return '<a href="' + href + '" target="_blank" rel="noopener noreferrer" '
+                         + 'class="text-blue-500 hover:underline">' + label + '</a>';
+                })
                 // 换行
                 .replace(/\n\n/g, '</p><p class="my-2">')
                 .replace(/\n/g, '<br>');
@@ -8143,7 +8296,16 @@ createApp({
                     headers: {'Content-Type':'application/json'},
                     body: JSON.stringify({username: loginUser.value, password: loginPass.value})
                 });
-                if (!res.ok) { loginErr.value = '账号或密码错误'; return; }
+                if (!res.ok) {
+                    // 429 是限速，不是密码错；混在一起会让用户一直重试
+                    let msg = '账号或密码错误';
+                    if (res.status === 429) {
+                        try { msg = (await res.json()).error || '尝试过于频繁，请稍后再试'; }
+                        catch(e) { msg = '尝试过于频繁，请稍后再试'; }
+                    }
+                    loginErr.value = msg;
+                    return;
+                }
                 const data = await res.json();
                 loggedIn.value = true;
                 userRole.value = data.role || '';
@@ -9203,8 +9365,14 @@ createApp({
                 const data = await res.json();
                 if (data.error) { botLogContent.value = '加载失败: ' + data.error; return; }
                 const lines = data.lines || [];
+                // ⚠️ 必须先 HTML 转义再插 span。
+                // bot.log 里带**观众可控**的内容（`danmaku received: text=%s`、
+                // `guard welcome: uname=%s`），而这里原来是 `v-html` 直出：
+                // 观众把昵称改成 <img src=x onerror=...>、或开个粉丝牌，
+                // 管理员一打开日志面板就在自己的会话里执行了对方的脚本
+                // （可以改密码、读配置、删房间）。实测 payload 会原样进日志。
                 botLogContent.value = lines.map(l => {
-                    return l
+                    return escapeHtml(l)
                         .replace(/ERROR/g, '<span class="text-red-400">ERROR</span>')
                         .replace(/WARNING/g, '<span class="text-yellow-400">WARNING</span>')
                         .replace(/INFO/g, '<span class="text-green-300">INFO</span>')
