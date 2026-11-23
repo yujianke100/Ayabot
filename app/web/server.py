@@ -530,7 +530,14 @@ _SECRET_PATHS: frozenset[str] = frozenset({
     "/api/llm_config",
     "/api/llm_config/export",
     "/api/templates",
+    "/api/bili_accounts",
 })
+
+#: 只给管理员的路径前缀（含子路径）。
+#: `GET /api/bili_accounts` 会把**全站**的 B站账号（uid/昵称/关联房间）列出来，
+#: 以前任何登录用户都能读 —— 主播账号能枚举别人的账号和房间号。
+#: 界面上「用户管理 → B站账号」本来也只有管理员能进，所以收紧不影响任何人。
+_ADMIN_ONLY_PREFIXES: tuple[str, ...] = ("/api/bili_accounts",)
 
 #: 允许 `/api/proxy_image` 代理的域名后缀（B站图片 CDN）。
 _ALLOWED_IMAGE_SUFFIXES: tuple[str, ...] = (
@@ -541,6 +548,39 @@ _MAX_PROXY_IMAGE_BYTES = 5 * 1024 * 1024
 
 #: `/api/rooms/{id}` 或 `/api/rooms/{id}/xxx`
 _ROOM_PATH_RE = re.compile(r"^/api/rooms/([^/]+)(/.*)?$")
+
+#: `/api/bili_accounts/{uid}` 或 `/api/bili_accounts/{uid}/xxx`
+_ACCOUNT_PATH_RE = re.compile(r"^/api/bili_accounts/([^/]+)(/.*)?$")
+
+#: 房间号 / B站 UID 的合法形状。
+#: **必须白名单**：房间号和 uid 都会被拼进文件路径
+#: （`rooms/<id>/`、`accounts/<uid>/`），而 URL 里 `\` 会被解码成反斜杠。
+#: 实测 `DELETE /api/rooms/..%5Cvictim` → 200，`rooms/../victim` 整个目录被删；
+#: `POST /api/bili_accounts/..%5Cx/nickname` 能在任意目录写 meta.yaml，
+#: `DELETE /api/bili_accounts/..%5Cx` 能删任意目录。上面那个 `[^/]+` 放行反斜杠。
+_IDENT_RE = re.compile(r"^[0-9A-Za-z_-]{1,32}$")
+
+
+def _valid_ident(value: str) -> bool:
+    return bool(_IDENT_RE.match(value or ""))
+
+
+def _safe_subdir(base: Path, name: str) -> Optional[Path]:
+    """`base/name` 且必须真的在 base 里面；否则返回 None。
+
+    第二道防线（第一道是 `_valid_ident`）：哪怕以后有新的调用点忘了校验，
+    也不会因为 `..` / 绝对路径指到目录外面去。
+    """
+    try:
+        if not _valid_ident(name):
+            return None
+        root = Path(base).resolve()
+        target = (root / name).resolve()
+        if target == root or root not in target.parents:
+            return None
+        return target
+    except Exception:
+        return None
 
 #: 普通账号（role=user）**允许**对自己名下房间做的写操作。
 #: 其余一切写操作默认只有管理员能做 —— 这是有意选择「默认拒绝」：
@@ -1152,6 +1192,17 @@ async def _auth_middleware(request: Request, call_next):
             status_code=302,
         )
 
+    # ── 路径标识符校验（对所有角色生效，必须在 admin 短路之前）──
+    # 房间号/uid 会被拼进文件路径，`..` + 反斜杠可以跳出 rooms/ 和 accounts/。
+    _m_room = _ROOM_PATH_RE.match(path)
+    if _m_room and not _valid_ident(_m_room.group(1)):
+        logger.warning("拒绝非法房间号: %r (%s %s)", _m_room.group(1), request.method, path)
+        return JSONResponse({"error": "invalid room id"}, status_code=400)
+    _m_acc = _ACCOUNT_PATH_RE.match(path)
+    if _m_acc and not _valid_ident(_m_acc.group(1)):
+        logger.warning("拒绝非法账号 uid: %r (%s %s)", _m_acc.group(1), request.method, path)
+        return JSONResponse({"error": "invalid uid"}, status_code=400)
+
     # ── Role-based access control ──
     _, role, _ = _get_current_role(request)
     method = request.method
@@ -1188,7 +1239,7 @@ async def _auth_middleware(request: Request, call_next):
         # （/api/general_config 的 llm.api_key、/api/llm_config 的 api_key、
         #   /api/llm_config/export 整份导出、/api/templates 里保存的模板）
         # 普通账号只需要管自己的房间，不该看到管理员的密钥。
-        if path in _SECRET_PATHS:
+        if path in _SECRET_PATHS or path.startswith(_ADMIN_ONLY_PREFIXES):
             logger.warning("ACL deny: user=%s 读取全局密钥接口 %s", username_early, path)
             return JSONResponse({"error": "forbidden"}, status_code=403)
 
@@ -1848,16 +1899,15 @@ async def api_bili_login_save(request: Request):
     cookies = credential.get_cookies()
     store_path = Path(_CONFIG_YAML_PATH).parent / "data" / "credential.json"
     store_path.parent.mkdir(parents=True, exist_ok=True)
-    store_path.write_text(
-        json.dumps({
-            "SESSDATA": cookies.get("SESSDATA", ""),
-            "bili_jct": cookies.get("bili_jct", ""),
-            "buvid3": cookies.get("buvid3", ""),
-            "DedeUserID": cookies.get("DedeUserID", ""),
-            "ac_time_value": cookies.get("ac_time_value", ""),
-        }, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    # 原子写：这个文件被截断 = 凭证直接失效（用户看到「登录凭证失效」，
+    # 而且原文件已经没了，只能重新扫码）。
+    atomic_write_text(store_path, json.dumps({
+        "SESSDATA": cookies.get("SESSDATA", ""),
+        "bili_jct": cookies.get("bili_jct", ""),
+        "buvid3": cookies.get("buvid3", ""),
+        "DedeUserID": cookies.get("DedeUserID", ""),
+        "ac_time_value": cookies.get("ac_time_value", ""),
+    }, ensure_ascii=False, indent=2))
 
     _BILI_LOGIN_SESSIONS.pop(session_id, None)
 
@@ -2983,7 +3033,10 @@ async def api_create_room(request: Request):
     if not room_display_id:
         return JSONResponse({"error": "请填写直播间号（room_display_id）"}, status_code=400)
 
-    room_id = str(room_display_id)
+    room_id = str(room_display_id).strip()
+    # 这里同样是拼路径（rooms/<room_id>/），必须校验形状
+    if not _valid_ident(room_id):
+        return JSONResponse({"error": "直播间号只能是数字/字母（1-32 位）"}, status_code=400)
     from app.config import ensure_room_dirs, get_room_path
     room_dir = ensure_room_dirs(room_id, base_dir=_ROOMS_BASE_DIR)
     cfg_path = room_dir / "config.yaml"
@@ -3083,8 +3136,11 @@ async def api_delete_room(room_id: str):
     clean_room(room_id)
     _save_room_states()
 
-    # 删除目录
-    room_dir = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR)
+    # 删除目录（再校验一次：这是唯一一处会 rmtree 用户数据的代码）
+    rooms_root = Path(_ROOMS_BASE_DIR).resolve() / DEFAULT_ROOMS_DIR
+    room_dir = _safe_subdir(rooms_root, str(room_id))
+    if room_dir is None:
+        return JSONResponse({"error": "invalid room id"}, status_code=400)
     if room_dir.exists():
         shutil.rmtree(str(room_dir))
     logger.info("room deleted: %s", room_id)
@@ -3358,7 +3414,13 @@ _ACCOUNTS_DIR: str = "accounts"
 
 
 def _get_account_dir(uid: str) -> Path:
-    return Path(_ROOMS_BASE_DIR).resolve() / _ACCOUNTS_DIR / str(uid)
+    base = Path(_ROOMS_BASE_DIR).resolve() / _ACCOUNTS_DIR
+    safe = _safe_subdir(base, str(uid))
+    if safe is None:
+        # 调用方要么已经过中间件校验，要么是内部常量；
+        # 走到这里说明有人传了畸形 uid，直接抛，别拼出一个目录外面的路径。
+        raise ValueError(f"非法账号 uid: {uid!r}")
+    return safe
 
 
 def _list_accounts() -> list[dict[str, Any]]:
@@ -3547,7 +3609,8 @@ async def api_save_account_credential(request: Request):
         "ac_time_value": cookies.get("ac_time_value", ""),
     }
     cred_json = json.dumps(cred_data, ensure_ascii=False, indent=2)
-    (acc_dir / "credential.json").write_text(cred_json, encoding="utf-8")
+    # 原子写：半截 JSON 会让这个账号永远登录不上，且报错看起来像「凭证失效」
+    atomic_write_text(acc_dir / "credential.json", cred_json)
     logger.info("credential saved for account %s", target_uid)
 
     # 查询用户昵称
@@ -3568,10 +3631,9 @@ async def api_save_account_credential(request: Request):
         pass
 
     # 始终写入 meta.yaml（即使昵称获取失败也用 UID 兜底）
-    (acc_dir / "meta.yaml").write_text(
-        yaml.dump({"nickname": nickname or f"UID:{dedeuserid}", "uname": nickname or ""}, allow_unicode=True),
-        encoding="utf-8",
-    )
+    atomic_write_text(acc_dir / "meta.yaml",
+                      yaml.dump({"nickname": nickname or f"UID:{dedeuserid}",
+                                 "uname": nickname or ""}, allow_unicode=True))
 
     _BILI_LOGIN_SESSIONS.pop(session_id, None)
     logger.info("bili account saved: uid=%s nickname=%s", dedeuserid, nickname)
@@ -3688,9 +3750,10 @@ async def api_delete_account(uid: str):
                 continue
             if str(cfg.get("account_uid", "")) == str(uid):
                 cfg.pop("account_uid", None)
-                (d / "config.yaml").write_text(
+                atomic_write_text(
+                    d / "config.yaml",
                     yaml.dump(cfg, default_flow_style=False, allow_unicode=True),
-                    encoding="utf-8",
+                    backup=True,
                 )
                 logger.info("removed account %s from room %s", uid, d.name)
 

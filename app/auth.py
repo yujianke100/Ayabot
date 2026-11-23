@@ -10,7 +10,7 @@ from typing import Optional
 
 from bilibili_api import Credential, login_v2
 
-from .config import AppConfig
+from .config import AppConfig, atomic_write_text
 
 # 凭证状态文件（写在房间 data 目录，WebUI 读取后引导用户重新登录）
 AUTH_STATUS_FILE = "auth_status.json"
@@ -63,7 +63,7 @@ class AuthManager:
         try:
             path = self.status_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            atomic_write_text(path, json.dumps(payload, ensure_ascii=False))
         except Exception as exc:  # noqa: BLE001
             self.logger.debug("write auth status failed: %s", exc)
 
@@ -279,7 +279,10 @@ class AuthManager:
             "ac_time_value": cookies.get("ac_time_value", ""),
         }
 
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 原子写：凭证文件被截断 = 这个房间**永远**登录不上，
+        # 而报错信息看起来是「登录凭证失效」，用户会一直重新扫码也没用
+        # （扫完写进去的还是可能被下一次刷新截断）。
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
     async def _is_valid(self, credential: Credential) -> bool:
         try:
