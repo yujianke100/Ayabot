@@ -731,6 +731,11 @@ def _parse_keyword_reply(raw: Any) -> KeywordReplyConfig:
 
 DEFAULT_ROOMS_DIR = "rooms"
 
+#: 机器人心跳文件名（房间 data 目录下）。
+#: bot.py 写、WebUI 与守护进程读、auth.py 在等待扫码期间也要写 ——
+#: 三处必须用同一个名字，所以放在这里而不是各自定义。
+HEARTBEAT_FILE = "bot_status.json"
+
 
 def get_room_path(room_id: str | int, base_dir: str | Path | None = None) -> Path:
     """返回房间目录路径: <base_dir>/rooms/<room_id>/"""

@@ -1060,6 +1060,37 @@ async def _recover_room(room_id: str, reason: str, now: float) -> None:
         logger.error("supervisor: room %s restart error: %s", room_id, exc, exc_info=True)
 
 
+def _room_waiting_login(room_id: str) -> bool:
+    """当前**正在运行的这个进程**是不是在等扫码登录。
+
+    等扫码不是故障，重启解决不了（新进程还是等），但它的特征和僵尸任务一模一样：
+    进程活着、`bot_status.json` 里没有 ts。以前守护进程因此把它当僵尸，
+    每 10 分钟重启一次并写一条「疑似僵尸任务」的崩溃横幅 —— 用户看到的是
+    「机器人莫名其妙关了又自己起来」，真正原因其实是「等你扫码」。
+
+    pid 必须对得上：状态文件可能是上一次运行留下的，那时重启是**有用**的
+    （新进程会重新读凭证文件，用户如果已经扫过码就直接恢复）。
+    """
+    st = _read_room_json(room_id, "auth_status.json") or {}
+    if str(st.get("status") or "") != "needs_login":
+        return False
+    try:
+        status_pid = int(st.get("pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if status_pid <= 0:
+        return False
+    try:
+        from app.process_manager import _inproc_is_running, _read_pid  # noqa: PLC0415
+        running_pid = _read_pid(room_id)
+        if _inproc_is_running(room_id):
+            # 同进程模式（exe）：pid 就是 WebUI 自己的 pid
+            running_pid = os.getpid()
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(running_pid) and int(running_pid) == status_pid
+
+
 async def _supervise_once() -> None:
     desired = _load_desired_states()
     if not desired:
@@ -1073,6 +1104,11 @@ async def _supervise_once() -> None:
             if room_status(room_id) != "running":
                 # 用户主动点「停止」会把 desired 置 false，所以这里只可能是崩溃
                 await _recover_room(room_id, "进程已退出", now)
+                continue
+
+            # 等扫码登录不是故障：跳过，别重启、别写崩溃横幅
+            if _room_waiting_login(room_id):
+                _no_heartbeat_since.pop(room_id, None)
                 continue
 
             heartbeat = _read_room_json(room_id, "bot_status.json")
@@ -2032,7 +2068,10 @@ async def api_save_general_config(request: Request):
 
     from app.config import update_config_from_dict
     ok = update_config_from_dict(body, _CONFIG_YAML_PATH)
-    return {"ok": ok}
+    if not ok:
+        return JSONResponse({"ok": False, "error": "全局配置保存失败（详见服务端日志）"},
+                            status_code=500)
+    return {"ok": True}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -3197,7 +3236,15 @@ async def api_save_room_config(room_id: str, request: Request):
         return JSONResponse({"error": "room not found"}, status_code=404)
     from app.config import update_config_from_dict
     ok = update_config_from_dict(body, str(cfg_path))
-    return {"ok": ok}
+    if not ok:
+        # 不能 200 + {"ok": false}：前端有多处只判断 `res.ok`
+        # （例如「保存 AI 配置时顺带写房间」，以及「新建房间后套用模板」），
+        # 那些调用会把失败当成功 —— 用户看到「已保存」，实际磁盘还是旧配置，
+        # 下次重启机器人用的仍是旧的关键词/签文/AI 设置。
+        logger.warning("房间 %s 配置保存失败", room_id)
+        return JSONResponse({"ok": False, "error": "配置保存失败（详见服务端日志）"},
+                            status_code=500)
+    return {"ok": True}
 
 
 @app.get("/api/rooms/{room_id}/config/export")
@@ -3230,7 +3277,10 @@ async def api_room_config_import(room_id: str, request: Request):
     try:
         from app.config import update_config_from_dict
         ok = update_config_from_dict(body, str(cfg_path))
-        return {"ok": ok}
+        if not ok:
+            return JSONResponse({"ok": False, "error": "配置导入失败（详见服务端日志）"},
+                                status_code=500)
+        return {"ok": True}
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
@@ -9603,6 +9653,7 @@ createApp({
         }
         async function saveLlmConfig() {
             llmSaveMsg.value = '';
+            let roomMirrorWarn = '';   // 房间那份配置写失败时记在这里
             const body = {
                 enabled: llmEnabled.value,
                 provider: llmProvider.value,
@@ -9635,8 +9686,14 @@ createApp({
                     if (res2.ok) {
                         // 更新内存中的 roomConfig
                         if (roomConfig.value) roomConfig.value.llm = JSON.parse(JSON.stringify(body));
+                    } else {
+                        // 全局保存成功了、房间那份没写进去 → 重启后房间还是用旧配置，
+                        // 用户会以为「AI 设置没生效」。必须显式告警，不能 best-effort 吞掉。
+                        roomMirrorWarn = '房间配置写入失败（重启后可能仍是旧设置）';
                     }
-                } catch(e) { /* room save best-effort */ }
+                } catch(e) {
+                    roomMirrorWarn = '房间配置写入失败：' + e.message;
+                }
             }
             try {
                 const res = await fetch('/api/llm_config', {
@@ -9654,8 +9711,11 @@ createApp({
                 if (!res.ok) throw new Error((await res.text()).slice(0,80));
                 const data = await res.json();
                 if (data.ok) {
-                    llmSaveMsg.value = '已保存';
-                    llmSaveOk.value = true;
+                    // 全局写成功了，但房间那份失败 → 不能说「已保存」，
+                    // 否则用户重启房间后发现 AI 设置没生效，会当成功能坏了。
+                    llmSaveMsg.value = roomMirrorWarn ? ('⚠️ 全局已保存，但' + roomMirrorWarn)
+                                                      : '已保存';
+                    llmSaveOk.value = !roomMirrorWarn;
                     await loadLlmConfig();
                 } else {
                     llmSaveMsg.value = data.error || '保存失败';
@@ -9830,16 +9890,18 @@ createApp({
                     createRoomMsg.value = `✅ 房间 ${data.room_id} 创建成功！`;
                     createRoomOk.value = true;
                     showCreateRoom.value = false;
+                    const softWarns = [];
                     // 关联 B站 账号
                     if (newRoomAccount.value) {
                         try {
-                            await fetch(`/api/rooms/${data.room_id}/config`, {
+                            const r = await fetch(`/api/rooms/${data.room_id}/config`, {
                                 method: 'POST',
                                 headers: {'Content-Type':'application/json'},
                                 credentials: 'include',
                                 body: JSON.stringify({account_uid: newRoomAccount.value}),
                             });
-                        } catch(e) { /* ignore */ }
+                            if (!r.ok) softWarns.push('B站账号关联失败');
+                        } catch(e) { softWarns.push('B站账号关联失败'); }
                     }
                     // 应用预设模板
                     if (newRoomLlmTemplate.value || newRoomBotTemplate.value) {
@@ -9856,13 +9918,21 @@ createApp({
                             if (tpl) Object.assign(body, window.AyabotBotTpl.toSaveBody(tpl.config));
                         }
                         if (Object.keys(body).length) {
-                            await fetch(`/api/rooms/${data.room_id}/config`, {
+                            const r = await fetch(`/api/rooms/${data.room_id}/config`, {
                                 method: 'POST',
                                 headers: {'Content-Type':'application/json'},
                                 credentials: 'include',
                                 body: JSON.stringify(body),
                             });
+                            if (!r.ok) softWarns.push('预设模板套用失败');
                         }
+                    }
+                    // 房间本身建好了，但上面两步是 best-effort：失败了要说清楚，
+                    // 不能一律报「创建成功」让人以为模板/账号都配好了。
+                    if (softWarns.length) {
+                        createRoomMsg.value = `⚠️ 房间 ${data.room_id} 已创建，但：`
+                            + softWarns.join('、') + '（可在房间内重新设置）';
+                        createRoomOk.value = false;
                     }
                     newRoomUid.value = 0;
                     newRoomName.value = '';

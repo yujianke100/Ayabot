@@ -24,12 +24,11 @@ except ImportError:
 from bilibili_api import Credential, live, user
 from bilibili_api.utils.danmaku import Danmaku
 
-from .config import AppConfig, KeywordRule
+from .config import AppConfig, HEARTBEAT_FILE, KeywordRule
 from .gift_v2 import decode_send_gift_v2
 from .storage import GiftEvent, StatsStore
 
-# 机器人心跳文件（同 data 目录），供 WebUI 判断「进程活着但已掉线」
-HEARTBEAT_FILE = "bot_status.json"
+# 机器人心跳文件名见 app.config.HEARTBEAT_FILE（auth.py 在等待扫码时也会写）
 # 心跳写入间隔（秒）
 _HEARTBEAT_INTERVAL = 15.0
 # 弹幕连接守护间隔（秒）

@@ -10,7 +10,7 @@ from typing import Optional
 
 from bilibili_api import Credential, login_v2
 
-from .config import AppConfig, atomic_write_text
+from .config import AppConfig, HEARTBEAT_FILE, atomic_write_text
 
 # 凭证状态文件（写在房间 data 目录，WebUI 读取后引导用户重新登录）
 AUTH_STATUS_FILE = "auth_status.json"
@@ -130,12 +130,43 @@ class AuthManager:
         self.logger.warning(
             "%s — 房间保持运行，等待扫码登录（WebUI → 用户管理 → B站账号）", reason
         )
+        self._write_waiting_heartbeat()
         return await self.wait_for_relogin()
+
+    def _write_waiting_heartbeat(self) -> None:
+        """等待扫码期间也要写心跳 —— 这是「机器人被守护进程无限重启」的根因。
+
+        `prepare_credential()` 在凭证失效且 `wait_for_login=True` 时进入
+        `wait_for_relogin()` 阻塞。此时 `LiveRobot.run()` 还没开始跑，
+        所以 `bot_status.json` **一个字节都没写**。守护进程看到
+        「room_status=running 但从未写过心跳」，等够 120s 就判定为僵尸任务、
+        写一条「疑似僵尸任务」的崩溃横幅并重启进程；重启后又是同样状态，
+        于是每 10 分钟重启一次，永远好不了 —— 用户看到的就是
+        「机器人莫名其妙关了 / 又自己起来了」，而真正的原因是「等你扫码」。
+        """
+        try:
+            path = Path(self.config.storage.sqlite_path).parent / HEARTBEAT_FILE
+            payload = {
+                "ts": int(time.time()),
+                "pid": __import__("os").getpid(),
+                "phase": "waiting_login",
+                "room_display_id": self.config.room_display_id,
+                "live": False,
+                # 关键：明确告诉 WebUI/守护进程「还没连上，因为还没登录」
+                "danmaku_connected": False,
+                "danmaku_task_alive": False,
+                "waiting_login": True,
+            }
+            atomic_write_text(path, json.dumps(payload, ensure_ascii=False))
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("write waiting heartbeat failed: %s", exc)
 
     async def wait_for_relogin(self) -> Credential:
         """阻塞轮询，直到磁盘上出现有效凭证。"""
         last_reason = self._reason or "登录凭证不可用"
         while True:
+            # 先写心跳再睡：没有这一步，守护进程会把「等扫码」当成僵尸任务重启
+            self._write_waiting_heartbeat()
             await asyncio.sleep(_LOGIN_WAIT_POLL)
             credential = self.load_credential_sync()
             if credential is None:
