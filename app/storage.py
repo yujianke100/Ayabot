@@ -521,6 +521,19 @@ class StatsStore:
         # 不要在 SQL 里写 ayabot_date(ts) —— 那是逐行回调 Python，20 万行要 0.6s，而区间比较是 6ms。
         where, params = _date_range_where(date_from, date_to)
         order_dir = "ASC" if asc else "DESC"
+        # SQLite 里负数 LIMIT = 不限（实测 LIMIT -1 返回全表），所以必须夹取。
+        # `0` 不是「不限」也不是「0 条」，统一按「没指定」处理 → 默认 50。
+        try:
+            _lim = int(limit)
+        except (TypeError, ValueError):
+            _lim = 50
+        if _lim <= 0:
+            _lim = 50
+        limit = min(_lim, 1000)
+        try:
+            offset = max(0, int(offset))
+        except (TypeError, ValueError):
+            offset = 0
         sql = f"SELECT id, ts, uid, uname, content FROM danmaku_log{where} ORDER BY id {order_dir} LIMIT ? OFFSET ?"
         rows = self._conn.execute(sql, [*params, limit, offset]).fetchall()
         return [

@@ -49,6 +49,10 @@ _WIRE_64BIT = 1
 _WIRE_LEN = 2
 _WIRE_32BIT = 5
 
+#: base64 文本的长度上限。真实礼物事件只有几百字节到几 KB；
+#: 设这个上限只是防止畸形/恶意事件把内存撑爆（超出按「解码失败」处理）。
+MAX_PB_B64_LEN = 4 * 1024 * 1024
+
 
 def _read_varint(buf: bytes, pos: int) -> tuple[int, int]:
     result = 0
@@ -89,9 +93,15 @@ def _iter_fields(buf: bytes):
             yield field_no, wire, buf[pos:pos + length]
             pos += length
         elif wire == _WIRE_64BIT:
+            # 必须显式检查：切片越界只会静默变短，把半截字节当成完整字段，
+            # 上层于是拿到一个「有标识没金额」的礼物（比报错难查得多）。
+            if pos + 8 > end:
+                raise ValueError("fixed64 field overruns buffer")
             yield field_no, wire, buf[pos:pos + 8]
             pos += 8
         elif wire == _WIRE_32BIT:
+            if pos + 4 > end:
+                raise ValueError("fixed32 field overruns buffer")
             yield field_no, wire, buf[pos:pos + 4]
             pos += 4
         else:
@@ -154,6 +164,9 @@ def decode_send_gift_v2(pb_b64: str) -> list[dict[str, Any]]:
     既有的 `_extract_blindbox_profit` / 数据库写入逻辑。
     """
     if not pb_b64:
+        return []
+    if len(pb_b64) > MAX_PB_B64_LEN:
+        # 交给调用方计成「解码失败」，界面上会显示出来（而不是闷声吃内存）
         return []
     try:
         raw = base64.b64decode(pb_b64, validate=False)

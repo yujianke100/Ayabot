@@ -126,6 +126,11 @@ class LiveRobot:
         self._dropped_gift_dup = 0     # 去重命中（正常，灰度双推）
         self._dropped_gift_no_uname = 0  # 缺 uname（旧代码静默丢弃）
         self._gift_decode_sample = ""  # 第一份解码失败的 pb 片段，给排查用
+        # 收到的各类型事件计数（进心跳 + 每 10 分钟打一条 INFO 汇总）。
+        # 「统计全是 0」时必须能回答：到底收到了哪些事件？有没有我们不认识的？
+        self._event_counts: dict[str, int] = {}
+        # 疑似礼物类、但不在已知清单里的事件名（B站改协议时的信号）
+        self._unknown_gift_like: set[str] = set()
         # 后台任务异常退出后自动重启的次数（进心跳，便于排查"机器人不说话"）
         self._bg_restarts = 0
         # 每个任务的重建时间戳（限流用），以及已放弃重建的任务名
@@ -251,6 +256,11 @@ class LiveRobot:
             "gift_dropped_decode": getattr(self, "_dropped_gift_decode", 0),
             "gift_dropped_dup": getattr(self, "_dropped_gift_dup", 0),
             "gift_dropped_no_uname": getattr(self, "_dropped_gift_no_uname", 0),
+            # 近期收到的事件类型（Top 12）：排查「收不到礼物」时第一时间看这个
+            "event_types": dict(sorted(
+                getattr(self, "_event_counts", {}).items(),
+                key=lambda kv: kv[1], reverse=True)[:12]),
+            "unknown_gift_events": sorted(getattr(self, "_unknown_gift_like", set())),
             # 后台任务异常退出被自动重建的次数：非 0 说明曾经「活着但不说话」
             "bg_restarts": getattr(self, "_bg_restarts", 0),
             # 已放弃重建的任务（必现故障）：非空说明某项功能已彻底停摆
@@ -269,8 +279,14 @@ class LiveRobot:
             self.logger.debug("write heartbeat failed: %s", exc)
 
     async def _heartbeat_loop(self) -> None:
+        ticks = 0
         while True:
             self.write_heartbeat()
+            ticks += 1
+            # 每 40 个心跳（约 10 分钟）打一条事件汇总。
+            # 「统计全是 0」的用户反馈里，最缺的就是这条信息。
+            if ticks % 40 == 0:
+                self._log_event_summary()
             await asyncio.sleep(_HEARTBEAT_INTERVAL)
 
     # ── 弹幕连接守护 ────────────────────────────────────────
@@ -961,6 +977,15 @@ class LiveRobot:
         # "gift" 的假记录）。所以这里直接跳过统计与致谢。
         if str(event.get("type") or "") == "COMBO_SEND":
             self.logger.debug("COMBO_SEND is a combo summary, skipped (already counted per-item)")
+            return
+
+        # UNIVERSAL_EVENT_GIFT_V2 有时与 SEND_GIFT_V2 用同一套 protobuf 字段。
+        # 以前这里只按 JSON 解析 → pb 事件被解析成「name=gift / num=1 / 金额 0」的
+        # 假礼物：统计里条数在涨、金额永远是 0，比直接丢掉更难排查。
+        _inner = (event.get("data") or {})
+        _inner = _inner.get("data") if isinstance(_inner, dict) else None
+        if isinstance(_inner, dict) and _inner.get("pb"):
+            await self._on_gift_v2(event)
             return
 
         gift = _extract_gift_payload(event)
@@ -1662,8 +1687,51 @@ class LiveRobot:
             await self._enqueue_reply(text="欢迎词已更新", reply_uid=uid)
             return
 
+    def _bump_event_count(self, event_type: str) -> None:
+        """统计事件类型出现次数，并记下「礼物类但不认识」的名字。
+
+        之所以放在 `_on_all_events` 的最前面：那里后面有一串 `return`
+        （PK 分支、噪音过滤、已知事件过滤），放在后面就等于大部分事件都数不到。
+        """
+        self._event_counts[event_type] = self._event_counts.get(event_type, 0) + 1
+        if (_looks_like_gift_event(event_type)
+                and event_type not in KNOWN_GIFT_EVENTS):
+            # 只记名字，不刷日志；汇总时一起打出来
+            self._unknown_gift_like.add(event_type)
+
+    def _log_event_summary(self) -> None:
+        """每 10 分钟打一条 INFO：收到了哪些事件，有没有不认识的礼物类事件。"""
+        counts = self._event_counts
+        if not counts:
+            self.logger.info("事件统计：过去 10 分钟没有收到任何事件")
+            self._event_counts = {}
+            return
+        top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:10]
+        parts = " ".join(f"{k}={v}" for k, v in top)
+        gift_total = sum(counts.get(k, 0) for k in KNOWN_GIFT_EVENTS)
+        self.logger.info(
+            "事件统计（近 10 分钟）：%s%s；其中已知礼物类事件 %d 条",
+            parts,
+            f" 等 {len(counts)} 类" if len(counts) > len(top) else "",
+            gift_total,
+        )
+        if self._unknown_gift_like:
+            # 这条是「统计全是 0」最可能的解释之一，必须显眼
+            self.logger.warning(
+                "发现**未处理**的礼物类事件：%s —— 如果统计是 0，很可能 B站 换了这个"
+                "协议名/字段，请把这行和房间日志发给作者",
+                ", ".join(sorted(self._unknown_gift_like)),
+            )
+        if gift_total == 0:
+            self.logger.warning(
+                "近 10 分钟没有收到任何已知礼物事件（SEND_GIFT 等）。"
+                "如果这期间有人在送礼，说明协议变了或凭证/连接有问题。"
+            )
+        self._event_counts = {}
+
     async def _on_all_events(self, event: dict[str, Any]) -> None:
         event_type = event.get("type", "?")
+        self._bump_event_count(event_type)
 
         # ── 捕获所有 PK 相关事件（不管叫什么名字） ──
         if event_type.startswith("PK_") or event_type.startswith("pk_"):
@@ -2176,6 +2244,21 @@ def _extract_gift_payload(event: dict[str, Any]) -> Optional[dict[str, Any]]:
         "event_type": event_type,
         "raw": payload,
     }
+
+
+#: 已知的、我们**会处理**的礼物类事件名。
+KNOWN_GIFT_EVENTS = frozenset({
+    "SEND_GIFT", "SEND_GIFT_V2", "COMBO_SEND",
+    "UNIVERSAL_EVENT_GIFT", "UNIVERSAL_EVENT_GIFT_V2", "SPECIAL_GIFT",
+})
+#: 名字里带这些词就当成「礼物类」事件 —— 用来发现我们没接的新协议名。
+#: B站 的命名习惯基本都能命中（SEND_GIFT / UNIVERSAL_EVENT_GIFT / GIFT_STAR_PROCESS…）。
+_GIFT_LIKE_HINTS = ("GIFT", "COMBO")
+
+
+def _looks_like_gift_event(name: str) -> bool:
+    up = (name or "").upper()
+    return any(h in up for h in _GIFT_LIKE_HINTS)
 
 
 GUARD_NAMES = {1: "总督", 2: "提督", 3: "舰长"}

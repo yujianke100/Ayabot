@@ -3044,6 +3044,17 @@ async def api_list_rooms(request: Request):
         # 灰度期同一件礼物会同时走新旧协议推两次，seen 涨而 recorded 不涨。
         # 只有「丢掉的比重复的多」才说明真的丢了东西。
         really_dropped = (seen - recorded - dup) > 0
+        unknown_gift = hb.get("unknown_gift_events") or []
+        if not isinstance(unknown_gift, list):
+            unknown_gift = []
+        # 「收到礼物类事件但我不会处理」是协议变更最直接的证据，单独报出来。
+        # 这种情况 gift_seen 可能是 0（根本没进解析），所以不能只看 seen。
+        if unknown_gift and not r.get("gift_issue"):
+            r["gift_issue"] = {
+                "seen": seen, "recorded": recorded, "decode_failed": decode_fail,
+                "no_uid": no_uid, "no_uname": no_uname, "dup": dup,
+                "unknown_events": [str(x) for x in unknown_gift],
+            }
         if decode_fail or (seen > 0 and recorded == 0 and really_dropped):
             r["gift_issue"] = {
                 "seen": seen,
@@ -3052,6 +3063,7 @@ async def api_list_rooms(request: Request):
                 "no_uid": no_uid,
                 "no_uname": no_uname,
                 "dup": dup,
+                "unknown_events": [],
             }
         # 上次崩溃记录
         crash = _read_crash_info(rid)
@@ -5989,7 +6001,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 缺昵称 {{ selectedRoom.gift_issue.no_uname }}、
                 重复 {{ selectedRoom.gift_issue.dup }}。
             </div>
-            <div class="mt-1">
+            <div v-if="selectedRoom.gift_issue.unknown_events && selectedRoom.gift_issue.unknown_events.length"
+                 class="mt-1 font-bold">
+                收到未识别的礼物类事件：
+                {{ selectedRoom.gift_issue.unknown_events.join('、') }}
+                —— 很可能 B站 换了这个协议名/字段，请把这一行和房间日志发给作者。
+            </div>
+            <div v-else class="mt-1">
                 <span v-if="selectedRoom.gift_issue.decode_failed">
                     「解码失败」说明 B站换了礼物协议，需要更新软件版本 ——
                     请把这段提示和房间日志发给我。
