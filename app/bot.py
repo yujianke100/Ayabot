@@ -121,7 +121,12 @@ class LiveRobot:
         self._danmaku_guard_task: Optional[asyncio.Task[None]] = None
         self._credential_task: Optional[asyncio.Task[None]] = None
 
-        self._pending_texts: set[str] = set()
+        # 待发送集合：键是 (内容, 收件人 uid)，**不能只用内容**。
+        # 只用内容会让「两个不同用户在同一时间窗口触发同一条回复」时
+        # 第二个人彻底收不到（例如两人都说 #盲盒统计 且都没有记录，
+        # 回复文案同为「无盲盒记录」→ 只有第一个入队）。
+        # 用户视角就是「机器人不回复我」。
+        self._pending_texts: set[tuple[str, Optional[int]]] = set()
         self._chat_contexts: dict[int, list[dict[str, str]]] = {}
 
         self._admin_uids: set[int] = set()
@@ -567,13 +572,13 @@ class LiveRobot:
             if not text:
                 continue
 
-            self._pending_texts.discard(text)
-            self._pending_texts.add(text)
+            pkey = (text, None)
+            self._pending_texts.discard(pkey)
+            self._pending_texts.add(pkey)
             await self._msg_queue.put(OutboundMessage(text=text, reply_uid=None))
 
     async def _message_worker(self) -> None:
         min_interval = max(self.config.rate_limit.send_interval_seconds, 0.1)
-        max_queue = getattr(self.config.rate_limit, 'max_queue_size', 50)
         max_retries_per_msg = 3
         last_sent = 0.0
         consecutive_fails = 0
@@ -584,7 +589,8 @@ class LiveRobot:
             msg = await self._msg_queue.get()
 
             # Remove from pending set (no longer pending)
-            self._pending_texts.discard(msg.text)
+            # 注意要在改 text 之前释放，键里带收件人 uid
+            self._pending_texts.discard((msg.text, msg.reply_uid))
 
             # ── 关键词过滤（最外层，覆盖所有消息类型）──
             filtered = self._apply_keyword_filter(msg.text)
@@ -808,15 +814,17 @@ class LiveRobot:
                 return
 
             text = template.replace("{uname}", uname)
-            # 欢迎文本去重：相同的内容不重复入队（与 _enqueue_reply 的去重一致）
-            if text in self._pending_texts:
+            # 欢迎文本去重：同一个人重复进房不重复欢迎；
+            # 不同人即使模板渲染出完全一样的句子也要各发一次
+            wkey = (text, uid)
+            if wkey in self._pending_texts:
                 self.logger.debug("dedup welcome text: uid=%s text=%s", uid, text)
                 return
-            self._pending_texts.add(text)
+            self._pending_texts.add(wkey)
             try:
                 self._msg_queue.put_nowait(OutboundMessage(text=text, reply_uid=uid))
             except asyncio.QueueFull:
-                self._pending_texts.discard(text)
+                self._pending_texts.discard(wkey)
                 self.logger.warning("queue full, welcome dropped: uid=%s", uid)
 
     async def _on_interact_word(self, event: dict[str, Any]) -> None:
@@ -1758,15 +1766,17 @@ class LiveRobot:
         # 全局数字转大写
         if self.config.features.use_chinese_numbers_global:
             text = _to_chinese_num(text)
-        # Deduplicate: skip if same text is already queued
-        if text in self._pending_texts:
-            self.logger.debug("dedup enqueue: text=%s", text)
+        # 去重按 (内容, 收件人)：同一个人重复收到同一句才跳过，
+        # 不同人收到同一句是正常的（见 _pending_texts 的注释）
+        key = (text, reply_uid)
+        if key in self._pending_texts:
+            self.logger.debug("dedup enqueue: uid=%s text=%s", reply_uid, text)
             return
-        self._pending_texts.add(text)
+        self._pending_texts.add(key)
         try:
             self._msg_queue.put_nowait(OutboundMessage(text=text, reply_uid=reply_uid))
         except asyncio.QueueFull:
-            self._pending_texts.discard(text)
+            self._pending_texts.discard(key)
             self.logger.warning("queue full, cannot enqueue: reply_uid=%s text=%s", reply_uid, text)
 
     async def _enqueue_reply(self, text: str, reply_uid: Optional[int]) -> None:
@@ -1782,10 +1792,11 @@ class LiveRobot:
             text = _to_chinese_num(text)
 
         # Dedup immediately — before the delay window
-        if text in self._pending_texts:
-            self.logger.debug("dedup _enqueue_reply: text=%s", text)
+        key = (text, reply_uid)
+        if key in self._pending_texts:
+            self.logger.debug("dedup _enqueue_reply: uid=%s text=%s", reply_uid, text)
             return
-        self._pending_texts.add(text)
+        self._pending_texts.add(key)
 
         delay = getattr(self.config.rate_limit, 'reply_delay_seconds', 3.0)
         if delay > 0:
@@ -1794,7 +1805,7 @@ class LiveRobot:
         try:
             self._msg_queue.put_nowait(OutboundMessage(text=text, reply_uid=reply_uid))
         except asyncio.QueueFull:
-            self._pending_texts.discard(text)
+            self._pending_texts.discard(key)
             self.logger.warning("queue full, cannot enqueue: reply_uid=%s text=%s", reply_uid, text)
 
     def _get_guard_level(self, event: dict[str, Any]) -> int:
