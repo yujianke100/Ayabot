@@ -22,7 +22,11 @@ EXPECTED_STRINGS = {
                 "_recent_guards",
                 # 第 25 轮：礼物「收到但没记上」的分项计数 + V2 批量序号
                 "_gift_seen", "gift_dropped_decode", "_v2_index",
-                "_gift_decode_sample"),
+                "_gift_decode_sample",
+                # 第 27 轮：事件类型计数 + 未识别礼物类事件 + 汇总日志
+                "KNOWN_GIFT_EVENTS", "_bump_event_count",
+                "_looks_like_gift_event", "_log_event_summary",
+                "unknown_gift_events"),
     "app.storage": ("guard_events", "record_guard_event"),
     "app.web.server": ("/api/update/check", "desired_states.json", "上舰记录", "魔搭",
                        "/guards",
