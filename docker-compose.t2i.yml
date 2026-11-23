@@ -1,0 +1,17 @@
+# 可选的本地 T2I 服务（HTML→图片渲染），给 AstrBot 插件用。
+#
+# **不要把这段放回 docker-compose.yml**：那条文件是 README 里给所有人用的
+# 一键启动入口（`docker compose up -d`），而 compose 会尝试构建所有带
+# `build:` 的服务 —— 指向一个不存在的目录会让整个 up 失败。
+#
+# 用法（先 clone 出 t2i-local 目录，或在本地自行准备）：
+#   docker compose -f docker-compose.yml -f docker-compose.t2i.yml up -d
+#
+# 如果只想要 ayabot：docker compose up -d  即可（默认文件里只有 ayabot）。
+services:
+  t2i-local:
+    build: ./t2i-local
+    container_name: t2i-local
+    restart: unless-stopped
+    ports:
+      - "6199:6199"

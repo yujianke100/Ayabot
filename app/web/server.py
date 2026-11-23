@@ -41,7 +41,7 @@ from app import tzutil
 from app.config import DEFAULT_ROOMS_DIR, atomic_write_text
 from app.danmaku_xml import MAX_XML_BYTES as _MAX_XML_BYTES
 from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room, set_rooms_base_dir, start_room_async, stop_room_async, restart_room_async, start_periodic_log_cleanup, cleanup_all_stale_pidfiles, last_exit_code
-from app.version import get_version_display
+from app.version import get_version, get_version_display
 
 _APP_VERSION = get_version_display()
 

@@ -7,3 +7,16 @@ __pycache__/
 data/
 config.yaml
 *.db
+
+# 用户私有数据：绝不能被 COPY . . 打进镜像
+# accounts/ 里是 B站 登录 Cookie（SESSDATA / bili_jct），
+# rooms/ 里是每个房间的 config.yaml + bot.db（观众统计、全部弹幕）。
+accounts/
+rooms/
+
+# 构建产物与本地缓存
+dist/
+build/
+scratch/
+*.spec
+*.exe

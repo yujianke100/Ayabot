@@ -4,6 +4,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 from pathlib import Path
 from typing import Optional
 
@@ -1025,7 +1026,20 @@ class StatsStore:
         self._conn.close()
 
     def delete_events_before(self, before_ts: int) -> dict[str, int]:
-        """删除指定时间戳之前的所有数据，返回删除条数."""
+        """删除指定时间戳之前的所有数据，返回删除条数。
+
+        **边界月份必须重算聚合**：月度汇总（`monthly_*_stats`）是增量累加的，
+        只删掉「已经没有明细的月份」是不够的 —— 部分删除的月份里，汇总仍然
+        把已删除的那部分算在里面，于是聚合永远大于明细（第 5/12 轮同样的问题）。
+        受影响月份必须在删除**之前**取（删完就查不到了）。
+        """
+        affected = [r[0] for r in self._conn.execute(
+            "SELECT DISTINCT month FROM gift_events WHERE ts < ?", (before_ts,)
+        ).fetchall()]
+        affected_guard = [r[0] for r in self._conn.execute(
+            "SELECT DISTINCT month FROM guard_events WHERE ts < ?", (before_ts,)
+        ).fetchall()]
+
         deleted_gift = self._conn.execute(
             "DELETE FROM gift_events WHERE ts < ?", (before_ts,)
         ).rowcount
@@ -1033,22 +1047,18 @@ class StatsStore:
             "DELETE FROM guard_events WHERE ts < ?", (before_ts,)
         ).rowcount
 
-        # 同时清理对应的月度汇总（重新计算）
-        # 简单做法：如果该月已无数据则删除汇总行
-        # 获取被删除事件涉及的月份
-        affected_months = self._conn.execute(
-            "SELECT DISTINCT month FROM gift_events WHERE ts >= ?",
-            (before_ts,),
-        ).fetchall()
-        
+        if deleted_gift and affected:
+            self.rebuild_monthly_stats(sorted(set(affected)))
+
+        # 整月已经没有明细的汇总行直接删掉（rebuild 之后这里通常已经没东西可删）
         deleted_blind = self._conn.execute(
             "DELETE FROM monthly_blindbox_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events WHERE event_type = 'SEND_GIFT')"
         ).rowcount
-        
+
         deleted_gift_stats = self._conn.execute(
             "DELETE FROM monthly_gift_stats WHERE month NOT IN (SELECT DISTINCT month FROM gift_events WHERE event_type = 'SEND_GIFT')"
         ).rowcount
-        
+
         self._conn.commit()
         return {
             "deleted_gift_events": deleted_gift,
