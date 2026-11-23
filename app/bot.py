@@ -117,6 +117,15 @@ class LiveRobot:
         # 因缺少 uid 而被丢弃的礼物数 + 最近发生时间（凭证失效/匿名连接的信号）
         self._dropped_no_uid = 0
         self._no_uid_ts: list[float] = []
+        # 「收到礼物但没记上」的分项计数（进心跳 → WebUI 横幅）。
+        # 用户报「所有统计都是 0」时，必须先能区分「没收到」「解不开」「去重误杀」
+        # 「缺 uname 被丢」，否则只能靠猜、靠让用户翻日志。
+        self._gift_seen = 0            # 进入统计逻辑的礼物件数
+        self._gift_recorded = 0        # 真正写进库的件数
+        self._dropped_gift_decode = 0  # V2 的 pb 缺失/解码失败
+        self._dropped_gift_dup = 0     # 去重命中（正常，灰度双推）
+        self._dropped_gift_no_uname = 0  # 缺 uname（旧代码静默丢弃）
+        self._gift_decode_sample = ""  # 第一份解码失败的 pb 片段，给排查用
         # 后台任务异常退出后自动重启的次数（进心跳，便于排查"机器人不说话"）
         self._bg_restarts = 0
         # 每个任务的重建时间戳（限流用），以及已放弃重建的任务名
@@ -234,6 +243,14 @@ class LiveRobot:
             "dropped_stats": getattr(self, "_dropped_stats", 0),
             # 因缺少 uid（匿名连接/凭证失效）被丢弃的礼物数：非 0 就是「统计全是 0」的原因
             "dropped_no_uid": getattr(self, "_dropped_no_uid", 0),
+            # 「收到礼物但没记上」的分项计数：seen 非 0 而 recorded 为 0 时，
+            # WebUI 会直接说清楚是哪一类丢的（解码失败 / 缺昵称 / 去重），
+            # 而不是让用户看到一排 0 然后猜「统计功能坏了」。
+            "gift_seen": getattr(self, "_gift_seen", 0),
+            "gift_recorded": getattr(self, "_gift_recorded", 0),
+            "gift_dropped_decode": getattr(self, "_dropped_gift_decode", 0),
+            "gift_dropped_dup": getattr(self, "_dropped_gift_dup", 0),
+            "gift_dropped_no_uname": getattr(self, "_dropped_gift_no_uname", 0),
             # 后台任务异常退出被自动重建的次数：非 0 说明曾经「活着但不说话」
             "bg_restarts": getattr(self, "_bg_restarts", 0),
             # 已放弃重建的任务（必现故障）：非空说明某项功能已彻底停摆
@@ -963,18 +980,48 @@ class LiveRobot:
         inner = data.get("data") if isinstance(data, dict) else None
         pb = inner.get("pb") if isinstance(inner, dict) else None
         if not pb:
-            self.logger.debug(
-                "SEND_GIFT_V2 without pb payload: keys=%s",
-                list(inner.keys()) if isinstance(inner, dict) else inner,
-            )
+            # 没有 pb 不代表没有礼物数据：部分灰度事件把同样的字段平铺在 JSON 里。
+            # 以前这里直接 return（debug 日志），于是一整类事件彻底消失。
+            flat = _extract_gift_payload(event)
+            if flat is not None:
+                self.logger.info("SEND_GIFT_V2 没有 pb，改用 JSON 字段解析")
+                await self._handle_gift_payload(
+                    flat["raw"], "SEND_GIFT", gift_name_fallback=flat["gift_name"])
+                return
+            self._dropped_gift_decode += 1
+            if not self._gift_decode_sample:
+                self._gift_decode_sample = json.dumps(
+                    inner, ensure_ascii=False)[:120] if inner is not None else ""
+            now_mono = time.time()
+            if now_mono - getattr(self, "_last_decode_warn_ts", 0.0) > 60:
+                self._last_decode_warn_ts = now_mono
+                self.logger.warning(
+                    "SEND_GIFT_V2 缺少 pb 字段且无法按 JSON 解析，已累计 %s 条礼物没记上。"
+                    "keys=%s",
+                    self._dropped_gift_decode,
+                    list(inner.keys()) if isinstance(inner, dict) else type(inner).__name__,
+                )
             return
 
         payloads = decode_send_gift_v2(pb)
         if not payloads:
-            self.logger.warning("SEND_GIFT_V2 decode failed (pb len=%s)", len(pb))
+            self._dropped_gift_decode += 1
+            if not self._gift_decode_sample:
+                self._gift_decode_sample = str(pb)[:120]
+            # 每 60 秒最多吵一次；但计数每次都加 —— WebUI 靠计数判断「解码坏了」
+            now_mono = time.time()
+            if now_mono - getattr(self, "_last_decode_warn_ts", 0.0) > 60:
+                self._last_decode_warn_ts = now_mono
+                self.logger.warning(
+                    "SEND_GIFT_V2 解码失败（pb 长度 %s），已累计 %s 条礼物没记上。"
+                    "如果是协议改了，需要更新解析；样本：%s",
+                    len(pb), self._dropped_gift_decode, str(pb)[:80],
+                )
             return
 
-        for payload in payloads:
+        for idx, payload in enumerate(payloads):
+            # 同一批里的第几件：缺 tid 时用它避免去重键撞车（否则只会记第 1 件）
+            payload["_v2_index"] = idx
             await self._handle_gift_payload(payload, "SEND_GIFT")
 
     async def _handle_gift_payload(
@@ -998,15 +1045,25 @@ class LiveRobot:
 
         # 灰度期间同一件礼物可能同时走新旧协议推送，按 tid/rnd 去重，避免重复计账
         # （只对新协议事件做去重判断：旧协议 COMBO_SEND 可能与 SEND_GIFT 同 tid 但语义不同）
+        self._gift_seen += 1
+        if not uname:
+            # 没有昵称不影响统计归属（uid 才是主键），补一个占位并计数
+            self._dropped_gift_no_uname += 1
+            uname = f"用户{uid}"
         is_v2 = payload.get("src_protocol") == "SEND_GIFT_V2"
+        tid_or_rnd = str(payload.get("tid") or payload.get("rnd") or "")
+        # 缺 tid/rnd 时，同一个事件批量里的第 N 件必须参与键，否则
+        # 「盲盒一次开 3 个同款」会得到三个完全相同的键 → 只记 1 件。
         dedupe_key = (
             uid,
-            str(payload.get("tid") or payload.get("rnd") or "")
-            or f"{gift_name}:{gift_num}:{payload.get('timestamp') or 0}",
+            tid_or_rnd
+            or f"{gift_name}:{gift_num}:{payload.get('timestamp') or 0}:"
+               f"{payload.get('_v2_index', -1)}:{payload.get('giftId') or 0}",
         )
         now_mono = time.time()
         seen = self._recent_gifts.get(dedupe_key)
         if is_v2 and seen is not None and now_mono - seen < 120:
+            self._dropped_gift_dup += 1
             self.logger.debug("duplicate gift skipped: %s %s", uname, gift_name)
             return
         self._recent_gifts[dedupe_key] = now_mono
@@ -1051,11 +1108,19 @@ class LiveRobot:
             profit_value=profit,
             raw_json=json.dumps(payload, ensure_ascii=False),
         )
-        self._record_stat(
+        stat_result: dict[str, bool] = {}
+
+        def _write_gift() -> None:
+            stat_result["ok"] = self.store.record_gift_event(event_row)
+
+        recorded = self._record_stat(
             "礼物统计",
             label=f"uid={uid} {uname!r} {gift_name} x{gift_num} ts={event_row.ts}",
-            write=lambda: self.store.record_gift_event(event_row),
+            write=_write_gift,
         )
+        # record_gift_event 返回 False = 去重命中（没新增行），别算进「已记上」
+        if recorded and stat_result.get("ok", True):
+            self._gift_recorded += 1
 
         if not self.config.features.thanks_enabled:
             return
@@ -2081,12 +2146,26 @@ def _extract_gift_payload(event: dict[str, Any]) -> Optional[dict[str, Any]]:
         return None
 
     uid = _safe_int(payload.get("uid"))
-    uname = str(payload.get("uname", ""))
+    uname = str(payload.get("uname") or "")
+    if not uname:
+        # 有些事件把昵称放在 sender_uinfo / user_info 里。取不到就留空，
+        # **不要因此丢掉整条礼物** —— 以前 `if uid <= 0 or not uname: return None`
+        # 会让「少一个昵称字段」变成「整场直播的统计都是 0」，且一条日志都没有。
+        for holder_key in ("sender_uinfo", "user_info", "user", "uinfo"):
+            holder = payload.get(holder_key)
+            if isinstance(holder, dict):
+                uname = str(holder.get("uname") or holder.get("name") or "")
+                if not uname:
+                    base = holder.get("base")
+                    if isinstance(base, dict):
+                        uname = str(base.get("name") or base.get("uname") or "")
+                if uname:
+                    break
     gift_name = str(payload.get("giftName") or payload.get("gift_name") or "gift")
     gift_num = _safe_int(payload.get("num") or payload.get("gift_num") or 1)
     event_type = str(data.get("cmd") or event.get("type") or "SEND_GIFT")
 
-    if uid <= 0 or not uname:
+    if uid <= 0:
         return None
 
     return {

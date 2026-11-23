@@ -72,14 +72,23 @@ def main() -> int:
     (proj / "data" / "config.yaml").write_text(
         (ROOT / "config.example.yaml").read_text(encoding="utf-8"), encoding="utf-8")
 
+    cli_port = _free_port()
+    old_argv = sys.argv[:]
+    # 命令行 --port 必须被采纳（以前 args.port 解析出来根本没人读）
+    sys.argv = ["Ayabot.exe", "--port", str(cli_port)]
     spec = importlib.util.spec_from_file_location(
         "tray_under_test", proj / "scripts" / "tray_win.py")
     tray = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(tray)
+    try:
+        spec.loader.exec_module(tray)
+    finally:
+        sys.argv = old_argv
 
     busy_sock = None
     try:
         ok("DATA_DIR 隔离到临时目录", "ayabot_tray_" in str(tray.DATA_DIR), tray.DATA_DIR)
+        ok("命令行 --port 被采纳", tray._port == cli_port,
+           f"{tray._port} != {cli_port}")
         ok("配置路径是绝对路径",
            tray._RESOLVED_CONFIG_PATH.is_absolute()
            and str(tray.DATA_DIR) in str(tray._RESOLVED_CONFIG_PATH),
@@ -205,6 +214,8 @@ def main() -> int:
         ok("main 启动失败会弹窗", "_webui_failure_hint(err)" in SRC)
         ok("main 挂了看门狗", "target=_webui_watchdog" in SRC)
         ok("退出时会先停 WebUI", "icon.stop()" in SRC and "_stop_webui()" in SRC)
+        ok("命令行端口会落盘", 'if getattr(args, "port", None):' in SRC
+           and "_save_port(_port)" in SRC)
     finally:
         if busy_sock is not None:
             busy_sock.close()

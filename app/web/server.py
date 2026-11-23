@@ -3031,6 +3031,23 @@ async def api_list_rooms(request: Request):
         dead = hb.get("bg_dead") or []
         if isinstance(dead, list) and dead:
             r["bg_dead"] = [str(x) for x in dead]
+        # 「收到礼物但没记上」：分成解码失败 / 缺昵称 / 缺 uid / 去重四类。
+        # 以前只有 dropped_no_uid 一项，其他三类都是静默丢弃 —— 用户报
+        # 「统计全是 0」时我们完全无法判断是哪一类。
+        seen = int(hb.get("gift_seen") or 0)
+        recorded = int(hb.get("gift_recorded") or 0)
+        decode_fail = int(hb.get("gift_dropped_decode") or 0)
+        no_uname = int(hb.get("gift_dropped_no_uname") or 0)
+        no_uid = int(hb.get("dropped_no_uid") or 0)
+        if decode_fail or (seen > 0 and recorded == 0):
+            r["gift_issue"] = {
+                "seen": seen,
+                "recorded": recorded,
+                "decode_failed": decode_fail,
+                "no_uid": no_uid,
+                "no_uname": no_uname,
+                "dup": int(hb.get("gift_dropped_dup") or 0),
+            }
         # 上次崩溃记录
         crash = _read_crash_info(rid)
         if crash:
@@ -5953,6 +5970,32 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     class="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded text-xs whitespace-nowrap">
                 📱 去扫码登录
             </button>
+        </div>
+
+        <!-- 礼物统计记不上（收到事件但一条都没入库，或解码失败） -->
+        <div v-if="selectedRoom && selectedRoom.gift_issue"
+             class="bg-red-50 border border-red-200 rounded-xl p-3 mb-4 text-xs text-red-800">
+            <div class="font-bold">⚠️ 收到礼物但没能记进统计（所以排行/统计会是 0）</div>
+            <div class="mt-1">
+                收到 <strong>{{ selectedRoom.gift_issue.seen }}</strong> 件，记上
+                <strong>{{ selectedRoom.gift_issue.recorded }}</strong> 件；
+                其中解码失败 {{ selectedRoom.gift_issue.decode_failed }}、
+                缺用户信息 {{ selectedRoom.gift_issue.no_uid }}、
+                缺昵称 {{ selectedRoom.gift_issue.no_uname }}、
+                重复 {{ selectedRoom.gift_issue.dup }}。
+            </div>
+            <div class="mt-1">
+                <span v-if="selectedRoom.gift_issue.decode_failed">
+                    「解码失败」说明 B站换了礼物协议，需要更新软件版本 ——
+                    请把这段提示和房间日志发给我。
+                </span>
+                <span v-else-if="selectedRoom.gift_issue.no_uid">
+                    缺用户信息通常是 B站账号登录态失效，请到「用户管理 → B站账号」重新扫码。
+                </span>
+                <span v-else>
+                    请把这段提示和房间日志发给我，我按计数判断是哪一类丢了。
+                </span>
+            </div>
         </div>
 
         <!-- 后台功能停摆提示（进程/心跳都正常，但某项功能已经不工作） -->

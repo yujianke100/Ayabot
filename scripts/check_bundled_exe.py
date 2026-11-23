@@ -19,7 +19,10 @@ from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
 EXPECTED_MODULES = ("app.gift_v2", "app.tzutil")
 EXPECTED_STRINGS = {
     "app.bot": ("SEND_GIFT_V2", "record_guard_event", "USER_TOAST_MSG_V2",
-                "bot_status.json", "_recent_guards"),
+                "_recent_guards",
+                # 第 25 轮：礼物「收到但没记上」的分项计数 + V2 批量序号
+                "_gift_seen", "gift_dropped_decode", "_v2_index",
+                "_gift_decode_sample"),
     "app.storage": ("guard_events", "record_guard_event"),
     "app.web.server": ("/api/update/check", "desired_states.json", "上舰记录", "魔搭",
                        "/guards",
@@ -39,12 +42,35 @@ EXPECTED_STRINGS = {
                        # v1.2.7: 机器人配置模板带全同级字段（签文 / 关键词规则 / 冷却限流）
                        "AyabotBotTpl", "__ayabot_bot_tpl", "botTplSummaryText",
                        # v1.2.8: 录播 XML 导入 + 全局时区口径
-                       "danmaku-xml", "ayabot_date", "_day_bounds", "/api/time"),
-    "app.auth": ("auth_status.json", "needs_login"),
+                       "danmaku-xml", "ayabot_date", "_day_bounds", "/api/time",
+                       # 第 19 轮：房间级权限（默认拒绝）+ 免登录白名单收敛 + 进程内状态清理
+                       "_USER_ROOM_MUTATIONS", "_PUBLIC_EXTERNAL_GETS",
+                       "_purge_stale_state", "ACL deny",
+                       # 第 20 轮：非 admin 一律收紧、密钥接口、图片代理加固
+                       "_SECRET_PATHS", "_redact_llm_key", "_check_proxy_image_url",
+                       "_ALLOWED_IMAGE_SUFFIXES", "_GIFT_CACHE_RETRY_AT",
+                       # 第 21 轮：日志/更新日志转义，登录限速，请求体上限
+                       "escapeHtml", "_login_limited", "_MAX_REQUEST_BYTES",
+                       "_USERS_CORRUPT",
+                       # 第 22 轮：房间号 / uid 白名单 + 目录穿越兜底
+                       "_valid_ident", "_safe_subdir", "_IDENT_RE",
+                       "_ACCOUNT_PATH_RE",
+                       # 第 23 轮：等扫码时不被当僵尸 + 保存失败要 5xx
+                       "_room_waiting_login", "配置保存失败",
+                       # 第 25 轮：礼物统计记不上时的界面提示
+                       "gift_issue", "gift_dropped_no_uname"),
+    "app.auth": ("auth_status.json", "needs_login",
+                 # 第 23 轮：等扫码期间写心跳，守护进程据此不重启
+                 "_write_waiting_heartbeat", "waiting_login"),
     # v1.2.5: 新建房间不再依赖根目录模板（多路径查找 + 内置默认值兜底）
-    "app.config": ("find_template_config", "write_default_config"),
+    # 第 23 轮：心跳文件名提成共享常量（bot/auth/WebUI 三处共用一个）
+    "app.config": ("find_template_config", "write_default_config",
+                   "bot_status.json", "HEARTBEAT_FILE"),
     # v1.2.1: 自动清 MOTW（托盘启动时；入口脚本在 CArchive 顶层，不在 PYZ 里）
-    "tray_win": ("Zone.Identifier", "_unblock_self"),
+    "tray_win": ("Zone.Identifier", "_unblock_self",
+                 # 第 24 轮：启动失败要能报出来 + WebUI 看门狗 + 绝对路径兜底
+                 "_webui_watchdog", "_webui_failure_hint", "_RESOLVED_CONFIG_PATH",
+                 "_port_serving", "_last_error"),
 }
 
 

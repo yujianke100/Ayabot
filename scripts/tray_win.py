@@ -177,6 +177,12 @@ def _release_lock() -> None:
 
 # ── 全局状态 ──
 _port = _read_port()
+# 命令行 --port 必须生效（以前 args.port 解析出来就没人用，写的是「设置端口」菜单那条路径）
+if getattr(args, "port", None):
+    if 1024 <= int(args.port) <= 65535:
+        _port = int(args.port)
+    else:
+        print(f"--port {args.port} 不合法（需 1024-65535），忽略")
 _stop_event = threading.Event()
 
 # ── In-process uvicorn ──
@@ -852,6 +858,13 @@ def main() -> None:
     _unblock_self()
 
     logger.info("Ayabot starting… data dir: %s", DATA_DIR)
+    # 命令行给了端口就记住它（否则用户以为「设好了」，下次启动又跑回旧端口）
+    if getattr(args, "port", None):
+        try:
+            _save_port(_port)
+            logger.info("port from CLI persisted: %s", _port)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("persist CLI port failed: %s", exc)
 
     # 确保 config.yaml 存在（优先嵌入式，降级到 exe 同级）
     cfg_dst = DATA_DIR / "config.yaml"
