@@ -67,7 +67,10 @@ def _read_port() -> int:
 
 
 def _save_port(port: int) -> None:
-    _PORT_FILE.write_text(str(port), encoding="utf-8")
+    """原子写。截断的 port.txt 会让下次启动退回默认端口，
+    用户收藏的地址（以及所有写着那个端口的文档）就都失效了。"""
+    from app.config import atomic_write_text
+    atomic_write_text(_PORT_FILE, str(port))
 
 
 # ── 日志（自动轮转，最多保留 5000 行） ──
@@ -179,11 +182,32 @@ _stop_event = threading.Event()
 # ── In-process uvicorn ──
 
 
-def _start_webui(config_path: str | None = None) -> None:
-    """在后台线程启动 WebUI（in-process，兼容 PyInstaller）。
-    必须先调用 init_app 初始化配置，再启动 uvicorn。
+#: 配置文件的**绝对**路径。托盘自己的 `_restart_webui()` 以前调
+#: `_start_webui()` 不传参数，于是它去加载相对路径 "config.yaml" —— 冻结模式下
+#: 当前目录是「用户双击 exe 时所在的目录」（下载目录、桌面、System32…），
+#: 那里通常没有 config.yaml，`load_config` 直接抛异常、`init_app` 失败、
+#: WebUI 静默消失，而「设置端口」的弹窗还在说「已切换成功」。
+#: 所有启动路径都必须走这个常量。
+_RESOLVED_CONFIG_PATH: Path = DATA_DIR / "config.yaml"
+
+
+def _port_serving(port: int, timeout: float = 1.0) -> bool:
+    """端口上真的有人在监听吗。"""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _start_webui(config_path: str | None = None) -> bool:
+    """在后台线程启动 WebUI（in-process，兼容 PyInstaller），返回是否真的起来了。
+
+    **必须返回 bool**：以前它在 `server.run()` 之前就 `q.put("ready")`，
+    于是「端口被占用 / 绑定失败 / 线程立刻死掉」这些情况一律被当成启动成功：
+    托盘图标正常出现、浏览器打开是空白页、日志里只有一行 uvicorn 的 traceback，
+    用户看到的就是「双击了没反应 / 后台打不开」。
     """
-    import queue as _queue
     import uvicorn
     from app.web.server import app, init_app
 
@@ -193,18 +217,22 @@ def _start_webui(config_path: str | None = None) -> None:
     if sys.stdout is None:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")
 
+    cfg_file = str(config_path or _RESOLVED_CONFIG_PATH)
+
     # 关键: 初始化配置 (DB路径、认证信息、LLM配置等)
     try:
         from app.config import load_config
-        cfg = load_config(config_path or "config.yaml")
-        init_app(config=cfg, config_path=config_path or "config.yaml")
-        logger.info("init_app done, config_path=%s", config_path)
+        cfg = load_config(cfg_file)
+        init_app(config=cfg, config_path=cfg_file)
+        logger.info("init_app done, config_path=%s", cfg_file)
     except Exception as exc:
         logger.error("init_app failed: %s", exc, exc_info=True)
-        return
+        _start_webui._last_error = f"读取配置失败：{exc}"
+        return False
 
+    _start_webui._intentional_stop = False
+    _start_webui._last_error = ""
     logger.info("starting WebUI in-process: port=%s", _port)
-    q: _queue.Queue = _queue.Queue()
 
     def _run() -> None:
         try:
@@ -217,38 +245,121 @@ def _start_webui(config_path: str | None = None) -> None:
             )
             server = uvicorn.Server(config)
             _start_webui._server = server
-            q.put("ready")
             server.run()
-        except Exception as exc:
+        except SystemExit as exc:
+            # uvicorn 在端口绑定失败时走 sys.exit(1)
+            _start_webui._last_error = f"端口 {_port} 绑定失败（可能被其他程序占用）"
+            logger.error("uvicorn exited: %s (port=%s)", exc, _port)
+        except Exception as exc:  # noqa: BLE001
+            _start_webui._last_error = f"WebUI 线程异常：{exc}"
             logger.error("uvicorn thread crashed", exc_info=True)
-            q.put(exc)
 
     t = threading.Thread(target=_run, daemon=True, name="uvicorn")
+    _start_webui._thread = t
     t.start()
 
-    try:
-        status = q.get(timeout=15)
-        if isinstance(status, Exception):
-            logger.error("WebUI failed to start: %s", status)
-            return
-        logger.info("WebUI started (in-process)")
-    except _queue.Empty:
-        logger.error("WebUI start timed out after 15s — check log for details")
-        return
+    # 只有 uvicorn 真的完成 startup（server.started=True）才算成功
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        server = getattr(_start_webui, "_server", None)
+        if getattr(server, "started", False):
+            logger.info("WebUI started (in-process) on port %s", _port)
+            return True
+        if not t.is_alive():
+            break
+        time.sleep(0.05)
+
+    if not _start_webui._last_error:
+        _start_webui._last_error = f"WebUI 启动超时（15s，端口 {_port}）"
+    logger.error("WebUI failed to start: %s", _start_webui._last_error)
+    return False
+
+
+def _webui_failure_hint(err: str) -> str:
+    """把启动失败翻译成用户能照做的一句话。"""
+    if "绑定失败" in err or "占用" in err or "10048" in err:
+        return (
+            f"WebUI 端口 {_port} 被其他程序占用了，后台打不开。\n\n"
+            f"处理办法：右键托盘图标 → 设置端口，换一个别的端口（比如 {_port + 1}）。"
+        )
+    if "读取配置失败" in err:
+        return (
+            f"读取配置文件失败：\n{DATA_DIR / 'config.yaml'}\n\n"
+            "处理办法：确认该文件存在且格式正确（可以对比 config.example.yaml）。"
+        )
+    return f"WebUI 启动失败：{err}"
 
 
 def _stop_webui() -> None:
+    _start_webui._intentional_stop = True
     server = getattr(_start_webui, "_server", None)
+    thread = getattr(_start_webui, "_thread", None)
     if server:
         logger.info("stopping WebUI...")
         server.should_exit = True
-        logger.info("WebUI stop signaled")
+        # 不能只设置标志就返回：改端口时紧接着要在**同一个端口**上重新监听，
+        # 旧 server 还没释放就会绑定失败。等它真的停（最多 8 秒）。
+        for _ in range(80):
+            if thread is None or not thread.is_alive():
+                break
+            time.sleep(0.1)
+        logger.info(
+            "WebUI stop signaled (thread alive=%s)",
+            bool(thread is not None and thread.is_alive()),
+        )
 
 
-def _restart_webui() -> None:
+def _restart_webui(config_path: str | None = None) -> bool:
+    """停掉再起，返回新实例是否真的起来了。"""
     _stop_webui()
-    time.sleep(1)
-    _start_webui()
+    return _start_webui(config_path or str(_RESOLVED_CONFIG_PATH))
+
+
+def _webui_watchdog() -> None:
+    """WebUI 线程意外死亡时自动重启（托盘还活着、后台已经没了的兜底）。
+
+    和第 14 轮修「后台任务静默死亡」是同一类问题，只是这一层发生在托盘进程里：
+    uvicorn 线程一旦退出，托盘图标还在、菜单还能点，但所有房间机器人都没了，
+    用户看到的正是「机器人莫名其妙关了」。
+    """
+    restarts: list[float] = []
+    gave_up = False
+    while not _stop_event.is_set():
+        time.sleep(20)
+        try:
+            if getattr(_start_webui, "_intentional_stop", False):
+                continue
+            server = getattr(_start_webui, "_server", None)
+            if server is None:
+                continue
+            if getattr(server, "started", False) and not server.should_exit:
+                continue
+            now = time.time()
+            restarts = [x for x in restarts if now - x < 600]
+            if len(restarts) >= 3:
+                if not gave_up:
+                    gave_up = True
+                    logger.error("WebUI 连续 %d 次意外停止，已放弃自动重启", len(restarts))
+                    threading.Thread(
+                        target=_show_message,
+                        args=(
+                            "Ayabot 后台已停止",
+                            "WebUI 反复异常停止，已停止自动重启。\n\n"
+                            f"请查看日志：{log_path}\n"
+                            "如果反复出现，退出软件重新打开一次；仍不行请把日志发给作者。",
+                        ),
+                        daemon=True,
+                    ).start()
+                continue
+            restarts.append(now)
+            logger.warning(
+                "检测到 WebUI 已停止（started=%s），尝试第 %d 次自动重启",
+                getattr(server, "started", False), len(restarts),
+            )
+            if not _restart_webui():
+                logger.error("自动重启失败：%s", getattr(_start_webui, "_last_error", ""))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("webui watchdog error: %s", exc)
 
 
 def _open_webui() -> None:
@@ -319,10 +430,23 @@ if ($port) {{ Write-Host $port }}
             return
         if new_port == _port:
             return
+        old_port = _port
         _port = new_port
-        _save_port(_port)
-        _restart_webui()
-        _show_message("端口已更改", f"WebUI 已切换到端口 {_port}")
+        if _restart_webui():
+            _save_port(_port)
+            _show_message("端口已更改", f"WebUI 已切换到端口 {_port}")
+        else:
+            # 起不来就把端口退回原值：否则下次启动也从坏端口起，
+            # 用户会连托盘菜单都以为「已经改好了」。
+            _port = old_port
+            if _port_serving(old_port):
+                _save_port(old_port)
+            err = getattr(_start_webui, "_last_error", "")
+            _show_message(
+                "端口未生效",
+                f"切到端口 {new_port} 失败：{err or '未知原因'}\n\n"
+                f"已退回原来的端口 {old_port}。换个端口再试（建议 20000 以上）。",
+            )
     except Exception as exc:
         logger.error("port prompt failed: %s", exc)
         _show_message("错误", f"端口设置失败: {exc}")
@@ -528,10 +652,13 @@ def _copy_embedded_config(dst: Path) -> None:
     candidates.extend([BASE_DIR / "config.yaml", BASE_DIR / "config.example.yaml"])
     for src in candidates:
         if src.exists():
-            import shutil
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(src), str(dst))
-            logger.info("copied config from %s -> %s", src, dst)
+            try:
+                from app.config import atomic_write_text
+                # 原子写：半截 config.yaml 会让首次启动直接失败（而且要人工修）
+                atomic_write_text(dst, src.read_text(encoding="utf-8"))
+                logger.info("copied config from %s -> %s", src, dst)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("copy config failed: %s", exc)
             return
     logger.warning("no config.yaml found (embedded or at %s), WebUI may not work", BASE_DIR)
 
@@ -589,14 +716,14 @@ def _restore_running_rooms() -> None:
         )
 
 
-def _create_tray_icon() -> None:
-    """创建系统托盘图标."""
+def _create_tray_icon() -> bool:
+    """创建系统托盘图标。返回 False 表示托盘没能起来（调用方必须继续提供服务）。"""
     try:
         import pystray
         from PIL import Image, ImageDraw
     except ImportError:
         logger.error("pystray or Pillow not installed. Run: pip install pystray pillow")
-        return
+        return False
 
     # 生成图标 — 按优先级搜索多个位置和文件名
     icon_size = 64
@@ -666,6 +793,7 @@ def _create_tray_icon() -> None:
 
     icon = pystray.Icon("ayabot", icon_img, label, menu)
     icon.run()
+    return True
 
 
 def _unblock_self() -> None:
@@ -697,7 +825,28 @@ def _unblock_self() -> None:
 def main() -> None:
     # 单实例检查
     if not _acquire_lock():
-        logger.warning("another instance already running, exiting")
+        # 以前是直接 return：用户双击第二次，屏幕上一**点反应都没有**，
+        # 很容易被当成「软件坏了/自己关掉了」，然后去任务管理器强杀。
+        # 已经有实例在跑时，正确反应是把他的浏览器指过去。
+        logger.warning("another instance already running, opening existing WebUI")
+        port = _read_port()
+        try:
+            webbrowser.open(f"http://127.0.0.1:{port}")
+        except Exception:  # noqa: BLE001
+            pass
+        threading.Thread(
+            target=_show_message,
+            args=(
+                "Ayabot 已经在运行",
+                f"已经有一个 Ayabot 在后台运行（端口 {port}）。\n\n"
+                f"已经帮你打开了管理后台：http://127.0.0.1:{port}/\n\n"
+                "如果浏览器没打开，请手动访问上面的地址。\n"
+                "要重启软件：先右键托盘图标 → 退出，再重新打开。",
+            ),
+            daemon=True,
+        ).start()
+        # 留一点时间让弹窗线程起来
+        time.sleep(1.5)
         return
 
     _unblock_self()
@@ -711,7 +860,19 @@ def main() -> None:
 
     # 启动 WebUI — 传入配置路径确保 init_app 能正确解析
     cfg_path = str(DATA_DIR / "config.yaml")
-    _start_webui(config_path=cfg_path)
+    webui_ok = _start_webui(config_path=cfg_path)
+    if not webui_ok:
+        # 不能只写日志：windowed 模式没有控制台，用户只会看到「托盘图标在、
+        # 点开后台是空白」。必须弹窗告诉他怎么办。
+        err = getattr(_start_webui, "_last_error", "")
+        logger.error("首次启动 WebUI 失败：%s", err)
+        threading.Thread(
+            target=_show_message,
+            args=("Ayabot 后台启动失败", _webui_failure_hint(err)),
+            daemon=True,
+        ).start()
+    # WebUI 线程意外死亡的自愈（托盘还活着但后台没了）
+    threading.Thread(target=_webui_watchdog, daemon=True, name="webui-watchdog").start()
 
     # 自动恢复之前运行的房间
     _restore_running_rooms()
@@ -721,7 +882,30 @@ def main() -> None:
 
     # 主线程：显示托盘图标
     logger.info("tray icon starting…")
-    _create_tray_icon()
+    try:
+        tray_ok = _create_tray_icon()
+    except Exception as exc:  # noqa: BLE001
+        # pystray 在无桌面会话（远程/服务方式启动）、图标被占用、
+        # 或者 pillow 版本不兼容时会直接抛。以前异常冒出去 → main() 结束 →
+        # 进程退出 → 后台 WebUI 和所有房间机器人一起消失，
+        # 而且 --windowed 模式下连一行提示都没有，用户看到的就是
+        # 「软件自己关了」。托盘只是外壳，它挂了不该带走后台。
+        logger.error("托盘图标创建失败: %s", exc, exc_info=True)
+        tray_ok = False
+    if not tray_ok:
+        logger.error("托盘不可用，改为纯后台运行（WebUI 仍在 http://127.0.0.1:%s/）", _port)
+        threading.Thread(
+            target=_show_message,
+            args=(
+                "Ayabot 已在后台运行（托盘图标不可用）",
+                f"系统托盘图标没能显示，但后台服务正常运行。\n\n"
+                f"请在浏览器打开：http://127.0.0.1:{_port}/\n\n"
+                "要退出软件，请在任务管理器结束 Ayabot 进程，或重启电脑。",
+            ),
+            daemon=True,
+        ).start()
+        # 主线程停在这里，让 uvicorn 线程和房间机器人继续跑
+        _stop_event.wait()
 
 
 def _delayed_open_browser() -> None:
