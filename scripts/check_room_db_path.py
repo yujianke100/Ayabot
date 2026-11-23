@@ -183,10 +183,24 @@ def main() -> int:
         ok("外部接口返回 1 个用户", len(ext) == 1, ext)
         if ext:
             e = ext[0]
-            ok("外部 value = 10.2 元（旧版会是 102）", abs(float(e["value"]) - 10.2) < 0.01, e["value"])
-            ok("外部 profit = -44.8 元（旧版会是 -448）", abs(float(e["profit"]) + 44.8) < 0.01,
-               e["profit"])
+            # 单位契约：外部接口统一用「电池」（金瓜子÷100；盲盒 actual_value 本身是电池）。
+            # 一般礼物 5000 金瓜子 = 50 电池，盲盒 52 电池 → 102 电池 = 10.2 元
+            ok("外部 value = 102 电池（与 user_stats 同单位）", int(e["value"]) == 102, e["value"])
+            ok("外部 profit = -448 电池", int(e["profit"]) == -448, e["profit"])
+            ok("外部 value_yuan = 10.2", abs(float(e["value_yuan"]) - 10.2) < 0.01, e["value_yuan"])
             ok("外部 count = 3 件（SUM(gift_num)，不是行数）", int(e["count"]) == 3, e["count"])
+
+            # 两个外部接口的金额单位必须一致（曾经一个改成元、一个还是电池，差 10 倍）
+            code2, body2 = _get(f"/api/external/user_stats?room_id={ROOM_CUSTOM}&uid=1001"
+                                f"&period=all&token={API_TOKEN}")
+            ok("user_stats 返回 200", code2 == 200, body2[:120])
+            us = json.loads(body2) if code2 == 200 else {}
+            us_val = int((us.get("gift") or {}).get("total_value", -1))
+            ok("两个外部接口金额同单位（电池）", us_val == int(e["value"]),
+               {"user_stats": us_val, "ranking": e["value"]})
+            ok("user_stats 的盲盒利润同为电池",
+               int((us.get("blindbox") or {}).get("profit", 0)) == int(e["profit"]),
+               {"user_stats": (us.get("blindbox") or {}).get("profit"), "ranking": e["profit"]})
 
         # 默认库的房间也应该正常（不能被自定义路径的修复带坏）
         code, body = _get(f"/api/rooms/{ROOM}/ranking?rStart=&rEnd=&rType=all")

@@ -781,9 +781,19 @@ def main() -> int:
         ok(f"6 万条全部落库", res_big.get("stats", {}).get("inserted") == n_gift,
            res_big.get("stats", {}).get("inserted"))
         ok("导入期间实时写入 0 次失败", not live_err, live_err[:3])
-        # 分批提交后单次持锁应在几十毫秒；整体一个事务时这里会是整段导入耗时
-        ok(f"单次写锁等待 < 0.5s（实测 {max_wait[0]*1000:.0f}ms，导入总计 {import_s:.2f}s）",
-           max_wait[0] < 0.5, max_wait[0])
+        # 时间阈值只作粗筛：同一台机器上抖动很大（实测 90~540ms），
+        # 真正要守的是「实时写入不被挡住太久」和「导入是分批提交的」。
+        # 结构性断言（下面那条）才是确定性的，改回整体事务它立刻变红。
+        ok(f"单次写锁等待 < 1.5s（实测 {max_wait[0]*1000:.0f}ms，导入总计 {import_s:.2f}s）",
+           max_wait[0] < 1.5, max_wait[0])
+        src_srv = (ROOT / "app" / "web" / "server.py").read_text(encoding="utf-8")
+        seg = src_srv[src_srv.index("def _import_xml_blocking"):]
+        seg = seg[:seg.index("\n@app.")]
+        import re as _re
+        m_ce = _re.search(r"commit_every\s*=\s*(\d+)", seg)
+        ok("导入确实是每 N 条提交一次（N 在 100~5000 之间）",
+           bool(m_ce) and 100 <= int(m_ce.group(1)) <= 5000,
+           m_ce.group(1) if m_ce else "没有 commit_every")
         # 这份大数据要清掉，别影响后面的用例
         from app.storage import StatsStore as _SS
         _st = _SS(db_path)

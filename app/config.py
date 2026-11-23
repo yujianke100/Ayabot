@@ -593,6 +593,40 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
     }
 
 
+def atomic_write_text(path: str | Path, text: str, backup: bool = False) -> None:
+    """原子写文本文件：先写同目录临时文件，再 rename 覆盖。
+
+    config.yaml 是「一坏就全废」的文件（房间起不来、关键词/签文全丢）。
+    直接 `write_text` 在写到一半时被打断（进程被杀、断电、Windows 上杀软锁文件、
+    磁盘满）会留下一个**截断的 YAML**。更阴的是：截断后的 YAML 有时**仍然能解析**
+    （只是尾巴上整段整段没了），于是 load_config 不报错、房间照常启动，
+    但关键词回复/签文这些配置**静默消失** —— 实测截断到 70% 时 keyword_reply
+    变成 False 而加载完全正常。
+    `os.replace` 在 Windows / POSIX 上都是原子的，要么旧内容、要么新内容。
+    backup=True 时把替换前的文件留成 `.bak`，给用户一条手工恢复的路。
+    """
+    import os as _os
+
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(f".{p.name}.tmp{_os.getpid()}")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        if backup and p.exists():
+            try:
+                Path(str(p) + ".bak").write_text(p.read_text(encoding="utf-8"),
+                                                 encoding="utf-8")
+            except OSError:
+                pass  # 备份失败不能挡住保存本身
+        _os.replace(tmp, p)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
 def update_config_from_dict(raw: dict[str, Any], cfg_path: str) -> bool:
     """从 dict 更新 config.yaml (覆盖写入)."""
     try:
@@ -630,9 +664,10 @@ def update_config_from_dict(raw: dict[str, Any], cfg_path: str) -> bool:
         if "runtime" in raw:
             existing.setdefault("runtime", {}).update(raw["runtime"])
 
-        Path(cfg_path).write_text(
+        atomic_write_text(
+            cfg_path,
             yaml.dump(existing, default_flow_style=False, allow_unicode=True),
-            encoding="utf-8",
+            backup=True,
         )
         return True
     except Exception as exc:

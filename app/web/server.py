@@ -2828,16 +2828,18 @@ def _load_room_raw_config(room_id: str) -> dict:
 
 
 def _save_room_raw_config(room_id: str, raw: dict) -> bool:
-    """保存 dict 到房间的 config.yaml。"""
-    from app.config import get_room_path
+    """保存 dict 到房间的 config.yaml（原子写，避免半截文件把房间写坏）。"""
+    from app.config import atomic_write_text, get_room_path
     cfg_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "config.yaml"
     if not cfg_path.exists():
         return False
     try:
-        cfg_path.write_text(
+        atomic_write_text(
+            cfg_path,
             yaml.dump(raw, default_flow_style=False, allow_unicode=True),
-            encoding="utf-8",
+            backup=True,
         )
+        # config.yaml 变了，_room_db_path 的缓存键依赖它的 mtime/size，不用手动清
         return True
     except Exception:
         return False
@@ -4716,10 +4718,10 @@ async def api_external_ranking(
                    COALESCE(SUM(gift_num), 0) as total_count,
                    COALESCE(SUM(
                        CASE WHEN is_blind_box = 0
-                            THEN CAST(json_extract(raw_json, '$.total_coin') AS INTEGER) / 1000.0
-                            ELSE CAST(actual_value AS REAL) / 10.0
+                            THEN CAST(json_extract(raw_json, '$.total_coin') AS INTEGER) / 100
+                            ELSE actual_value
                        END), 0) as total_value,
-                   COALESCE(SUM(CAST(profit_value AS REAL) / 10.0), 0) as total_profit
+                   COALESCE(SUM(profit_value), 0) as total_profit
             FROM gift_events
             WHERE {where}
             GROUP BY uid
@@ -4731,14 +4733,20 @@ async def api_external_ranking(
 
         ranking = []
         for r in rows:
+            battery = int(r[3])
+            profit_battery = int(r[4])
             ranking.append({
                 "uid": int(r[0]),
                 "uname": str(r[1]),
                 "count": int(r[2]),
-                # 单位统一成「元」：金瓜子 ÷1000、电池 ÷10
-                # （以前写的是 total_coin/100 且盲盒不加换算，金额整体偏大 10 倍）
-                "value": round(float(r[3]), 2),
-                "profit": round(float(r[4]), 2),
+                # 单位与 /api/external/user_stats 保持一致：**电池**
+                # （金瓜子 ÷100 = 电池；盲盒 actual_value 本身就是电池）。
+                # 曾误改成「元」，导致两个外部接口差 10 倍 —— 这是对外契约，不能再动。
+                "value": battery,
+                "profit": profit_battery,
+                # 顺手把元也算好，省得调用方自己除（新增字段，不改变上面两个的含义）
+                "value_yuan": round(battery / 10.0, 2),
+                "profit_yuan": round(profit_battery / 10.0, 2),
             })
         return {"ok": True, "ranking": ranking, "total": len(ranking)}
     except Exception as exc:
@@ -5476,7 +5484,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <div class="overflow-y-auto max-h-[520px]" v-if="ranking.length">
                     <div class="overflow-x-auto">
                     <table class="w-full text-xs sm:text-sm">
-                        <thead><tr class="bg-gray-50 sticky top-0"><th class="p-2 text-left">#</th><th class="p-2 text-left">用户</th><th class="p-2 text-right">价值</th><th class="p-2 text-right">利润</th></tr></thead>
+                        <thead><tr class="bg-gray-50 sticky top-0"><th class="p-2 text-left">#</th><th class="p-2 text-left">用户</th><th class="p-2 text-right">价值(元)</th><th class="p-2 text-right">利润(元)</th></tr></thead>
                         <tbody>
                             <tr v-for="(u,i) in ranking" :key="u.uid"
                                 class="border-t hover:bg-blue-50 cursor-pointer transition"
