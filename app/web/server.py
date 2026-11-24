@@ -244,6 +244,22 @@ def _mark_desired(room_id: str, running: bool) -> None:
     _save_desired_states(states)
 
 
+def _room_exists(room_id: str) -> bool:
+    """房间目录 + config.yaml 是否都存在。
+
+    启停类接口必须先区分「房间不存在」和「房间存在但启动失败」：
+    以前 `/start` 对不存在的房间一律 500「启动失败，请检查配置」，
+    用户界面上如果还留着一个已删除房间的按钮，点下去看到的是
+    「请检查配置」—— 而那个房间的配置根本不存在，怎么检查都没用。
+    """
+    try:
+        from app.config import get_room_path
+
+        return (get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "config.yaml").exists()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _room_data_file(room_id: str, name: str) -> Path:
     """房间状态文件（心跳/凭证状态/崩溃记录）路径 —— **唯一口径**。
 
@@ -562,6 +578,15 @@ _MAX_PROXY_IMAGE_BYTES = 5 * 1024 * 1024
 
 #: `/api/rooms/{id}` 或 `/api/rooms/{id}/xxx`
 _ROOM_PATH_RE = re.compile(r"^/api/rooms/([^/]+)(/.*)?$")
+
+#: 弹幕 XML 导入（唯一允许超过 8MB 的请求体）。
+#: **必须用正则匹配真实路由**：这里以前写的是 `path.endswith("/danmaku/import")`，
+#: 而真实路由是 `/api/rooms/{id}/import/danmaku-xml` —— 后缀永远对不上，
+#: 于是导入接口拿到的是全局 8MB 上限，而不是 XML 模块自己的 64MB。
+#: 实测：声明 20MB / 50MB 直接 413「Content Too Large」，
+#: 而 `danmaku_xml` 里那句「上限 64 MB」的友好提示用户永远看不到。
+#: 一场几小时的录播弹幕就是 20–50MB，等于这个功能对大文件根本没生效。
+_XML_IMPORT_PATH_RE = re.compile(r"^/api/rooms/[^/]+/import/danmaku-xml$")
 
 #: `/api/bili_accounts/{uid}` 或 `/api/bili_accounts/{uid}/xxx`
 _ACCOUNT_PATH_RE = re.compile(r"^/api/bili_accounts/([^/]+)(/.*)?$")
@@ -1253,16 +1278,18 @@ async def _auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     # 全局请求体上限：真正需要大 body 的只有弹幕 XML 导入
-    # （`/api/rooms/{id}/danmaku/import` 自己另有 64MB 校验，必须放行），
+    # （它自己另有 64MB 校验 `danmaku_xml.MAX_XML_BYTES`，必须放行），
     # 其余接口给 8MB 足够；不设上限时一个未登录的大 POST 就能把内存吃满。
     try:
         _cl = int(request.headers.get("content-length") or 0)
     except ValueError:
         _cl = 0
-    _body_cap = (_MAX_XML_BYTES if path.endswith("/danmaku/import")
+    _body_cap = (_MAX_XML_BYTES if _XML_IMPORT_PATH_RE.match(path)
                  else _MAX_REQUEST_BYTES)
     if _cl > _body_cap:
-        return JSONResponse({"error": "payload too large"}, status_code=413)
+        return JSONResponse(
+            {"error": f"请求体太大（上限 {_body_cap // 1048576} MB）"},
+            status_code=413)
 
     # 外部查询接口：**只**放行「自身带 token 校验的只读查询」。
     # 以前这里是 `path.startswith("/api/external/")` —— 整个前缀免登录，
@@ -3262,9 +3289,11 @@ async def api_create_room(request: Request):
 @app.post("/api/rooms/{room_id}/start")
 async def api_start_room(room_id: str):
     """启动房间 Bot（自动选择同进程/子进程模式）。"""
+    if not _room_exists(room_id):
+        return JSONResponse({"error": f"房间 {room_id} 不存在"}, status_code=404)
     ok = await start_room_async(room_id)
     if not ok:
-        return JSONResponse({"error": "启动失败，请检查配置"}, status_code=500)
+        return JSONResponse({"error": "启动失败，请查看该房间的日志"}, status_code=500)
     _mark_desired(room_id, True)
     _save_room_states()
     _clear_crash_state(room_id)
@@ -3283,7 +3312,13 @@ async def api_stop_room(room_id: str):
 @app.post("/api/rooms/{room_id}/restart")
 async def api_restart_room(room_id: str):
     """重启房间 Bot（自动选择同进程/子进程模式）。"""
+    if not _room_exists(room_id):
+        return JSONResponse({"error": f"房间 {room_id} 不存在"}, status_code=404)
     ok = await restart_room_async(room_id)
+    if not ok:
+        # 200 + {"ok": false} 是同一个病根：前端 `if (res.ok)` 会当成成功，
+        # 用户看到「已重启」而机器人根本没起来（第 23 轮在配置保存上修过一次）。
+        return JSONResponse({"error": "重启失败，请查看该房间的日志"}, status_code=500)
     if ok:
         _mark_desired(room_id, True)
         # 手动重启等于用户明确要求「重新来一次」：清掉崩溃记录和限流计数，
@@ -4667,14 +4702,18 @@ async def api_import_danmaku_xml(room_id: str, request: Request):
     # 先看 Content-Length 再读 body：直接把整个文件读进内存，超大文件会把内存吃光
     declared = _safe_int(request.headers.get("content-length"))
     if declared and declared > MAX_XML_BYTES:
-        return {"ok": False, "error": f"文件太大（{declared / 1048576:.1f} MB），"
-                                      f"上限 {MAX_XML_BYTES // 1048576} MB"}
+        # 必须 413 而不是 200：`200 + {"ok": false}` 让任何用 `res.ok` 判断的
+        # 调用方（脚本 / 以后重构的前端）把「文件太大」当成导入成功。
+        return JSONResponse({"ok": False, "error": f"文件太大（{declared / 1048576:.1f} MB），"
+                                                  f"上限 {MAX_XML_BYTES // 1048576} MB"},
+                            status_code=413)
     raw = await request.body()
     if not raw:
         return JSONResponse({"error": "没有收到文件内容"}, status_code=400)
     if len(raw) > MAX_XML_BYTES:
-        return {"ok": False, "error": f"文件太大（{len(raw) / 1048576:.1f} MB），"
-                                      f"上限 {MAX_XML_BYTES // 1048576} MB"}
+        return JSONResponse({"ok": False, "error": f"文件太大（{len(raw) / 1048576:.1f} MB），"
+                                                  f"上限 {MAX_XML_BYTES // 1048576} MB"},
+                            status_code=413)
 
     filename = (request.headers.get("X-Filename") or "").strip()
     # 文件名必须能带中文。HTTP 头只能放 ISO-8859-1，浏览器 fetch 遇到中文头值会直接抛
@@ -4712,6 +4751,11 @@ async def api_import_danmaku_xml(room_id: str, request: Request):
         return JSONResponse({"ok": False, "error": f"写入失败：{exc}"}, status_code=500)
     if result.get("ok") and not dry_run:
         logger.info("import xml done: room=%s file=%s", room_id, safe_name)
+    if not result.get("ok"):
+        # 解析失败、文件里没有可用事件 —— 都是「你给的文件不能用」，
+        # 是客户端错误。以前一律 200 + {"ok": false}，前端靠读 body 判断，
+        # 但任何用 HTTP 状态判断的调用方都会把它当成功。
+        return JSONResponse(result, status_code=422)
     return result
 
 
@@ -9639,7 +9683,9 @@ createApp({
                 const res = await fetch(`/api/rooms/${selectedRoom.value.room_id}/log?lines=500`, {credentials: 'include'});
                 if (!res.ok) return;
                 const data = await res.json();
-                if (data.error) { botLogContent.value = '加载失败: ' + data.error; return; }
+                // 这个 sink 是 v-html：错误分支同样要转义，
+                // 否则「加载失败: <img onerror=...>」照样能执行
+                if (data.error) { botLogContent.value = '加载失败: ' + escapeHtml(data.error); return; }
                 const lines = data.lines || [];
                 // ⚠️ 必须先 HTML 转义再插 span。
                 // bot.log 里带**观众可控**的内容（`danmaku received: text=%s`、
@@ -9655,7 +9701,7 @@ createApp({
                         .replace(/DEBUG/g, '<span class="text-gray-500">DEBUG</span>');
                 }).join('\n');
                 setTimeout(() => { if (logContainer.value) logContainer.value.scrollTop = logContainer.value.scrollHeight; }, 50);
-            } catch(e) { botLogContent.value = '加载失败: ' + e.message; }
+            } catch(e) { botLogContent.value = '加载失败: ' + escapeHtml(e.message); }
         }
 
         async function clearBotLog() {
