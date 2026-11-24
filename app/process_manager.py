@@ -339,11 +339,41 @@ def room_status(room_id: str) -> str:
     return "running" if _is_running(room_id) else "stopped"
 
 
+async def clean_room_async(room_id: str) -> None:
+    """彻底清理房间：**先把同进程 Bot 停干净，再交回同步清理**。
+
+    同步版 `clean_room()` 只能把 `_inproc_bots` 里的记账删掉，删不掉那个
+    asyncio Task —— 而冻结 exe（绝大多数 Windows 用户）的 Bot 就是这个 Task，
+    它开着 `bot.db`。删房间时 rmtree 于是撞上
+    `PermissionError: [WinError 32] 另一个程序正在使用此文件` →
+    接口 500、目录删一半、界面上房间还在但点进去报错。
+    更糟的是 Task 还活着，继续往已删除的目录写统计。
+
+    所以「删房间」这种破坏性动作必须走这个 async 版本：
+    先 `await stop_bot_in_process()`（会 robot.shutdown() + cancel Task + auth.stop()），
+    再删文件。
+    """
+    try:
+        await stop_bot_in_process(room_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("room %s in-process stop before delete failed: %s", room_id, exc)
+    clean_room(room_id)
+
+
 def clean_room(room_id: str) -> None:
-    """彻底清理房间的进程和文件。"""
-    # 先清理同进程 Bot
-    if _inproc_bots.pop(room_id, None) is not None:
-        logger.info("room %s in-process bot entry cleaned", room_id)
+    """彻底清理房间的进程和文件（同步）。
+
+    **只能清理「已经停下」的房间**。房间还在跑时请用 `clean_room_async`：
+    这里删不掉同进程 Task，只会让记账和现实脱节（Task 仍在跑、文件仍被占用）。
+    """
+    entry = _inproc_bots.get(room_id)
+    if entry is not None:
+        _, _, task = entry
+        if not task.done():
+            logger.warning(
+                "room %s 的同进程 Bot 仍在运行，clean_room() 只移除记账；"
+                "调用方应先用 clean_room_async()", room_id)
+        _inproc_bots.pop(room_id, None)
     stop_room(room_id)
     pidf = _pidfile(room_id)
     if pidf.exists():

@@ -8,7 +8,11 @@ from typing import Any
 from pathlib import Path
 from typing import Optional
 
+import logging
+
 from app import tzutil
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -71,14 +75,52 @@ class StatsStore:
     def __init__(self, db_path: str) -> None:
         p = Path(db_path)
         p.parent.mkdir(parents=True, exist_ok=True)
+        self._db_path = str(p)
         self._conn = sqlite3.connect(p)
-        self._conn.execute("PRAGMA journal_mode=WAL;")
-        self._conn.execute("PRAGMA synchronous=NORMAL;")
-        # 房间机器人可能同时在写同一个库：等锁而不是直接报 database is locked
+        # busy_timeout 放最前面：后面每一条 PRAGMA 都可能撞到别的连接（房间机器人、
+        # 并发的导入、WebUI 的只读查询）持有的锁。
         self._conn.execute("PRAGMA busy_timeout=8000;")
+        self._enable_wal()
+        self._conn.execute("PRAGMA synchronous=NORMAL;")
         # SQL 里按天/按月分组要用配置时区，不能用 SQLite 的 localtime（那是系统时区）
         tzutil.install_sqlite_functions(self._conn)
         self._create_tables()
+
+    def _enable_wal(self) -> None:
+        """切到 WAL，并**容忍别人先切好了**。
+
+        `PRAGMA journal_mode=WAL` 有一个坑：**它不遵守 busy_timeout**。
+        SQLite 在切换日志模式时不会调用 busy handler，另一个连接持有数据库时
+        会立刻返回 `database is locked`（不是等 8 秒）。
+        实测：两个线程/进程同时首次打开一个**新建**的库，其中一个必然在
+        这一行炸掉 —— 而「新建房间后立刻导入/查看统计」时前端会并发开好几个连接，
+        于是用户看到「写入失败：database is locked」。
+
+        正确做法是把它当成**幂等的乐观切换**：先读当前模式，已经是 wal 就跳过；
+        切换失败就重新读一次，只要现在确实是 wal 就当成功。
+        """
+        try:
+            if str(self._conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal":
+                return  # 绝大多数情况走这里：库早就是 WAL 了，一次读，不加写锁
+        except Exception:  # noqa: BLE001
+            pass
+        for attempt in range(6):
+            try:
+                got = self._conn.execute("PRAGMA journal_mode=WAL").fetchone()
+                if got and str(got[0]).lower() == "wal":
+                    return
+            except sqlite3.OperationalError:
+                pass
+            # 可能被别的连接切好了：重读一次，是 wal 就算成功
+            try:
+                if str(self._conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal":
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.05 * (attempt + 1))
+        # 实在切不过去也不至于让整个房间起不来：回滚日志模式照样能读能写，
+        # 只是读写并发差一些。这里不抛，交给上层日志。
+        logger.warning("切换 WAL 失败（%s），继续以其他日志模式运行", self._db_path)
 
     def _create_tables(self) -> None:
         self._conn.executescript(

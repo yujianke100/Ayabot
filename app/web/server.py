@@ -40,7 +40,7 @@ from bilibili_api import live
 from app import tzutil
 from app.config import DEFAULT_ROOMS_DIR, atomic_write_text
 from app.danmaku_xml import MAX_XML_BYTES as _MAX_XML_BYTES
-from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room, set_rooms_base_dir, start_room_async, stop_room_async, restart_room_async, start_periodic_log_cleanup, cleanup_all_stale_pidfiles, last_exit_code
+from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room, clean_room_async, set_rooms_base_dir, start_room_async, stop_room_async, restart_room_async, start_periodic_log_cleanup, cleanup_all_stale_pidfiles, last_exit_code
 from app.version import get_version, get_version_display
 
 _APP_VERSION = get_version_display()
@@ -3319,14 +3319,13 @@ async def api_restart_room(room_id: str):
         # 200 + {"ok": false} 是同一个病根：前端 `if (res.ok)` 会当成成功，
         # 用户看到「已重启」而机器人根本没起来（第 23 轮在配置保存上修过一次）。
         return JSONResponse({"error": "重启失败，请查看该房间的日志"}, status_code=500)
-    if ok:
-        _mark_desired(room_id, True)
-        # 手动重启等于用户明确要求「重新来一次」：清掉崩溃记录和限流计数，
-        # 否则「连续 5 次崩溃」的计数留着，下一次崩溃会立刻又被暂停自动重启，
-        # 用户会觉得「点了重启也没用」。
-        _clear_crash_state(room_id)
+    _mark_desired(room_id, True)
+    # 手动重启等于用户明确要求「重新来一次」：清掉崩溃记录和限流计数，
+    # 否则「连续 5 次崩溃」的计数留着，下一次崩溃会立刻又被暂停自动重启，
+    # 用户会觉得「点了重启也没用」。
+    _clear_crash_state(room_id)
     _save_room_states()
-    return {"ok": ok, "status": "running" if ok else "stopped"}
+    return {"ok": True, "status": "running"}
 
 
 @app.delete("/api/rooms/{room_id}")
@@ -3335,7 +3334,10 @@ async def api_delete_room(room_id: str):
     import shutil
     from app.config import get_room_path
 
-    clean_room(room_id)
+    # **必须先停同进程 Bot**：冻结 exe 的房间 Bot 就是当前进程里的 Task，
+    # 它开着 bot.db。只删记账再 rmtree，Windows 会抛
+    # PermissionError [WinError 32]（文件被占用）→ 接口 500、目录删一半。
+    await clean_room_async(room_id)
     _save_room_states()
 
     # 删除目录（再校验一次：这是唯一一处会 rmtree 用户数据的代码）
@@ -3344,7 +3346,25 @@ async def api_delete_room(room_id: str):
     if room_dir is None:
         return JSONResponse({"error": "invalid room id"}, status_code=400)
     if room_dir.exists():
-        shutil.rmtree(str(room_dir))
+        # 停完 Bot 之后仍可能有「刚写过日志的线程」短暂占着句柄（Windows），
+        # 退让几次再放弃；失败也要说清楚，不能只回一个 500。
+        last_exc: Exception | None = None
+        for attempt in range(6):
+            try:
+                shutil.rmtree(str(room_dir))
+                last_exc = None
+                break
+            except PermissionError as exc:
+                last_exc = exc
+                await asyncio.sleep(0.2 * (attempt + 1))
+            except FileNotFoundError:
+                last_exc = None
+                break
+        if last_exc is not None:
+            logger.warning("room %s rmtree failed: %s", room_id, last_exc)
+            return JSONResponse(
+                {"error": f"房间已停止，但目录删除失败（文件仍被占用）：{last_exc}"},
+                status_code=500)
     logger.info("room deleted: %s", room_id)
     return {"ok": True}
 
