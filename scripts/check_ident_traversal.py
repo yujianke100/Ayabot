@@ -216,9 +216,14 @@ def main() -> int:
            and "_ADMIN_ONLY_PREFIXES" in src)
         ok("凭证写入是原子写（auth.py）",
            "atomic_write_text(path, json.dumps(payload" in auth_src)
-        ok("凭证写入是原子写（server.py 两处）",
-           src.count("atomic_write_text(acc_dir / \"credential.json\"") == 1
-           and "atomic_write_text(store_path" in src)
+        # 凭据有三条写入路径：老扫码保存（accounts/<uid>/ + 旧路径兜底）、
+        # 账号页扫码保存、以及 auth.py 的刷新落盘。全部必须原子写，
+        # 且不允许再出现 `credential.json").write_text(` 这种裸写。
+        ok("凭证写入全部原子写",
+           src.count('atomic_write_text(acc_dir / "credential.json"') >= 2
+           and "atomic_write_text(legacy_path" in src
+           and 'credential.json").write_text(' not in src
+           and "atomic_write_text(path, json.dumps(payload" in auth_src)
         ok("新建房间校验房间号", 'if not _valid_ident(room_id):' in src)
     finally:
         server.should_exit = True

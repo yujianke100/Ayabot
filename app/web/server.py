@@ -199,7 +199,8 @@ def _bootstrap_desired_from_heartbeats() -> dict[str, bool]:
         if not base.exists():
             return {}
         for d in sorted(base.iterdir()):
-            hb = d / "data" / "bot_status.json"
+            # 走 _room_data_file：自定义 sqlite_path 的房间心跳不在 data/ 下
+            hb = _room_data_file(d.name, "bot_status.json")
             if not hb.exists():
                 continue
             try:
@@ -244,8 +245,21 @@ def _mark_desired(room_id: str, running: bool) -> None:
 
 
 def _room_data_file(room_id: str, name: str) -> Path:
-    """房间 data 目录下的状态文件（心跳/凭证状态/崩溃记录）。"""
-    return Path(_ROOMS_BASE_DIR).resolve() / "rooms" / room_id / "data" / name
+    """房间状态文件（心跳/凭证状态/崩溃记录）路径 —— **唯一口径**。
+
+    必须和 Bot 侧一致：`app/auth.py`、`app/bot.py`、`app/process_manager.py`
+    全都写在 `Path(config.storage.sqlite_path).parent` 下。
+    这里以前写死 `<rooms>/<rid>/data/`，于是配置过自定义 `sqlite_path` 的房间：
+      - 机器人往 A 目录写心跳，WebUI 去 B 目录读 → 永远读不到
+      - 守护进程判定「running 但从没写过心跳」→ 判僵尸 → 无限重启
+      - `auth_status.json` 同样读不到 → 凭证失效时不提示重新登录
+    默认配置下两者恰好都是 `<room>/data`，所以这个 bug 只在改过 sqlite_path
+    的房间上发作，但发作时表现正是「机器人莫名其妙一直重启」。
+    """
+    try:
+        return _room_db_path(room_id).parent / name
+    except Exception:  # noqa: BLE001 - 配置坏掉时退回默认目录
+        return Path(_ROOMS_BASE_DIR).resolve() / "rooms" / room_id / "data" / name
 
 
 def _read_room_json(room_id: str, name: str) -> dict:
@@ -829,10 +843,52 @@ def _connect(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-def _get_db() -> sqlite3.Connection:
-    conn = _connect(_DB_PATH)
+def _get_db(allow_room_fallback: bool = True) -> sqlite3.Connection:
+    """打开遗留的「全局 / 单房间」数据库（root config.yaml 的 storage.sqlite_path）。
+
+    这 4 个接口（`/api/ranking`、`/api/user_gifts`、`/api/user_dates`、`/api/delete_old`）
+    是单房间模式留下来的，多房间版本里前端已经全部改走 `/api/rooms/{id}/*`。
+    但它们是**可达的 HTTP**，所以必须自己处理好三件事：
+
+    1. **不能凭空造文件**：`sqlite3.connect()` 会顺手创建一个 0 字节的库，
+       于是多房间部署里用户目录莫名多出一个 `data/bot.db`，接口再返回
+       「no such table: gift_events」500 —— 和第 12 轮修的 `_room_db_path`
+       是同一类坑，只是这里漏了。
+    2. **多房间模式要能退化**：根库不存在时，只读接口退回第一个真正有数据的
+       房间库（老用户从单房间升级上来，根库可能已经被搬进 rooms/ 里）。
+    3. **破坏性接口不许猜**：`delete_old` 传 allow_room_fallback=False，
+       根库不存在就直接报错，绝不能"猜一个房间"然后删它的数据。
+    """
+    path = Path(_DB_PATH)
+    if not path.exists() or path.stat().st_size == 0:
+        if allow_room_fallback:
+            fallback = _first_room_db_path()
+            if fallback is not None:
+                path = fallback
+    if not path.exists() or path.stat().st_size == 0:
+        raise FileNotFoundError(
+            f"没有可用的全局数据库（{_DB_PATH}）。多房间模式下请调用 /api/rooms/{{id}}/* 接口。"
+        )
+    conn = _connect(path)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _first_room_db_path() -> Optional[Path]:
+    """第一个真正有数据的房间库（读遗留接口时的退化目标）。"""
+    try:
+        base = Path(_ROOMS_BASE_DIR).resolve() / DEFAULT_ROOMS_DIR
+        if not base.exists():
+            return None
+        for d in sorted(base.iterdir()):
+            if not d.is_dir():
+                continue
+            p = _room_db_path(d.name)
+            if p.exists() and p.stat().st_size > 0:
+                return p
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("find room db fallback failed: %s", exc)
+    return None
 
 
 def _parse_date(d: str) -> tuple[int, int]:
@@ -938,7 +994,7 @@ _NO_HEARTBEAT_GRACE = 120.0        # 状态 running 但从未写过心跳，宽�
 
 
 def _crash_info_path(room_id: str) -> Path:
-    return Path(_ROOMS_BASE_DIR).resolve() / "rooms" / room_id / "data" / "crash_info.json"
+    return _room_data_file(room_id, "crash_info.json")
 
 
 def _bot_error_path(room_id: str) -> Path:
@@ -950,7 +1006,7 @@ def _bot_error_path(room_id: str) -> Path:
     守护进程重启时把两者拼起来给用户看，否则用户只看到「进程已退出」，
     完全不知道是代码 bug、网络问题还是被系统杀了。
     """
-    return Path(_ROOMS_BASE_DIR).resolve() / "rooms" / room_id / "data" / "bot_error.json"
+    return _room_data_file(room_id, "bot_error.json")
 
 
 def _write_crash_info(room_id: str, reason: str, exit_code: Optional[int] = None,
@@ -1419,6 +1475,12 @@ async def api_ranking(start: str, end: str, gift_type: str = "all"):
             params,
         ).fetchall()
         return [dict(r) for r in rows]
+    except ValueError as exc:
+        # 日期格式错是用户输入问题，不该报 500
+        return JSONResponse({"error": f"日期格式不对：{exc}"}, status_code=400)
+    except FileNotFoundError as exc:
+        # 多房间模式下没有全局库：给可读的 404，而不是 "no such table" 500
+        return JSONResponse({"error": str(exc)}, status_code=404)
     except Exception as exc:
         logger.exception("ranking api failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -1501,6 +1563,8 @@ async def api_user_gifts(uid: int, date: str, gift_type: str = "all"):
                     continue
             merged.append(item)
         return merged
+    except FileNotFoundError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
     except Exception as exc:
         logger.exception("user_gifts api failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -1522,6 +1586,8 @@ async def api_user_dates(uid: int):
             (uid,),
         ).fetchall()
         return [r["d"] for r in rows if r["d"]]
+    except FileNotFoundError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
     except Exception as exc:
         logger.exception("user_dates api failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -1559,7 +1625,8 @@ async def api_delete_old(request: Request):
         return JSONResponse({"error": "bad date format, use YYYY-MM-DD"}, status_code=400)
 
     try:
-        conn = _get_db()
+        # 破坏性操作：禁止退化到「随便一个房间库」，否则会删错人的数据
+        conn = _get_db(allow_room_fallback=False)
         affected = [r[0] for r in conn.execute(
             "SELECT DISTINCT month FROM gift_events WHERE ts < ?", (before_ts,)).fetchall()]
         deleted = conn.execute("DELETE FROM gift_events WHERE ts < ?", (before_ts,)).rowcount
@@ -1569,12 +1636,14 @@ async def api_delete_old(request: Request):
         # 边界月份只删了一部分，聚合要按明细重算，否则会偏大
         if affected:
             from app.storage import StatsStore
-            store = StatsStore(_DB_PATH)
+            store = StatsStore(str(_DB_PATH))
             try:
                 store.rebuild_monthly_stats(affected)
             finally:
                 store._conn.close()
         return {"deleted_events": deleted}
+    except FileNotFoundError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
     except Exception as exc:
         logger.exception("delete failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -1933,17 +2002,42 @@ async def api_bili_login_save(request: Request):
 
     # 保存凭据
     cookies = credential.get_cookies()
-    store_path = Path(_CONFIG_YAML_PATH).parent / "data" / "credential.json"
-    store_path.parent.mkdir(parents=True, exist_ok=True)
-    # 原子写：这个文件被截断 = 凭证直接失效（用户看到「登录凭证失效」，
-    # 而且原文件已经没了，只能重新扫码）。
-    atomic_write_text(store_path, json.dumps({
+    payload = {
         "SESSDATA": cookies.get("SESSDATA", ""),
         "bili_jct": cookies.get("bili_jct", ""),
         "buvid3": cookies.get("buvid3", ""),
         "DedeUserID": cookies.get("DedeUserID", ""),
         "ac_time_value": cookies.get("ac_time_value", ""),
-    }, ensure_ascii=False, indent=2))
+    }
+    uid = str(payload.get("DedeUserID") or "")
+    if not uid.isdigit():
+        # DedeUserID 一定是纯数字；不是就说明凭据异常，绝不能拿它拼目录
+        return {"ok": False, "error": f"凭据里的 DedeUserID 不可用: {uid!r}"}
+    # **必须写进 accounts/<uid>/credential.json**：`AuthManager._load_stored_credential`
+    # 优先读那里，其次才降到 `config.auth.credential_store_path`。
+    # 这个遗留接口以前只写 `<config目录>/data/credential.json`，而机器人的
+    # credential_store_path 是 `rooms/<id>/data/credential.json` —— 两边都对不上，
+    # 于是「扫码成功、保存成功、机器人还是说凭证失效」，只能一遍遍重扫。
+    # 原子写：文件被截断 = 凭证直接失效，且原文件已没了，只能重新扫码。
+    written: list[str] = []
+    try:
+        acc_dir = _get_account_dir(uid)
+        acc_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(acc_dir / "credential.json",
+                          json.dumps(payload, ensure_ascii=False, indent=2))
+        written.append(str(acc_dir / "credential.json"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("save credential to accounts/%s failed: %s", uid, exc)
+    # 同时保留旧路径，单房间/老部署仍在读它
+    legacy_path = Path(_CONFIG_YAML_PATH).parent / "data" / "credential.json"
+    try:
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(legacy_path, json.dumps(payload, ensure_ascii=False, indent=2))
+        written.append(str(legacy_path))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("save legacy credential failed: %s", exc)
+    if not written:
+        return {"ok": False, "error": "凭据没能写到任何位置"}
 
     _BILI_LOGIN_SESSIONS.pop(session_id, None)
 
@@ -4868,7 +4962,10 @@ async def api_room_danmaku_export_dates(room_id: str, date_from: str = "", date_
     try:
         from app.storage import StatsStore
         store = StatsStore(str(db_path))
-        rows = store.get_danmaku_log(limit=100000, offset=0, date_from=date_from, date_to=date_to, asc=bool(asc))
+        # 导出必须拿全量：分页接口的 1000 条上限是防拖库的，套到导出上就是
+        # 「点了导出全部，CSV 里只有前 1000 条」——用户看不出来，因为文件本身没错。
+        rows = store.get_danmaku_log(limit=1_000_000, offset=0, date_from=date_from,
+                                     date_to=date_to, asc=bool(asc), cap=1_000_000)
         store.close()
         buf = io.StringIO()
         w = csv.writer(buf)

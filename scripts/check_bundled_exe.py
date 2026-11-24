@@ -12,6 +12,7 @@ import io
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
 
@@ -174,5 +175,19 @@ def main(exe_path: str) -> int:
     return 0
 
 
+def _default_exe() -> str:
+    """不给参数时自己找最新的构建产物。
+
+    以前默认写死 `dist/Ayabot-latest.exe`，而本地构建出来的是
+    `dist/Ayabot-v<version>.exe` —— 直接跑就报「找不到文件」，看起来像测试坏了。
+    """
+    root = Path(__file__).resolve().parent.parent
+    latest = root / "dist" / "Ayabot-latest.exe"
+    if latest.exists():
+        return str(latest)
+    built = sorted((root / "dist").glob("Ayabot-v*.exe"))
+    return str(built[-1]) if built else "dist/Ayabot-latest.exe"
+
+
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1] if len(sys.argv) > 1 else "dist/Ayabot-latest.exe"))
+    raise SystemExit(main(sys.argv[1] if len(sys.argv) > 1 else _default_exe()))

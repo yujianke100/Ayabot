@@ -202,7 +202,10 @@ class AuthManager:
 
     def _credential_candidate_paths(self) -> list[Path]:
         paths: list[Path] = []
-        uid = self.config.account_uid
+        # 必须是 str：`Path / int` 会抛 TypeError，而这里在**凭证恢复链路**上
+        # （每次心跳都会走），一旦抛异常，用户扫完码也恢复不了登录。
+        # 配置加载已经 str() 过一次，但脚本/插件可能直接赋值 int。
+        uid = str(self.config.account_uid or "")
         if uid:
             store_path = Path(self.config.auth.credential_store_path)
             project_root = (
@@ -261,7 +264,7 @@ class AuthManager:
 
     def _load_stored_credential(self) -> Optional[Credential]:
         # 优先从统一的 accounts/<uid>/credential.json 加载
-        uid = self.config.account_uid
+        uid = str(self.config.account_uid or "")
         if uid:
             # 从 credential_store_path 反推项目根目录
             # credential_store_path = /root/ayabot/rooms/<id>/data/credential.json

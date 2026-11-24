@@ -194,7 +194,28 @@ def main() -> int:
     # limit=0 是 falsy → 回落到默认 50（而**不是** SQLite 的「不限」）
     ok("limit=0 回落到默认 50 而不是全表",
        len(st.get_danmaku_log(limit=0)) == 30, len(st.get_danmaku_log(limit=0)))
+    # 但导出走的是大 cap：这条路径要拿全量。
+    # 回归现场：分页夹到 1000 之后，`limit=100000` 被静默截成 1000 条，
+    # 用户点了「导出全部弹幕」拿到的 CSV 只有前 1000 行（文件本身看不出问题）。
+    ok("导出（大 cap）能拿到超过 1000 条",
+       len(st.get_danmaku_log(limit=10 ** 9, cap=10 ** 9)) == 30,
+       len(st.get_danmaku_log(limit=10 ** 9, cap=10 ** 9)))
+    ok("分页接口默认仍不放行全表",
+       len(st.get_danmaku_log(limit=10 ** 9)) == 30)  # 只有 30 条，只验证不抛异常
     st.close()
+    # 用 1001 条数据才能真正区分「夹到 1000」和「拿全量」
+    # 注意 max_entries=0 才不触发 record_danmaku 自带的 1000 条裁剪
+    st2 = StatsStore(str(tmp / "dm2.db"))
+    for i in range(1001):
+        st2.record_danmaku(ts=1750000000 + i, uid=i, uname=f"u{i}", content=f"c{i}",
+                           max_entries=0)
+    ok("1001 条：分页夹取确实停在 1000",
+       len(st2.get_danmaku_log(limit=10 ** 9)) == 1000,
+       len(st2.get_danmaku_log(limit=10 ** 9)))
+    ok("1001 条：导出 cap 拿全 1001 条（这就是 CSV 导出的路径）",
+       len(st2.get_danmaku_log(limit=10 ** 9, cap=10 ** 9)) == 1001,
+       len(st2.get_danmaku_log(limit=10 ** 9, cap=10 ** 9)))
+    st2.close()
 
     # ── 7. 结构断言 ──
     print("[7] 结构断言")
@@ -209,7 +230,7 @@ def main() -> int:
     ok("pb 有体积上限", "MAX_PB_B64_LEN" in PB_SRC)
     ok("fixed64 有边界检查", "fixed64 field overruns buffer" in PB_SRC)
     ok("fixed32 有边界检查", "fixed32 field overruns buffer" in PB_SRC)
-    ok("分页 limit 被夹取", "limit = min(_lim, 1000)" in STORE_SRC)
+    ok("分页 limit 被夹取", "limit = min(_lim, _cap)" in STORE_SRC)
     ok("unknown_events 透出到房间列表", "unknown_gift_events" in SRV_SRC)
     ok("界面显示未识别事件名", "收到未识别的礼物类事件" in SRV_SRC)
 

@@ -22,7 +22,10 @@ from pathlib import Path
 EXE = sys.argv[1] if len(sys.argv) > 1 else ""
 EXPECT_NEW = (sys.argv[2] if len(sys.argv) > 2 else "").lstrip("vV")
 if not EXE or not Path(EXE).exists():
-    raise SystemExit("用法: check_e2e_update_exe.py <旧版exe> [期望最新版本]")
+    # 这个检查要一个**旧版** exe 才能验证「从旧版升级」，没给就明确跳过，
+    # 不要报成失败 —— 否则整批门禁红一片，真问题反而看不见。
+    print("SKIP：需要显式传入一个旧版 exe（用法: check_e2e_update_exe.py <旧版exe> [期望最新版本]）")
+    raise SystemExit(0)
 
 PORT = 19871
 ROOT = Path(r"C:/Users/shinshi/AppData/Local/hermes/cache/scratch/e2e_update")

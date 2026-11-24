@@ -517,7 +517,8 @@ class StatsStore:
         ).fetchall()
         return [r[0] for r in rows if r[0]]
 
-    def get_danmaku_log(self, limit: int = 50, offset: int = 0, date_from: str = "", date_to: str = "", asc: bool = True) -> list[dict[str, int | str]]:
+    def get_danmaku_log(self, limit: int = 50, offset: int = 0, date_from: str = "", date_to: str = "",
+                        asc: bool = True, cap: int = 1000) -> list[dict[str, int | str]]:
         # 日期过滤一律换算成 ts 区间：既按配置时区算，又能用上 ts 索引。
         # 不要在 SQL 里写 ayabot_date(ts) —— 那是逐行回调 Python，20 万行要 0.6s，而区间比较是 6ms。
         where, params = _date_range_where(date_from, date_to)
@@ -530,7 +531,13 @@ class StatsStore:
             _lim = 50
         if _lim <= 0:
             _lim = 50
-        limit = min(_lim, 1000)
+        # 上限由调用方决定：分页接口用默认 1000 防止一次拖全表；
+        # CSV 导出必须传大 cap —— 否则「导出全部弹幕」被静默截断成前 1000 条。
+        try:
+            _cap = max(1, int(cap))
+        except (TypeError, ValueError):
+            _cap = 1000
+        limit = min(_lim, _cap)
         try:
             offset = max(0, int(offset))
         except (TypeError, ValueError):

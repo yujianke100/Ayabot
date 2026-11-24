@@ -111,7 +111,18 @@ def main() -> int:
             print("recommended:", rec.get("name"), "stale=", rec.get("stale"),
                   "bytes=", rec.get("total_bytes"), "expected=", data.get("expected_bytes"))
             if rec.get("stale"):
-                failures.append(f"推荐了缓存旧文件的线路: {rec.get('name')}")
+                # 「所有线路都是旧文件」不是代码 bug，而是**发行版没传全**：
+                # GitHub 已经发了新版，但国内镜像（Gitee/gh-proxy）还缓存着上一版。
+                # 这种情况下代码只能退而求其次给一个旧线路并标 stale —— 用户点下载
+                # 会拿到上一版。修法是把当前版本重新上传到国内线路，不是改代码。
+                fresh = [d["name"] for d in ok_ones if not d.get("stale")]
+                if not fresh:
+                    failures.append(
+                        f"所有下载线路都是旧文件（推荐了 {rec.get('name')}，"
+                        f"{rec.get('total_bytes')} B ≠ 期望 {data.get('expected_bytes')} B）"
+                        " —— 这是发行版没传到国内镜像，需要重新上传当前版本，不是代码问题")
+                else:
+                    failures.append(f"推荐了缓存旧文件的线路: {rec.get('name')}（可选新线路: {fresh}）")
             if rec.get("name") == "GitHub" and any(
                 d["name"] != "GitHub" and d.get("ok") and not d.get("stale") for d in ok_ones
             ):
