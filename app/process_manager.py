@@ -297,6 +297,13 @@ def start_room(room_id: str) -> bool:
         return False
 
     # 记录 PID 到文件
+    # **父进程必须立刻关掉这个句柄**：它只是给子进程用的 stdout。
+    # 不关的话每重启一次就泄漏一个文件句柄，而且 Windows 上
+    # 「删除房间」rmtree 会因为 bot.log 还被 WebUI 持有而报 WinError 32。
+    try:
+        log_fp.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("close log handle failed: %s", exc)
     _pidfile(room_id).write_text(str(proc.pid), encoding="utf-8")
     _procs[room_id] = proc
     logger.info("room %s started, pid=%d", room_id, proc.pid)
@@ -526,20 +533,74 @@ def sys_executable() -> str:
 # ── 日志清理（行数轮转 + 时间过期删除） ────────────────────
 
 _MAX_LOG_LINES = 5000
+#: 单个 bot.log 的字节上限。5000 行正常日志约 1MB；一行的极端情况（整段 traceback）
+#: 靠这个上限兜住，否则行数永远不超、文件无限增长。
+_MAX_LOG_BYTES = 8 * 1024 * 1024
 _MAX_LOG_DAYS = 3
 _LOG_CLEANUP_INTERVAL = 3600  # 每小时检查一次
 
 
-def truncate_log_file(path: Path, max_lines: int = _MAX_LOG_LINES) -> bool:
-    """将日志文件截断为最后 max_lines 行。"""
-    if not path.exists() or path.stat().st_size == 0:
+def truncate_log_file(path: Path, max_lines: int = _MAX_LOG_LINES,
+                      max_bytes: int = _MAX_LOG_BYTES) -> bool:
+    """把日志截断到「最后 max_lines 行」且「不超过 max_bytes」，只读尾部。
+
+    两个上限都必须有（和托盘日志同一个教训）：
+    - **只按行数**：一行很长（整段 traceback、单行 JSON）时行数很少却几十 MB，
+      文件永远不缩；
+    - **读整个文件**：房间每次启动/重启都会调用这里，一个几百 MB 的 bot.log
+      每次都被整份读进内存，WebUI 会卡住甚至 OOM。
+
+    所以大文件按块从尾部读，凑够 max_lines 行或 max_bytes 字节就停。
+    """
+    if not path.exists():
         return True
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        if len(lines) > max_lines:
-            tail = lines[-max_lines:]
-            path.write_text("\n".join(tail) + "\n", encoding="utf-8")
-            logger.info("truncated %s: %d -> %d lines", path.name, len(lines), max_lines)
+        size = path.stat().st_size
+        if size == 0:
+            return True
+        if size <= max_bytes:
+            # 小文件：行数超了才动
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if len(lines) <= max_lines:
+                return True
+            lines = lines[-max_lines:]
+        else:
+            # 大文件：只从尾部读，最多读到 max_bytes 的一倍多（留余量给不完整的首行）
+            budget = min(size, max(int(max_bytes * 1.2), 64 * 1024))
+            with path.open("rb") as fh:
+                fh.seek(size - budget)
+                raw = fh.read(budget)
+            text = raw.decode("utf-8", errors="replace")
+            if size > budget:
+                # 只有换行后面**还有内容**时才丢首行。整块就是某一行超长尾巴时
+                # （换行在末尾），丢首行会把内容全丢掉 —— 别再犯这个错。
+                nl = text.find("\n")
+                if nl >= 0 and nl + 1 < len(text):
+                    text = text[nl + 1:]
+            lines = text.splitlines()
+            if len(lines) > max_lines:
+                lines = lines[-max_lines:]
+            # 行数没超但字节还超：继续从尾部裁
+            kept: list[str] = []
+            used = 0
+            for ln in reversed(lines):
+                cost = len(ln.encode("utf-8")) + 1
+                if used + cost > max_bytes:
+                    break
+                kept.append(ln)
+                used += cost
+            lines = list(reversed(kept))
+            if not lines:
+                # 单行本身就超过上限：保留这一行的**尾部**（最后一行通常是
+                # `RuntimeError: xxx`，比整段开头更有用），而不是丢掉全部内容
+                last = (text.splitlines() or [""])[-1]
+                # 留余量给行尾换行：Windows 上 write_text 会把 LF 写成 CRLF，
+                # 按「字节数恰好等于上限」切会在落盘后超 1 字节。
+                last_b = last.encode("utf-8")[-(max_bytes - 4):]
+                lines = [last_b.decode("utf-8", errors="replace")]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        logger.info("truncated %s: %d B -> %d B (%d lines)",
+                    path.name, size, path.stat().st_size, len(lines))
         return True
     except Exception as exc:
         logger.warning("truncate log failed %s: %s", path, exc)

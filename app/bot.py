@@ -33,6 +33,18 @@ from .storage import GiftEvent, StatsStore
 _HEARTBEAT_INTERVAL = 15.0
 # 弹幕连接守护间隔（秒）
 _DANMAKU_GUARD_INTERVAL = 60.0
+
+#: 多久没收到**任何**事件就判定连接假死并强制重连。
+#: B站 服务端每 ~30 秒回一次心跳包（op=5），库里会把它 dispatch 成 "VIEW" 事件，
+#: 所以健康的连接至少每 30 秒就会踩一次 `_on_all_events`。
+#: 取 180 秒 = 6 个心跳周期，既不会误杀，又能在假死后 3 分钟内自愈。
+#:
+#: 为什么必须有这条：库自带的心跳超时检测依赖 `ws_recv` 抛异常或
+#: `ws_close` 能把阻塞中的接收打断。半开连接（NAT 超时、Wi-Fi 漫游、休眠恢复）
+#: 下这两件事都可能不发生 —— Task 永远活着、永远等不到数据，
+#: 而守护进程只看「进程活着 + 心跳文件在更新」，于是永远不重启。
+#: 用户看到的正是「机器人开着但什么都不收，点一下重启就好了」。
+_DANMAKU_SILENCE_TIMEOUT = 180.0
 # 后台任务（发消息/定时消息/心跳/凭证）巡检间隔（秒）
 _BG_GUARD_INTERVAL = 30.0
 # 以 uid 为键的内存表上限。机器人要连续跑几个月，这些表不清就会一直涨：
@@ -40,6 +52,9 @@ _BG_GUARD_INTERVAL = 30.0
 # 32/64 位 Windows 上内存涨到一定程度会 MemoryError → 进程直接退出，
 # 用户看到的就是「机器人莫名其妙关了」。
 _MAX_TRACKED_UIDS = 3000            # 冷却/点赞等纯标量表（每条 8~24 字节）
+#: 出站去重键 `_pending_texts` 的上限。正常运行时它 ≈ 队列长度（几十条），
+#: 只有泄漏才会涨上去；这里给一个远大于正常值的兜底。
+_MAX_PENDING_TEXTS = 2000
 _MAX_CHAT_CONTEXTS = 800            # AI 上下文（每条上限 10 条消息，实际占用大得多）
 _MAX_CONTEXT_MESSAGES = 50          # 单个上下文最多保留多少条（配置写大了也夹住）
 # 同一后台任务在窗口内最多重建多少次；超了就放弃（避免永久崩溃的任务
@@ -106,12 +121,17 @@ class LiveRobot:
         # 诊断用时间戳：写进心跳文件，便于排查「收不到礼物/弹幕」
         self._last_gift_ts: int = 0
         self._last_danmaku_ts: int = 0
+        #: 最近一次收到**任意**事件的时间（含心跳包 → VIEW）。
+        #: 假死检测就靠它：健康连接每 ~30s 必然刷新一次。
+        self._last_event_ts: float = 0.0
         self._last_uid_warn_ts: float = 0.0
         self._is_live: bool = False
         # 礼物去重：(uid, tid/rnd) -> 最近时间戳（仅用于新协议灰度期防重复计账）
         self._recent_gifts: dict[tuple, float] = {}
         # 上舰去重：(uid, start_time) -> 最近时间戳（一次开通会推送三种事件）
         self._recent_guards: dict[tuple, float] = {}
+        #: 弹幕重连互斥（guard / 凭证热更新 / poll 三处都会触发重连）
+        self._danmaku_restart_lock: Optional[asyncio.Lock] = None
         # 统计写入失败计数器（写库被锁/磁盘忙时兜底重试仍失败），进心跳供 WebUI 显示
         self._dropped_stats = 0
         # 因缺少 uid 而被丢弃的礼物数 + 最近发生时间（凭证失效/匿名连接的信号）
@@ -243,6 +263,12 @@ class LiveRobot:
             ),
             "last_gift_ts": getattr(self, "_last_gift_ts", 0),
             "last_danmaku_ts": getattr(self, "_last_danmaku_ts", 0),
+            # 距离上次收到**任意**事件（含心跳包）多少秒：持续增大 = 连接假死。
+            # 健康连接每 ~30 秒就会刷新一次，>180 秒就会被 guard 强制重连。
+            "event_silent_seconds": (
+                int(time.time() - self._last_event_ts)
+                if getattr(self, "_last_event_ts", 0) else -1
+            ),
             "queue_depth": self._msg_queue.qsize(),
             # 统计写入失败条数：非 0 说明有礼物/上舰因为写库失败没能记上（日志里有详细信息）
             "dropped_stats": getattr(self, "_dropped_stats", 0),
@@ -294,11 +320,20 @@ class LiveRobot:
     # ── 后台任务守护（发消息/定时消息/心跳/凭证）──────────────
 
     #: 需要长期存活的后台任务：(属性名, 重建用的工厂方法名)
+    #: 需要被 `_background_guard_loop` 监督的常驻任务。
+    #: **新增任何 `asyncio.create_task(常驻协程)` 都必须登记到这里**，
+    #: 否则它一旦异常退出就是永久静默失效（进程、心跳、WebUI 全都还显示运行中）。
+    #: 自检 `check_bg_task_supervision.py` 会枚举 create_task 的调用点与这张表对账。
+    #:
+    #: `_danmaku_guard_task` 也必须在表里：它是「连接假死」的唯一检测者，
+    #: 它自己死了就再也没人管弹幕连接了（用户看到的就是「开着但不收数据」）。
+    #: `_bg_guard_task` 不能登记（没人监督监督者），它的存活由心跳间接体现。
     _BG_TASKS: tuple[tuple[str, str], ...] = (
         ("_msg_worker_task", "_message_worker"),
         ("_periodic_task", "_periodic_message_loop"),
         ("_heartbeat_task", "_heartbeat_loop"),
         ("_credential_task", "_credential_watch_loop"),
+        ("_danmaku_guard_task", "_danmaku_guard_loop"),
     )
 
     async def _background_guard_loop(self) -> None:
@@ -357,6 +392,15 @@ class LiveRobot:
             for uid in victims:
                 self._like_counts.pop(uid, None)
             trimmed["_like_counts"] = over
+        # `_pending_texts`（出站去重键）正常由 `_message_worker` 逐条释放，
+        # 上限≈队列长度。但任何一次异常/取消都可能留下一条残留，几个月跑下来
+        # 只增不减。它是 set（没有顺序），无法做「丢最旧」，
+        # 所以超上限时整体清空 —— 后果最多是极端情况下多回一句话，
+        # 远好过缓存在内存里无限涨。
+        over_pending = len(self._pending_texts) - _MAX_PENDING_TEXTS
+        if over_pending > 0:
+            self._pending_texts.clear()
+            trimmed["_pending_texts"] = over_pending
         return trimmed
 
     def _check_background_tasks(self) -> list[str]:
@@ -404,31 +448,82 @@ class LiveRobot:
                 self.logger.error("重建后台任务 %s 失败：%s", factory_name, exc2)
         return restarted
 
+    def _danmaku_silent_seconds(self) -> Optional[float]:
+        """距离上次收到任意事件过了多少秒。无记录时返回 None（不参与判定）。"""
+        last = getattr(self, "_last_event_ts", 0.0)
+        if not last:
+            return None
+        return max(0.0, time.time() - last)
+
+    def _danmaku_health_action(self) -> Optional[str]:
+        """判断弹幕连接是否需要重连；健康返回 None，否则返回原因文案。
+
+        纯函数（只看内存状态），方便自检脚本在不起真实连接的情况下验证判定逻辑。
+        覆盖三种故障：
+
+        1. **任务已结束**（库把所有主机都试完了、或 ws 出错退出）→ 重连
+        2. **对象在、任务没了**（`_start_danmaku` 中途抛异常留下的半截状态）→ 重连
+           这个状态以前是**永久卡死**：`_poll_once` 看到 `_danmaku is not None`
+           就不再启动，guard 看到 `task is None` 就 continue，两边都不管，
+           而心跳还会报 `danmaku_connected: true`。
+        3. **任务活着但长时间收不到任何事件**（半开连接/假死）→ 重连
+        """
+        if self._danmaku is None:
+            return None
+        task = self._danmaku_task
+        if task is None:
+            return "弹幕任务不存在（对象还在）"
+        if task.done():
+            exc = None
+            if not task.cancelled():
+                try:
+                    exc = task.exception()
+                except Exception:  # noqa: BLE001
+                    exc = None
+            return f"弹幕任务已结束（{exc!r}）" if exc is not None else "弹幕任务已结束"
+        if not self._is_live:
+            return None          # 没开播时不收数据是正常的
+        age = self._danmaku_silent_seconds()
+        if age is not None and age > _DANMAKU_SILENCE_TIMEOUT:
+            return f"连续 {int(age)} 秒没有收到任何事件（连接假死）"
+        return None
+
     async def _danmaku_guard_loop(self) -> None:
-        """弹幕任务异常结束（但进程还活着）时自动重连。"""
+        """弹幕连接的健康检查：任务结束 / 半截状态 / 连接假死，都自动重连。"""
         while True:
             await asyncio.sleep(_DANMAKU_GUARD_INTERVAL)
             try:
-                task = self._danmaku_task
-                if self._danmaku is None or task is None or not task.done():
+                reason = self._danmaku_health_action()
+                if reason is None:
                     continue
-                exc = None
-                if not task.cancelled():
-                    try:
-                        exc = task.exception()
-                    except Exception:  # noqa: BLE001
-                        exc = None
-                if exc is not None:
-                    self.logger.error("danmaku task died: %r — reconnecting", exc)
-                else:
-                    self.logger.warning("danmaku task finished unexpectedly — reconnecting")
+                self.logger.warning("danmaku guard: %s — reconnecting", reason)
                 await self._restart_danmaku()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 self.logger.error("danmaku guard error: %s", exc, exc_info=True)
 
+    def _restart_lock(self) -> asyncio.Lock:
+        """重连互斥锁（懒创建：`__init__` 之后才可能有事件循环）。"""
+        lock = getattr(self, "_danmaku_restart_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._danmaku_restart_lock = lock
+        return lock
+
     async def _restart_danmaku(self) -> None:
+        """重建弹幕连接（**串行化**）。
+
+        三个地方会同时想重连：健康检查 guard（60s 一轮）、凭证热更新、
+        `_poll_once` 发现掉线。它们都在同一个事件循环里，但中间有 await，
+        两个重连交错执行会留下「旧的 WS 没关 + 新的 task 被下一个重连覆盖」的
+        孤儿连接，越积越多（日志里表现为连上七八条然后突然全掉）。
+        用锁保证同一时刻只有一次重连在跑。
+        """
+        async with self._restart_lock():
+            await self._restart_danmaku_locked()
+
+    async def _restart_danmaku_locked(self) -> None:
         try:
             await self._stop_danmaku()
         except Exception as exc:  # noqa: BLE001
@@ -485,13 +580,24 @@ class LiveRobot:
                 new_credential = await self.auth.try_pick_up_new_credential()
                 if new_credential is None:
                     continue
-                self._swap_credential(new_credential)
+                await self._swap_credential(new_credential)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 self.logger.debug("credential watch error: %s", exc)
 
-    def _swap_credential(self, credential: Credential) -> None:
+    async def _swap_credential(self, credential: Credential) -> None:
+        """热更新凭证，并**重建弹幕连接**。
+
+        只替换对象是不够的：WebSocket 的鉴权是在 `connect()` 里用
+        `__send_verify_data()` 一次性完成的（见库 `live.py`），连接建立之后
+        再改 `credential` 属性对**已经打开的连接毫无作用**。
+
+        真实后果正好对上用户反馈：凭证过期时 B站 会把礼物事件的 uid/uname 抹掉
+        （匿名视角），统计因此全是 0 → 用户重新扫码 → 这里只换了对象、
+        连接还是旧会话 → **礼物依然没有 uid，统计依然是 0**。
+        用户看到的是「重新登录了也没用，重启一下才行」。
+        """
         self.credential = credential
         try:
             self.live_room.credential = credential
@@ -505,6 +611,13 @@ class LiveRobot:
         if self.auth is not None:
             self.auth.mark_ok()
         self.logger.info("credential hot-swapped (re-login detected)")
+        # 重建连接：让新的凭证真正生效（旧连接可能还是匿名/过期会话）
+        if self._danmaku is not None or self._danmaku_task is not None:
+            try:
+                await self._restart_danmaku()
+                self.logger.info("danmaku reconnected with new credential")
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning("reconnect after credential swap failed: %s", exc)
 
     async def shutdown(self) -> None:
         try:
@@ -596,10 +709,22 @@ class LiveRobot:
             assert self._danmaku is not None
             await self._danmaku.connect()
 
-        self._danmaku_task = asyncio.create_task(_run_connect())
+        try:
+            self._danmaku_task = asyncio.create_task(_run_connect())
+        except Exception:
+            # 建 task 失败（事件循环已关等极端情况）时不能留半截状态：
+            # `_danmaku` 有值、`_danmaku_task` 为空会让 `_poll_once` 以为
+            # 「已经连过」从而永不重试。这里清干净，下一轮 poll 会重新来。
+            self._danmaku = None
+            raise
+        self._last_event_ts = time.time()   # 给它一个宽限期，别刚连上就被判假死
         self.logger.info("danmaku connecting")
         # 记录开播日期
-        self.store.record_stream_date(_now().strftime("%Y-%m-%d"))
+        try:
+            self.store.record_stream_date(_now().strftime("%Y-%m-%d"))
+        except Exception as exc:  # noqa: BLE001
+            # 记日期失败不影响收礼物，绝不能让它把刚建好的连接打回去
+            self.logger.warning("record_stream_date failed: %s", exc)
 
     async def _stop_danmaku(self) -> None:
         if self._danmaku is not None:
@@ -1732,6 +1857,9 @@ class LiveRobot:
     async def _on_all_events(self, event: dict[str, Any]) -> None:
         event_type = event.get("type", "?")
         self._bump_event_count(event_type)
+        # 必须在这里记：下面有一串 early return（PK / 噪音 / 已知事件），
+        # 而心跳包是以 "VIEW" 事件进来的 —— 放到后面就永远数不到。
+        self._last_event_ts = time.time()
 
         # ── 捕获所有 PK 相关事件（不管叫什么名字） ──
         if event_type.startswith("PK_") or event_type.startswith("pk_"):
@@ -1990,15 +2118,23 @@ class LiveRobot:
             return
         self._pending_texts.add(key)
 
+        # 去重键必须**要么交给 _message_worker 清、要么自己还回去**。
+        # 中间那段 `await asyncio.sleep(delay)` 是可被取消的：任务一旦在这期间
+        # 被取消（或 put_nowait 抛出 QueueFull 之外的异常），键就永远留在
+        # `_pending_texts` 里 —— 那句话（同一个人同一内容）以后**再也发不出去**，
+        # 而界面上毫无异常。用 finally 兜住所有非成功路径。
         delay = getattr(self.config.rate_limit, 'reply_delay_seconds', 3.0)
-        if delay > 0:
-            await asyncio.sleep(delay)
-        # Directly enqueue (dedup already done). _pending_texts cleared by _message_worker.
+        enqueued = False
         try:
+            if delay > 0:
+                await asyncio.sleep(delay)
             self._msg_queue.put_nowait(OutboundMessage(text=text, reply_uid=reply_uid))
+            enqueued = True
         except asyncio.QueueFull:
-            self._pending_texts.discard(key)
             self.logger.warning("queue full, cannot enqueue: reply_uid=%s text=%s", reply_uid, text)
+        finally:
+            if not enqueued:
+                self._pending_texts.discard(key)
 
     def _get_guard_level(self, event: dict[str, Any]) -> int:
         """Extract guard level from welcome event. 0=none, 3=captain, 2=commander, 1=governor."""

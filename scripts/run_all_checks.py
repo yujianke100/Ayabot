@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 import time
@@ -71,7 +72,10 @@ def main() -> int:
         elapsed = time.time() - started
         if rc != 0:
             verdict = "FAIL"
-        elif "SKIP" in out:
+        elif re.search(r"^SKIP[：:]", out.strip(), re.M):
+            # 只认「整行以 SKIP： 开头」的显式跳过。
+            # 以前只要输出里出现 "SKIP" 两个字就算跳过，导致中间打印过
+            # 「xx 豁免 SKIP」的检查脚本被误报成跳过（它其实全绿跑完了）。
             verdict = "SKIP"
         else:
             verdict = "PASS"
