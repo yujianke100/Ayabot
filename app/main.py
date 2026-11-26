@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from .config import (
+    ConfigError,
     ensure_room_dirs,
     load_config,
     migrate_legacy_data,
@@ -49,7 +50,16 @@ async def _run(config_path: str) -> None:
     from .auth import AuthManager, CredentialError  # noqa: PLC0415
     from .bot import LiveRobot  # noqa: PLC0415
 
-    config = load_config(config_path)
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        # 子进程模式（非冻结 exe）：配置写错时不要甩 traceback。
+        # bot.log 里应该只有一行人能看懂的话，否则守护进程会一遍遍重启，
+        # 用户翻到的永远是「invalid literal for int()」这种没头没尾的栈。
+        logging.basicConfig(level=logging.INFO,
+                            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        logging.getLogger("bili-live-robot").error("%s", exc)
+        return
     _setup_logging(config.runtime.log_level)
     asyncio.get_running_loop().set_exception_handler(
         lambda loop, ctx: logging.getLogger("bili-live-robot").error(

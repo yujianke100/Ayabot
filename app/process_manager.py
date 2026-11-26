@@ -140,6 +140,21 @@ def _write_bot_error(data_dir: Path, exc: BaseException) -> None:
         logger.debug("write bot_error failed: %s", exc2)
 
 
+def _write_bot_error_reason(data_dir: Path, reason: str) -> None:
+    """已经有可读原因时直接写，不要再包一层 `RuntimeError: ... | traceback`。
+
+    （`_write_bot_error` 会把异常类型和栈尾拼起来，对「进程秒退」这种
+    本身就只有一句话的原因会变成同一个句子重复两遍。）
+    """
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "bot_error.json").write_text(
+            json.dumps({"ts": int(time.time()), "reason": reason[:400]}, ensure_ascii=False),
+            encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("write bot_error reason failed: %s", exc)
+
+
 async def start_bot_in_process(room_id: str) -> bool:
     """在当前进程内启动 Bot（asyncio Task），返回 True 表示已受理。
 
@@ -153,7 +168,7 @@ async def start_bot_in_process(room_id: str) -> bool:
 
     from app.auth import AuthManager  # noqa: PLC0415
     from app.bot import LiveRobot  # noqa: PLC0415
-    from app.config import load_config  # noqa: PLC0415
+    from app.config import ConfigError, load_config  # noqa: PLC0415
 
     root = _get_rooms_dir()
     rooms_dir = root / "rooms" / room_id
@@ -164,8 +179,17 @@ async def start_bot_in_process(room_id: str) -> bool:
 
     try:
         config = load_config(str(config_path))
+    except ConfigError as exc:
+        # 配置写错了是**用户能自己修**的问题，不该报一个栈了事。
+        # 同时也写进 bot_error.json，让 WebUI 的房间卡片直接把原因显示出来
+        # （否则用户只看到「启动失败，请查看该房间的日志」，而 200 行配置里
+        # 根本找不到是哪一项）。
+        logger.error("room %s 配置有问题：%s", room_id, exc)
+        _write_bot_error(rooms_dir / "data", exc)
+        return False
     except Exception as exc:
         logger.error("room %s config load failed: %s", room_id, exc, exc_info=True)
+        _write_bot_error(rooms_dir / "data", exc)
         return False
 
     auth = AuthManager(config)
@@ -306,8 +330,53 @@ def start_room(room_id: str) -> bool:
         logger.debug("close log handle failed: %s", exc)
     _pidfile(room_id).write_text(str(proc.pid), encoding="utf-8")
     _procs[room_id] = proc
+
+    # **Popen 成功 ≠ 启动成功**。配置写错、依赖缺失、端口冲突这些都会让子进程在
+    # 一两秒内退出，而以前这里立刻 `return True` —— 界面弹「已启动」，
+    # 下一秒房间又变回停止，用户看到的是「启动了但是没起来」，而且拿不到原因。
+    # （第 24 轮在托盘上修过同一类问题：「启动成功」必须是可验证的状态。）
+    # 这里只等到「确认它还活着」就返回，失败则把子进程写下的最后一条错误带回去。
+    deadline = time.time() + _START_VERIFY_SECONDS
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            reason = _last_error_from_log(log_path) or f"进程启动后立即退出（exit={proc.returncode}）"
+            _procs.pop(room_id, None)
+            _pidfile(room_id).unlink(missing_ok=True)
+            _write_bot_error_reason(rooms_dir / "data", reason)
+            logger.error("room %s 启动后立即退出：%s", room_id, reason)
+            return False
+        time.sleep(0.1)
     logger.info("room %s started, pid=%d", room_id, proc.pid)
     return True
+
+
+def _last_error_from_log(path: Path, max_bytes: int = 64 * 1024) -> str:
+    """从 bot.log 尾部取出最后一条 ERROR（给「启动后立即退出」用）。
+
+    子进程崩在 `load_config` 里时，bot.log 只有一行可读的 `[ERROR] ...`；
+    把那一行返回给用户，比「启动失败，请查看日志」有用得多。
+    """
+    try:
+        if not path.exists():
+            return ""
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > max_bytes:
+                fh.seek(size - max_bytes)
+            text = fh.read().decode("utf-8", errors="replace")
+        for line in reversed(text.splitlines()):
+            if "[ERROR]" in line or "[CRITICAL]" in line:
+                # 去掉时间戳前缀，保留人话部分
+                idx = line.find("] ")
+                text_part = (line[idx + 2:] if idx > 0 else line).strip()
+                # 日志格式是 `时间 [级别] 记录器名: 消息`，把记录器名前缀去掉
+                for prefix in ("bili-live-robot: ", "app.process_manager: "):
+                    if text_part.startswith(prefix):
+                        text_part = text_part[len(prefix):]
+                return text_part[:400]
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
 
 
 def stop_room(room_id: str) -> bool:
@@ -533,6 +602,10 @@ def sys_executable() -> str:
 # ── 日志清理（行数轮转 + 时间过期删除） ────────────────────
 
 _MAX_LOG_LINES = 5000
+#: `start_room()` 启动后等多久确认子进程真的活着。
+#: 太短会漏掉慢崩溃，太长会让「启动」按钮卡顿；1.5 秒能覆盖
+#: 配置写错 / 依赖缺失 / 端口冲突这类「秒退」情况。
+_START_VERIFY_SECONDS = 1.5
 #: 单个 bot.log 的字节上限。5000 行正常日志约 1MB；一行的极端情况（整段 traceback）
 #: 靠这个上限兜住，否则行数永远不超、文件无限增长。
 _MAX_LOG_BYTES = 8 * 1024 * 1024

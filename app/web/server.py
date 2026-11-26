@@ -279,14 +279,22 @@ def _room_data_file(room_id: str, name: str) -> Path:
 
 
 def _read_room_json(room_id: str, name: str) -> dict:
-    try:
-        path = _room_data_file(room_id, name)
-        if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-    except Exception:  # noqa: BLE001
-        pass
+    """读房间状态文件；主路径不存在时退回默认的 `rooms/<id>/data/`。
+
+    兜底是必要的：配置解析失败时（比如 `anchor_uid` 写成字母），
+    机器人会把原因写到 `rooms/<id>/data/bot_error.json`，
+    但 `_room_data_file()` 走的是「配置文件里的 sqlite_path 目录」——
+    配置本身半好半坏时两者可能不是同一个目录，用户就看不到原因了。
+    """
+    for path in (_room_data_file(room_id, name),
+                 Path(_ROOMS_BASE_DIR).resolve() / "rooms" / room_id / "data" / name):
+        try:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+        except Exception:  # noqa: BLE001
+            continue
     return {}
 
 
@@ -1136,8 +1144,17 @@ async def _recover_room(room_id: str, reason: str, now: float) -> None:
     try:
         ok = await restart_room_async(room_id)
         if not ok:
-            logger.error("supervisor: room %s restart failed", room_id)
+            # 自动重启失败**必须落到界面上**。以前这里只打一行日志：
+            # 用户看到的是「进程已退出」+ 崩溃次数一直涨，然后 15 分钟后变成
+            # 「已暂停自动重启」—— 从头到尾不知道到底是配置写错了、
+            # 依赖缺失还是端口被占。重启失败的原因是确定性的（不是网络抖动），
+            # 所以把最新一次 bot_error 写进 crash_info，让它一直显示。
+            detail = _take_bot_error(room_id)
+            why = f"（自动重启失败：{detail}）" if detail else "（自动重启失败）"
+            _write_crash_info(room_id, f"{reason}{why}"[:300], exit_code)
+            logger.error("supervisor: room %s restart failed: %s", room_id, detail or "-")
     except Exception as exc:  # noqa: BLE001
+        _write_crash_info(room_id, f"{reason}（自动重启异常：{exc}）"[:300], exit_code)
         logger.error("supervisor: room %s restart error: %s", room_id, exc, exc_info=True)
 
 
@@ -3293,7 +3310,11 @@ async def api_start_room(room_id: str):
         return JSONResponse({"error": f"房间 {room_id} 不存在"}, status_code=404)
     ok = await start_room_async(room_id)
     if not ok:
-        return JSONResponse({"error": "启动失败，请查看该房间的日志"}, status_code=500)
+        # 把「为什么起不来」直接告诉用户。最常见的是配置写错（ConfigError），
+        # 那种情况下日志里有一行人能看懂的话，但用户不该被迫去翻日志。
+        detail = str(_read_room_json(room_id, "bot_error.json").get("reason") or "")
+        msg = f"启动失败：{detail}" if detail else "启动失败，请查看该房间的日志"
+        return JSONResponse({"error": msg[:400]}, status_code=500)
     _mark_desired(room_id, True)
     _save_room_states()
     _clear_crash_state(room_id)
@@ -3318,7 +3339,9 @@ async def api_restart_room(room_id: str):
     if not ok:
         # 200 + {"ok": false} 是同一个病根：前端 `if (res.ok)` 会当成成功，
         # 用户看到「已重启」而机器人根本没起来（第 23 轮在配置保存上修过一次）。
-        return JSONResponse({"error": "重启失败，请查看该房间的日志"}, status_code=500)
+        detail = str(_read_room_json(room_id, "bot_error.json").get("reason") or "")
+        msg = f"重启失败：{detail}" if detail else "重启失败，请查看该房间的日志"
+        return JSONResponse({"error": msg[:400]}, status_code=500)
     _mark_desired(room_id, True)
     # 手动重启等于用户明确要求「重新来一次」：清掉崩溃记录和限流计数，
     # 否则「连续 5 次崩溃」的计数留着，下一次崩溃会立刻又被暂停自动重启，
@@ -10190,7 +10213,15 @@ createApp({
                 const res = await fetch(`/api/rooms/${roomId}/start`, {
                     method: 'POST', credentials: 'include',
                 });
-                if (!res.ok) throw new Error((await res.text()).slice(0,80));
+                if (!res.ok) {
+                    // 后端会把原因放在 {"error": "..."} 里（比如配置写错的字段名）。
+                    // 以前直接把原始 JSON 截 80 字塞进 alert，用户看到的是
+                    // {"error":"配置文件 C:\Users\...  —— 关键信息全被截掉了。
+                    const txt = await res.text();
+                    let msg = txt;
+                    try { msg = JSON.parse(txt).error || txt; } catch (_) {}
+                    throw new Error(msg);
+                }
                 await loadRooms();
             } catch(e) { alert('启动失败: ' + e.message); }
             finally {

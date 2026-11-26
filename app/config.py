@@ -201,15 +201,163 @@ class AppConfig:
     custom_fortunes: dict = field(default_factory=dict)
 
 
+class ConfigError(Exception):
+    """配置文件内容有问题（**不是**代码 bug），带可读的定位信息。
+
+    以前这里直接漏出 `KeyError: 'anchor_uid'` / `ValueError: invalid literal
+    for int() with base 10: 'abc'` / `ScannerError: ...`：
+    - 用户手改 config.yaml 打错一个字，界面上只看到「启动失败，请查看日志」；
+    - 日志里那行异常**不说是哪个文件、哪个字段**，200 行的配置里没法找；
+    - 子进程模式下还会把 traceback 打到 bot.log 然后被守护进程反复重启。
+
+    这里把它变成「哪个文件、哪个字段、期望什么、当前是什么」。
+    """
+
+    def __init__(self, path: str | Path, message: str) -> None:
+        self.path = str(path)
+        self.message = message
+        super().__init__(f"配置文件 {self.path}：{message}")
+
+
+#: 必需的顶层数值字段（缺失/写错都是最常见的用户错误）
+_REQUIRED_INT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("room_display_id", "直播间号"),
+    ("anchor_uid", "主播 UID"),
+)
+
+#: 可选的数值字段：写错时也要点名（不打出来用户根本找不到）
+_OPTIONAL_INT_PATHS: tuple[tuple[str, str], ...] = (
+    ("features.periodic_message_interval_seconds", "定时消息间隔（秒）"),
+    ("features.danmaku_log_max_entries", "弹幕日志上限条数"),
+    ("features.danmaku_retention_days", "弹幕保留天数"),
+    ("features.gift_retention_days", "礼物保留天数"),
+    ("features.honor_welcome_min_level", "荣耀欢迎最低等级"),
+    ("rate_limit.send_interval_seconds", "发送间隔（秒）"),
+    ("rate_limit.max_queue_size", "队列长度"),
+    ("rate_limit.max_text_len", "单条弹幕字数上限"),
+    ("runtime.poll_interval_seconds", "轮询间隔（秒）"),
+    ("web_ui.port", "WebUI 端口"),
+)
+
+#: 可选的浮点字段
+_OPTIONAL_FLOAT_PATHS: tuple[tuple[str, str], ...] = (
+    ("rate_limit.send_interval_seconds", "发送间隔（秒）"),
+    ("runtime.poll_interval_seconds", "轮询间隔（秒）"),
+)
+
+
+def _dig(raw: dict, dotted: str) -> tuple[bool, Any]:
+    cur: Any = raw
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return False, None
+        cur = cur[part]
+    return True, cur
+
+
+def _validate_config_values(p: Path, raw: dict) -> None:
+    """在构造 AppConfig **之前**把最常见的用户错误点出来。
+
+    只做「能给出好错误」的那部分校验；剩下的靠外层 try 兜住（至少带文件名）。
+    """
+    for key, label in _REQUIRED_INT_FIELDS:
+        if key not in raw or raw[key] in (None, ""):
+            raise ConfigError(p, f"缺少必填项 `{key}`（{label}）")
+        try:
+            int(raw[key])
+        except (TypeError, ValueError):
+            raise ConfigError(
+                p, f"`{key}`（{label}）必须是数字，当前是 {raw[key]!r}") from None
+
+    for dotted, label in _OPTIONAL_INT_PATHS:
+        exists, val = _dig(raw, dotted)
+        if not exists or val is None or val == "":
+            continue
+        try:
+            int(val)
+        except (TypeError, ValueError):
+            raise ConfigError(
+                p, f"`{dotted}`（{label}）必须是整数，当前是 {val!r}") from None
+
+    # 端口范围：0 和 70000 这种写错会变成「服务起不来」而没有任何提示
+    exists, port = _dig(raw, "web_ui.port")
+    if exists and port not in (None, ""):
+        try:
+            pv = int(port)
+        except (TypeError, ValueError):
+            raise ConfigError(p, f"`web_ui.port` 必须是整数，当前是 {port!r}") from None
+        if not (1 <= pv <= 65535):
+            raise ConfigError(p, f"`web_ui.port` 必须在 1–65535 之间，当前是 {pv}")
+
+    # 必须是非空字符串的关键字段
+    for dotted, label in (("bot_name", "机器人昵称"),):
+        exists, val = _dig(raw, dotted)
+        if exists and isinstance(val, (dict, list)):
+            raise ConfigError(p, f"`{dotted}`（{label}）应该是字符串，当前是 {type(val).__name__}")
+
+
 def _read_yaml(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+    """读 YAML，并把语法错误变成「哪个文件、第几行」。
+
+    `yaml.ScannerError` 的原文是
+    `while scanning for the next token found character '	' that cannot start any token`，
+    用户看到这行完全不知道是自己的 config.yaml 缩进用了 tab。
+    """
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        where = f"第 {mark.line + 1} 行第 {mark.column + 1} 列" if mark else ""
+        problem = getattr(exc, "problem", None) or str(exc).splitlines()[0]
+        hint = ""
+        # 不能靠 problem 文本里有没有制表符来判断：YAML 的提示是
+        # "found character '\\t' ..."，里面是转义后的两个字符。
+        # 直接读出错那一行的真实内容最可靠。
+        tab_hint = False
+        if mark is not None:
+            try:
+                src_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                if 0 <= mark.line < len(src_lines):
+                    # column 是 0 基，且制表符本身就落在那一列上，所以要 +1
+                    tab_hint = "	" in src_lines[mark.line][: max(mark.column + 1, 1)]
+            except OSError:
+                tab_hint = False
+        if tab_hint or "tab" in str(problem).lower():
+            hint = "（YAML 不允许用 Tab 缩进，请改成空格）"
+        elif "mapping values are not allowed" in str(problem):
+            hint = "（缩进层级不对：这一行比上一行多缩进了一个键）"
+        raise ConfigError(path, f"YAML 语法错误{where}：{problem}{hint}") from None
+    except UnicodeDecodeError as exc:
+        raise ConfigError(
+            path, f"文件不是 UTF-8 编码（{exc.reason}）。"
+                  "如果用记事本另存过，请在「另存为」里把编码选成 UTF-8") from None
     if not isinstance(data, dict):
-        raise ValueError("Config root must be a mapping")
+        raise ConfigError(path, f"配置的根节点必须是键值对，当前是 {type(data).__name__}")
     return data
 
 
 def load_config(path: str = "config.yaml") -> AppConfig:
+    """加载配置文件（带可读错误）。
+
+    真正的解析在 `_load_config_impl`；这里把任何「配置内容问题」统一变成
+    `ConfigError`，让上层能打印/展示「哪个文件、哪个字段、当前是什么」，
+    而不是漏出 `KeyError: 'anchor_uid'` 这种对用户毫无意义的栈。
+    """
+    try:
+        return _load_config_impl(path)
+    except ConfigError:
+        raise
+    except FileNotFoundError:
+        raise
+    except (KeyError, ValueError, TypeError) as exc:
+        # 兜底：`_validate_config_values` 没覆盖到的字段类型错误。
+        # KeyError 的 str() 自带引号，去掉更像人话。
+        detail = str(exc).strip("'") if isinstance(exc, KeyError) else str(exc)
+        raise ConfigError(path, f"配置项类型/取值不对：{detail}") from None
+
+
+def _load_config_impl(path: str = "config.yaml") -> AppConfig:
     """加载配置文件，path 相对于项目根目录或绝对路径.
 
     Args:
@@ -222,6 +370,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
         raise FileNotFoundError(f"Config file not found: {path}. Copy config.example.yaml to config.yaml")
 
     raw = _read_yaml(p)
+    _validate_config_values(p, raw)
     cfg_dir = p.resolve().parent
 
     credential = raw.get("credential", {})

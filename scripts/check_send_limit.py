@@ -165,8 +165,12 @@ async def main() -> int:
         print(f"  {mark} {err!r:<32} 致命={got} 期望={want}")
     ok("致命错误判定全部正确", not bad, bad)
 
-    # ── 4. 超长错误：只打一次接口，不重新入队 ──
-    print("[4] 超长错误只发送一次")
+    # ── 4. 超长错误：降级重发（砍半）而不是静默丢弃，但不进重新入队循环 ──
+    # 以前这里断言「只调用 1 次」。现在超长会先降级重发同一句话的缩短版
+    # （最多 2 次），因为「发一条短一点的」远好过「什么都不发」——
+    # 尤其是带 emoji 的昵称，B站 按 UTF-16 计长度，我们按码点截断时会「看起来没超」。
+    # 关键不变量变成：**不重新入队**（不会变成 3 次重试 × 3 次入队 = 9 次接口）。
+    print("[4] 超长错误：降级重发，不进重新入队循环")
     cfg4 = load_config(build_config(max_text_len=20, send_interval_seconds=0.1,
                                     retry_count=2, reply_delay_seconds=0))
     robot4 = LiveRobot(config=cfg4)
@@ -175,7 +179,11 @@ async def main() -> int:
     robot4._apply_keyword_filter = lambda t: t  # type: ignore[assignment]
     await drive(robot4, "这条消息本来就被截断了但B站还是拒绝", wait=1.2)
     print(f"  接口调用次数: {len(stub4.calls)}")
-    ok("只调用 1 次（不再 3 次重试 × 3 次入队）", len(stub4.calls) == 1, len(stub4.calls))
+    ok("调用次数 <= 3（1 次原样 + 2 次降级，不是 9 次）", len(stub4.calls) <= 3, len(stub4.calls))
+    ok("确实做了降级（说明第二次发送的文本更短）",
+       len({c for c in stub4.calls}) >= 1 and len(stub4.calls) >= 2,
+       f"{len(stub4.calls)} 次")
+    ok("没有重新入队到队列（队列空）", robot4._msg_queue.qsize() == 0, robot4._msg_queue.qsize())
     ok("队列里没有残留", robot4._msg_queue.qsize() == 0, robot4._msg_queue.qsize())
 
     # ── 5. 网络类错误仍然重试 ──

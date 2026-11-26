@@ -563,6 +563,18 @@ class LiveRobot:
         too_much = any(w in low for w in ("超出", "超过", "限制", "太长", "超长", "过长"))
         return about_length and too_much
 
+    @staticmethod
+    def _is_length_error(err: str) -> bool:
+        """这次失败是不是「太长」。用来决定要不要降级重发。
+
+        和 `_is_fatal_send_error` 的区别：那边是「重试没意义」的全集
+        （超长 + 限流 + 封禁），这里只挑出「截短之后还能发」的那一类。
+        """
+        low = err.lower()
+        about_length = ("长度" in low) or ("字数" in low) or ("太长" in low) or ("超长" in low)
+        too_much = any(w in low for w in ("超出", "超过", "限制", "太长", "超长", "过长"))
+        return (about_length and too_much) or ("1003212" in low)
+
     def _note_send_failure(self, err: str) -> None:
         if self.auth is None:
             return
@@ -811,14 +823,15 @@ class LiveRobot:
             # 于是默认的「感谢 {uname} 的 {gift_name} x{num}」「本月盲盒共…」在
             # 用户名或金额稍长时全部发送失败 —— 用户看到的是「机器人不回复」。
             max_len = max(int(getattr(self.config.rate_limit, "max_text_len", 20) or 20), 1)
-            if len(msg.text) > max_len:
-                original_len = len(msg.text)
-                # 留一个字符给省略号，别把句子截在半截数字上还看不出被截过
-                head = msg.text[: max_len - 1] if max_len >= 2 else msg.text[:max_len]
-                msg.text = (head + "…") if max_len >= 2 else head
+            if len(msg.text) > max_len or _utf16_len(msg.text) > max_len:
+                original_len, original_u16 = len(msg.text), _utf16_len(msg.text)
+                # 同时按码点和 UTF-16 收敛：emoji 在 B站 那边算 2 个字，
+                # 只按码点截断会「看起来没超长却被拒」。
+                msg.text = _cap_text(msg.text, max_len)
                 self.logger.warning(
-                    "message truncated: %d -> %d 字（B站上限 %d）text=%s",
-                    original_len, len(msg.text), max_len, msg.text,
+                    "message truncated: %d 字/%d UTF-16 -> %d 字/%d UTF-16（B站上限 %d）text=%s",
+                    original_len, original_u16, len(msg.text), _utf16_len(msg.text),
+                    max_len, msg.text,
                 )
 
             # Wait for rate limit interval
@@ -836,6 +849,8 @@ class LiveRobot:
 
             # Attempt to send
             success = False
+            # 超长降级重发的剩余次数（每次砍一半长度）
+            length_retry_left = 2
             try:
                 danmaku = Danmaku(text=msg.text)
                 retries = self.config.rate_limit.retry_count
@@ -847,7 +862,23 @@ class LiveRobot:
                         # 登录态失效时给出明确的「重新登录」引导，而不是无限重试
                         self._note_send_failure(err_str)
                         if self._is_fatal_send_error(err_str):
-                            # 重试也不可能成功：直接丢掉并说清怎么改，别打 9 次接口
+                            # 超长是「截短之后还能发」的 —— 不要静默丢掉这条回复，
+                            # 降级重发：每次砍一半（19 → 9 → 4 字），最多两次。
+                            # B站 的长度口径（码点 / UTF-16 / 字节）我们只能猜，
+                            # 但「发一条短一点的」永远好过「什么都不发」。
+                            if self._is_length_error(err_str) and length_retry_left > 0:
+                                length_retry_left -= 1
+                                before = msg.text
+                                msg.text = _cap_text(msg.text, max(4, len(before) // 2))
+                                if msg.text and msg.text != before:
+                                    self.logger.warning(
+                                        "send danmaku 被判定超长，降级重发：reply_uid=%s "
+                                        "%r -> %r（剩余降级次数 %d）",
+                                        msg.reply_uid, before, msg.text, length_retry_left,
+                                    )
+                                    danmaku = Danmaku(text=msg.text)
+                                    continue
+                            # 限流/封禁/截到 4 字还超长：确实没救了，别打 9 次接口
                             self.logger.error(
                                 "send danmaku 永久失败（不重试）：reply_uid=%s len=%d "
                                 "err=%s text=%s | 如果是超长，请把模板改短（B站上限 %s 字）",
@@ -2390,6 +2421,39 @@ KNOWN_GIFT_EVENTS = frozenset({
 #: 名字里带这些词就当成「礼物类」事件 —— 用来发现我们没接的新协议名。
 #: B站 的命名习惯基本都能命中（SEND_GIFT / UNIVERSAL_EVENT_GIFT / GIFT_STAR_PROCESS…）。
 _GIFT_LIKE_HINTS = ("GIFT", "COMBO")
+
+
+def _utf16_len(text: str) -> int:
+    """按 UTF-16 code unit 计的「长度」（JS / Java 口径）。
+
+    B站 前端是 JS，`String.length` 数的是 UTF-16 code unit：一个 emoji
+    （非 BMP 字符）算 **2**。而 Python 的 `len()` 数码点，算 1。
+    两边差一个整数倍时，B站 就会拒收「看起来没超长」的弹幕（code 1003212），
+    而我们的日志会写「提交成功」——用户看到的是机器人不回复。
+    """
+    return len(text.encode("utf-16-le", errors="surrogatepass")) // 2
+
+
+def _cap_text(text: str, max_len: int) -> str:
+    """把弹幕截到 B站 能接受的长度：**码点和 UTF-16 两种口径都不超**。
+
+    只按码点截断时，一个带 5 个 emoji 的 17 字文案其实是 22 个 UTF-16 单元，
+    照样会被拒。这里同时满足两个口径 —— 纯中文/英文文案两者相等，
+    行为与以前完全一致；只有 emoji/生僻字才会多截一两个字。
+    """
+    if max_len < 1:
+        return ""
+    out = text
+    if len(out) > max_len:
+        out = out[: max_len - 1] + "…" if max_len >= 2 else out[:max_len]
+    # 再按 UTF-16 收敛（可能要砍掉几个 emoji）
+    while out and _utf16_len(out) > max_len:
+        out = out[:-1]
+    if out != text and not out.endswith("…") and text.startswith(out) and len(out) < len(text):
+        # 砍到最后一个字符时补省略号，避免句子被截在半截数字上还看不出来
+        if max_len >= 2 and _utf16_len(out + "…") <= max_len:
+            out += "…"
+    return out
 
 
 def _looks_like_gift_event(name: str) -> bool:
