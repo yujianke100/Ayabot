@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import faulthandler
 import logging
 import shutil
 import sys
+import threading
 from pathlib import Path
 
 from .config import (
@@ -32,8 +34,21 @@ def _setup_logging(level: str) -> None:
     )
 
 
-def _install_exception_hooks() -> None:
-    """把未捕获异常写进日志，避免进程静默退出（Windows 上尤其重要）。"""
+#: faulthandler 的文件句柄：不持有引用会被 GC 关掉，硬崩溃时就写不出东西了
+_CRASH_FP: list = []
+
+
+def _install_exception_hooks(data_dir: Path | None = None) -> None:
+    """把未捕获异常写进日志，避免进程静默退出（Windows 上尤其重要）。
+
+    修的是用户那句「有时候机器人莫名其妙就没了，点一下重启又好了」：
+      - 主线程有 sys.excepthook（本来就有）；
+      - **非主线程没有** —— 托盘线程、各后台循环一旦抛异常，默认只写 stderr，
+        而窗口模式（console=False）下 tray_win 已经把 stdout/stderr 接到 devnull，
+        于是线程悄悄死掉、进程还活着，表现就是「图标还在但功能没了」；
+      - **硬崩溃（C 扩展访问违例、栈溢出）连异常钩子都走不到**，进程直接消失，
+        bot.log 里一个字都不会多。faulthandler 至少能留下最后一帧。
+    """
     logger = logging.getLogger("bili-live-robot")
 
     def _excepthook(exc_type, exc, tb):  # noqa: ANN001
@@ -43,6 +58,35 @@ def _install_exception_hooks() -> None:
         logger.critical("unhandled exception", exc_info=(exc_type, exc, tb))
 
     sys.excepthook = _excepthook
+
+    def _thread_hook(args):  # noqa: ANN001
+        if args.exc_type is SystemExit:
+            return
+        logger.critical(
+            "thread %s crashed", getattr(args.thread, "name", "?"),
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    threading.excepthook = _thread_hook
+
+    if data_dir is None:
+        return
+    try:
+        data_dir = Path(data_dir)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        crash_log = data_dir / "crash.log"
+        # 别让一份写了几百次的崩溃转储无限长大
+        try:
+            if crash_log.exists() and crash_log.stat().st_size > 1_000_000:
+                crash_log.write_text("", encoding="utf-8")
+        except OSError:
+            pass
+        fp = open(crash_log, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
+        faulthandler.enable(file=fp, all_threads=True)
+        _CRASH_FP.append(fp)
+    except Exception:
+        # 拿不到崩溃转储不能影响机器人本身
+        logging.getLogger("bili-live-robot").warning("faulthandler 启用失败", exc_info=True)
 
 
 async def _run(config_path: str) -> None:
@@ -139,8 +183,10 @@ def main() -> None:
     else:
         config_path = "config.yaml"
 
+    # 崩溃转储放到房间自己的 data/ 下（和 bot.log 同目录，用户找得到）
+    crash_dir = Path(config_path).resolve().parent / "data"
     try:
-        _install_exception_hooks()
+        _install_exception_hooks(crash_dir)
         asyncio.run(_run(config_path))
     except KeyboardInterrupt:
         pass
