@@ -237,6 +237,7 @@ _OPTIONAL_INT_PATHS: tuple[tuple[str, str], ...] = (
     ("rate_limit.max_text_len", "单条弹幕字数上限"),
     ("runtime.poll_interval_seconds", "轮询间隔（秒）"),
     ("web_ui.port", "WebUI 端口"),
+    ("web_ui.session_timeout", "登录有效期（秒）"),
 )
 
 #: 可选的浮点字段
@@ -288,6 +289,18 @@ def _validate_config_values(p: Path, raw: dict) -> None:
             raise ConfigError(p, f"`web_ui.port` 必须是整数，当前是 {port!r}") from None
         if not (1 <= pv <= 65535):
             raise ConfigError(p, f"`web_ui.port` 必须在 1–65535 之间，当前是 {pv}")
+
+    # 登录有效期：0/负数会让「登录后立刻失效」，过小会让用户在编辑时被踢下线
+    exists, st = _dig(raw, "web_ui.session_timeout")
+    if exists and st not in (None, ""):
+        try:
+            stv = int(st)
+        except (TypeError, ValueError):
+            raise ConfigError(p, f"`web_ui.session_timeout` 必须是整数秒，当前是 {st!r}") from None
+        if stv < 60:
+            raise ConfigError(
+                p, f"`web_ui.session_timeout` 不能小于 60 秒（当前 {stv}），"
+                   "否则登录后立刻失效、编辑到一半就被踢下线")
 
     # 必须是非空字符串的关键字段
     for dotted, label in (("bot_name", "机器人昵称"),):
@@ -791,42 +804,63 @@ def atomic_write_text(path: str | Path, text: str, backup: bool = False) -> None
             pass
 
 
+def _section(cfg: dict[str, Any], name: str) -> dict[str, Any]:
+    """取出 cfg[name]，不是 dict 就换成空 dict 并写回。
+
+    手改 config.yaml 写成 `web_ui:`（空值 → None）或粘成字符串是常见事。
+    以前 `setdefault("web_ui", {})` 拿到的是那个坏值，紧接着 `.update()` 就抛
+    `'NoneType' object has no attribute 'update'` —— 于是这个房间的配置
+    **在界面上永远存不上**，用户只能自己去翻 yaml。这里把形状修好再写。
+    """
+    sec = cfg.get(name)
+    if not isinstance(sec, dict):
+        sec = {}
+        cfg[name] = sec
+    return sec
+
+
 def update_config_from_dict(raw: dict[str, Any], cfg_path: str) -> bool:
-    """从 dict 更新 config.yaml (覆盖写入)."""
+    """从 dict 更新 config.yaml (覆盖写入).
+
+    配置文件本身读不出来（YAML 语法错、根节点不是键值对）时抛 `ConfigError`，
+    消息里带文件名/行号 —— 这种不能"静默失败"，否则用户会以为按钮没反应。
+    其它意外返回 False。
+    """
     try:
         import yaml
         from pathlib import Path
 
-        existing = yaml.safe_load(Path(cfg_path).read_text(encoding="utf-8")) or {}
+        # _read_yaml 会校验「根节点必须是键值对」并把 YAMLError 变成可读的 ConfigError
+        existing = _read_yaml(Path(cfg_path))
 
         if "cooldown" in raw:
-            existing.setdefault("cooldown", {}).update(raw["cooldown"])
+            _section(existing, "cooldown").update(raw["cooldown"])
         if "rate_limit" in raw:
-            existing.setdefault("rate_limit", {}).update(raw["rate_limit"])
+            _section(existing, "rate_limit").update(raw["rate_limit"])
         if "features" in raw:
-            existing.setdefault("features", {}).update(raw["features"])
+            _section(existing, "features").update(raw["features"])
         if "templates" in raw:
-            existing.setdefault("features", {}).update(raw["templates"])
+            _section(existing, "features").update(raw["templates"])
         if "room_display_id" in raw:
             existing["room_display_id"] = raw["room_display_id"]
         if "anchor_uid" in raw:
             existing["anchor_uid"] = raw["anchor_uid"]
         if "bot_name" in raw:
-            existing.setdefault("web_ui", {})["bot_name"] = raw["bot_name"]
+            _section(existing, "web_ui")["bot_name"] = raw["bot_name"]
         if "account_uid" in raw:
             existing["account_uid"] = raw["account_uid"]
         if "room_name" in raw:
             existing["room_name"] = raw["room_name"]
         if "web_ui" in raw:
-            existing.setdefault("web_ui", {}).update(raw["web_ui"])
+            _section(existing, "web_ui").update(raw["web_ui"])
         if "keyword_reply" in raw:
-            existing.setdefault("features", {})["keyword_reply"] = raw["keyword_reply"]
+            _section(existing, "features")["keyword_reply"] = raw["keyword_reply"]
         if "custom_fortunes" in raw:
             existing["custom_fortunes"] = raw["custom_fortunes"]
         if "llm" in raw:
-            existing.setdefault("llm", {}).update(raw["llm"])
+            _section(existing, "llm").update(raw["llm"])
         if "runtime" in raw:
-            existing.setdefault("runtime", {}).update(raw["runtime"])
+            _section(existing, "runtime").update(raw["runtime"])
 
         atomic_write_text(
             cfg_path,
@@ -834,6 +868,9 @@ def update_config_from_dict(raw: dict[str, Any], cfg_path: str) -> bool:
             backup=True,
         )
         return True
+    except ConfigError:
+        # 配置文件本身是坏的：交给调用方变成可读的 4xx，别吞成 False
+        raise
     except Exception as exc:
         logger = logging.getLogger("config")
         logger.warning("config save failed: %s", exc)

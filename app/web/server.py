@@ -32,13 +32,14 @@ from urllib.parse import unquote
 import aiohttp
 import yaml
 from fastapi import FastAPI, Request, Response as FastResponse
+from starlette.responses import FileResponse
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 import uvicorn
 
 from bilibili_api import live
 
 from app import tzutil
-from app.config import DEFAULT_ROOMS_DIR, atomic_write_text
+from app.config import ConfigError, DEFAULT_ROOMS_DIR, atomic_write_text
 from app.danmaku_xml import MAX_XML_BYTES as _MAX_XML_BYTES
 from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room, clean_room_async, set_rooms_base_dir, start_room_async, stop_room_async, restart_room_async, start_periodic_log_cleanup, cleanup_all_stale_pidfiles, last_exit_code
 from app.version import get_version, get_version_display
@@ -375,7 +376,7 @@ def _fallback_read_config() -> None:
         _DB_PATH = str(_raw.get("storage", {}).get("sqlite_path", "data/bot.db"))
         if not os.path.isabs(_DB_PATH):
             _DB_PATH = str(_cfg_path.parent / _DB_PATH)
-        web_ui = _raw.get("web_ui", {}) or {}
+        web_ui = _cfg_dict(_raw.get("web_ui"))
         if web_ui.get("username"):
             AUTH_USER = web_ui["username"]
         if web_ui.get("password"):
@@ -533,6 +534,36 @@ def _init_users() -> None:
     _save_users(users)
 
 
+#: 上次给这个 session 续发 Cookie 的时间（避免每个请求都 Set-Cookie）。
+#: 服务端过期时间做滑动，浏览器里的 Cookie 也必须跟着滑动，
+#: 否则「服务端还认、浏览器已经删了」→ 用户 60 分钟一到照样被踢。
+_SESSION_COOKIE_AT: dict[str, float] = {}
+
+#: 浏览器 Cookie 最多每这么久续发一次（滑动窗口的一半左右）。
+_COOKIE_REFRESH_EVERY = 600.0
+
+
+def _touch_session(token: str) -> bool:
+    """把会话的到期时间往后推（滑动过期）。返回是否真的做了续期。
+
+    以前到期时间是**登录时算死的**：用户连续操作满 `session_timeout`（默认 1 小时）
+    会被突然判 401 → 前端跳回登录页，正在编辑的表单全丢。
+    这是常驻管理工具，活跃使用就该一直有效。
+    """
+    sess = _SESSIONS.get(token)
+    if not sess:
+        return False
+    now = time.time()
+    if sess[0] <= now:
+        return False
+    new_exp = now + _SESSION_TIMEOUT
+    # 只在过半时才真正延长，避免每个请求都写字典（也是 Set-Cookie 的节流依据）
+    if new_exp - sess[0] < _SESSION_TIMEOUT / 2:
+        return False
+    _SESSIONS[token] = (new_exp, sess[1], sess[2], sess[3])
+    return True
+
+
 def _user_role(token: str) -> tuple[str, str, list]:
     """返回 (username, role, allowed_rooms) 或 (\"\", \"\", [])"""
     sess = _SESSIONS.get(token)
@@ -546,9 +577,11 @@ def _check_auth(request: Request) -> bool:
     if token and token in _SESSIONS:
         sess = _SESSIONS[token]
         if sess[0] > time.time():
+            _touch_session(token)      # 活跃即续期（滑动过期）
             return True
         else:
             _SESSIONS.pop(token, None)
+            _SESSION_COOKIE_AT.pop(token, None)
     return False
 
 
@@ -737,6 +770,12 @@ def _purge_stale_state() -> dict[str, int]:
         if not entry or entry[0] <= now:
             _SESSIONS.pop(token, None)
             purged["sessions"] += 1
+
+    # Cookie 续发记录也要跟着清：session 没了它就没有意义，
+    # 不清的话「登录-登出」反复几十次会一直涨。
+    for token in list(_SESSION_COOKIE_AT):
+        if token not in _SESSIONS:
+            _SESSION_COOKIE_AT.pop(token, None)
 
     for sid in list(_BILI_LOGIN_SESSIONS):
         sess = _BILI_LOGIN_SESSIONS.get(sid) or {}
@@ -1275,6 +1314,27 @@ def _get_current_role(request: Request) -> tuple[str, str, list]:
     return _user_role(token)
 
 
+async def _serve_with_cookie_slide(request: Request, call_next):
+    """放行请求，并在需要时重发 session Cookie（滑动过期）。
+
+    **必须用在每一个「已鉴权」的出口上**。中间件里管理员有一个提前
+    `return await call_next(request)`，只在最后一个 return 上做续发的话，
+    管理员（也就是几乎所有用户）永远拿不到新 Cookie ——
+    服务端滑动了、浏览器到点照样删，用户照样被踢。
+    """
+    response = await call_next(request)
+    token = request.cookies.get("session")
+    if token and token in _SESSIONS:
+        if time.time() - _SESSION_COOKIE_AT.get(token, 0.0) > _COOKIE_REFRESH_EVERY:
+            _SESSION_COOKIE_AT[token] = time.time()
+            response.set_cookie(
+                key="session", value=token,
+                max_age=_SESSION_TIMEOUT,
+                httponly=True, samesite="lax",
+            )
+    return response
+
+
 @app.middleware("http")
 async def _auth_middleware(request: Request, call_next):
     client_ip = request.client.host if request.client else "unknown"
@@ -1345,7 +1405,7 @@ async def _auth_middleware(request: Request, call_next):
 
     # Admin can do everything
     if role == "admin":
-        return await call_next(request)
+        return await _serve_with_cookie_slide(request, call_next)
 
     # 非管理员一律按最小权限处理。
     #
@@ -1408,7 +1468,7 @@ async def _auth_middleware(request: Request, call_next):
                 )
                 return JSONResponse({"error": "forbidden"}, status_code=403)
 
-    return await call_next(request)
+    return await _serve_with_cookie_slide(request, call_next)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -2204,11 +2264,9 @@ async def api_save_general_config(request: Request):
     except Exception:
         return JSONResponse({"error": "bad request"}, status_code=400)
 
-    from app.config import update_config_from_dict
-    ok = update_config_from_dict(body, _CONFIG_YAML_PATH)
-    if not ok:
-        return JSONResponse({"ok": False, "error": "全局配置保存失败（详见服务端日志）"},
-                            status_code=500)
+    err = _save_cfg_or_error(body, _CONFIG_YAML_PATH, "全局配置保存")
+    if err is not None:
+        return err
     return {"ok": True}
 
 
@@ -2499,7 +2557,13 @@ _META_EXTRA = 1.2             # 拿到版本号后，最多再花这么久等更
 _PROBE_TIMEOUT = 4.0          # 单条线路探测超时
 _PROBE_BUDGET = 4.0           # 全部探测总预算
 _PROBE_GRACE = 0.5            # 已有可用线路后，再收集候选的宽限时间
-_UPDATE_CACHE_TTL = 600.0     # 结果缓存 10 分钟（静默检查直接复用）
+_UPDATE_CACHE_TTL = 600.0     # 成功结果缓存 10 分钟（静默检查直接复用）
+#: **失败也要缓存，但要短**。以前只缓存成功结果，于是离线用户每次打开/刷新
+#: 页面（前端会做一次 force=0 的静默检查）都要重跑全量测速 ——
+#: 实测 9.6 秒、9 条线路全部超时，等于每次刷新都白打一轮外网。
+#: 2 分钟：既让重复刷新不再重跑，又不会因为一次网络抖动把用户锁在
+#: 「无法获取版本信息」上太久。
+_UPDATE_FAIL_CACHE_TTL = 120.0
 
 # 排序优先级：国内镜像优先于 GitHub 直连。
 # 即使某次直连比镜像快几十毫秒也不要推荐直连 —— 国内直连时通时不通，
@@ -2856,7 +2920,9 @@ async def api_update_check(force: int = 0):
     if not force:
         cached = _UPDATE_CACHE.get("payload")
         cache_age = time.time() - float(_UPDATE_CACHE.get("ts") or 0.0)
-        if cached and cache_age < _UPDATE_CACHE_TTL:
+        # 失败结果用短 TTL；成功结果用长 TTL
+        ttl = _UPDATE_CACHE_TTL if _UPDATE_CACHE.get("ok") else _UPDATE_FAIL_CACHE_TTL
+        if cached and cache_age < ttl:
             payload = dict(cached)
             payload["cached"] = True
             payload["cache_age"] = int(cache_age)
@@ -2866,9 +2932,11 @@ async def api_update_check(force: int = 0):
     payload = await _compute_update_payload()
     payload["cached"] = False
     payload["elapsed_ms"] = int((time.time() - started_at) * 1000)
-    if payload.get("ok"):
-        _UPDATE_CACHE["ts"] = time.time()
-        _UPDATE_CACHE["payload"] = payload
+    # 成功、失败都缓存（失败用短 TTL）。只缓存成功的话，
+    # 离线用户每次刷新页面都会重跑一遍全量测速。
+    _UPDATE_CACHE["ts"] = time.time()
+    _UPDATE_CACHE["payload"] = payload
+    _UPDATE_CACHE["ok"] = bool(payload.get("ok"))
     return payload
 
 
@@ -2876,12 +2944,13 @@ async def _warm_update_cache() -> None:
     """启动时后台预热更新检查结果（失败无所谓，用户点击时会再算一次）。"""
     try:
         await asyncio.sleep(5)
-        if _UPDATE_CACHE.get("payload"):
+        if _UPDATE_CACHE.get("payload") and _UPDATE_CACHE.get("ok"):
             return
         payload = await _compute_update_payload()
+        _UPDATE_CACHE["ts"] = time.time()
+        _UPDATE_CACHE["payload"] = payload
+        _UPDATE_CACHE["ok"] = bool(payload.get("ok"))
         if payload.get("ok"):
-            _UPDATE_CACHE["ts"] = time.time()
-            _UPDATE_CACHE["payload"] = payload
             logger.info(
                 "update cache warmed: latest=%s via %s in %sms",
                 payload.get("latest"), payload.get("meta_source"), payload.get("meta_ms"),
@@ -3091,17 +3160,16 @@ def _list_rooms_from_disk() -> list[dict[str, Any]]:
             continue
         # 读取关键信息
         try:
-            import yaml
-            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            cfg = _cfg_dict(yaml.safe_load(cfg_path.read_text(encoding="utf-8")))
         except Exception:
             cfg = {}
         rooms.append({
             "room_id": room_id,
             "anchor_uid": cfg.get("anchor_uid", 0),
             "room_display_id": cfg.get("room_display_id", 0),
-            "bot_name": cfg.get("web_ui", {}).get("bot_name", ""),
+            "bot_name": _cfg_dict(cfg.get("web_ui")).get("bot_name", ""),
             "status": room_status(room_id),
-            "port": cfg.get("web_ui", {}).get("port", 8000),
+            "port": _cfg_dict(cfg.get("web_ui")).get("port", 8000),
             "account_uid": cfg.get("account_uid", ""),
             "account_nick": "",
             "room_name": cfg.get("room_name", ""),
@@ -3297,7 +3365,13 @@ async def api_create_room(request: Request):
         "room_name": room_name,
         "web_ui": {"port": int(port)},
     }
-    update_config_from_dict(cfg_update, str(cfg_path))
+    try:
+        update_config_from_dict(cfg_update, str(cfg_path))
+    except ConfigError as exc:
+        # 模板文件本身就是坏的：把话说清楚，别让用户对着一句 500 猜
+        logger.warning("room created but template write failed: %s", exc)
+        return JSONResponse({"ok": False, "error": str(exc), "config_error": True},
+                            status_code=422)
 
     logger.info("room created: id=%s uid=%s port=%s", room_id, anchor_uid, port)
     return {"ok": True, "room_id": room_id, "room_display_id": room_display_id}
@@ -3426,7 +3500,9 @@ async def api_get_room_config(room_id: str, request: Request):
         cfg = load_config(str(cfg_path))
         return _redact_llm_key(config_to_dict(cfg), request)
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        # 422 而不是 500：这是这个房间的配置文件写坏了（ConfigError 里已经有
+        # 文件名 + 行号 + 当前值），不是服务端崩了。前端照常把这句话显示出来。
+        return JSONResponse({"error": str(exc), "config_error": True}, status_code=422)
 
 
 @app.post("/api/rooms/{room_id}/config")
@@ -3440,16 +3516,14 @@ async def api_save_room_config(room_id: str, request: Request):
     cfg_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "config.yaml"
     if not cfg_path.exists():
         return JSONResponse({"error": "room not found"}, status_code=404)
-    from app.config import update_config_from_dict
-    ok = update_config_from_dict(body, str(cfg_path))
-    if not ok:
-        # 不能 200 + {"ok": false}：前端有多处只判断 `res.ok`
-        # （例如「保存 AI 配置时顺带写房间」，以及「新建房间后套用模板」），
-        # 那些调用会把失败当成功 —— 用户看到「已保存」，实际磁盘还是旧配置，
-        # 下次重启机器人用的仍是旧的关键词/签文/AI 设置。
+    # 不能 200 + {"ok": false}：前端有多处只判断 `res.ok`
+    # （例如「保存 AI 配置时顺带写房间」，以及「新建房间后套用模板」），
+    # 那些调用会把失败当成功 —— 用户看到「已保存」，实际磁盘还是旧配置，
+    # 下次重启机器人用的仍是旧的关键词/签文/AI 设置。
+    err = _save_cfg_or_error(body, str(cfg_path), "配置保存")
+    if err is not None:
         logger.warning("房间 %s 配置保存失败", room_id)
-        return JSONResponse({"ok": False, "error": "配置保存失败（详见服务端日志）"},
-                            status_code=500)
+        return err
     return {"ok": True}
 
 
@@ -3466,7 +3540,8 @@ async def api_room_config_export(room_id: str, request: Request):
         data = _redact_llm_key(config_to_dict(cfg), request)
         return JSONResponse(data)
     except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        # 和「读配置/存配置」同口径：这是这个房间的配置文件写坏了，不是服务端崩了
+        return JSONResponse({"error": str(exc), "config_error": True}, status_code=422)
 
 
 @app.post("/api/rooms/{room_id}/config/import")
@@ -3480,15 +3555,10 @@ async def api_room_config_import(room_id: str, request: Request):
     cfg_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "config.yaml"
     if not cfg_path.exists():
         return JSONResponse({"error": "room not found"}, status_code=404)
-    try:
-        from app.config import update_config_from_dict
-        ok = update_config_from_dict(body, str(cfg_path))
-        if not ok:
-            return JSONResponse({"ok": False, "error": "配置导入失败（详见服务端日志）"},
-                                status_code=500)
-        return {"ok": True}
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+    err = _save_cfg_or_error(body, str(cfg_path), "配置导入")
+    if err is not None:
+        return err
+    return {"ok": True}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -3496,14 +3566,51 @@ async def api_room_config_import(room_id: str, request: Request):
 # ══════════════════════════════════════════════════════════════
 
 
+def _save_cfg_or_error(body: dict, path: str, what: str) -> JSONResponse | None:
+    """保存配置；返回 None 表示成功，否则返回可以直接 return 的响应。
+
+    配置**文件本身**坏了（YAML 语法错、根节点不是键值对）以前只能返回
+    「保存失败（详见服务端日志）」—— 用户根本不知道去改哪一行。现在把
+    ConfigError 的原文（带文件名 + 行号 + 当前值）作为 422 返回。
+    """
+    from app.config import ConfigError, update_config_from_dict
+    try:
+        ok = update_config_from_dict(body, path)
+    except ConfigError as exc:
+        return JSONResponse({"ok": False, "error": str(exc), "config_error": True},
+                            status_code=422)
+    if not ok:
+        return JSONResponse({"ok": False, "error": f"{what}失败（详见服务端日志）"},
+                            status_code=500)
+    return None
+
+
+def _cfg_dict(value: Any) -> dict:
+    """把 yaml 解出来的任意形状收成 dict。
+
+    用户手改 config.yaml 很容易写成 `web_ui:`（空值 → None），或者整份粘成一个
+    列表/字符串。以前这些形状解出来是什么就用什么，紧接着 `.get()` / `.update()`
+    直接抛异常 —— 结果是**一个房间**的配置写坏，`/api/rooms` 整个 500，
+    后台连房间列表都打不开，也就没法进去把它改回来。
+    """
+    return value if isinstance(value, dict) else {}
+
+
+def _ensure_web_ui(raw: dict) -> dict:
+    """取出 raw["web_ui"]；不是 dict 就换成一个空 dict 并写回去。"""
+    web_ui = _cfg_dict(raw.get("web_ui"))
+    raw["web_ui"] = web_ui
+    return web_ui
+
+
 def _load_room_raw_config(room_id: str) -> dict:
-    """加载房间的原始 config.yaml 内容。"""
+    """加载房间的原始 config.yaml 内容（形状不合法时给空 dict，绝不返回非 dict）。"""
     from app.config import get_room_path
     cfg_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "config.yaml"
     if not cfg_path.exists():
         return {}
     try:
-        return yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        return _cfg_dict(yaml.safe_load(cfg_path.read_text(encoding="utf-8")))
     except Exception:
         return {}
 
@@ -3530,7 +3637,7 @@ def _save_room_raw_config(room_id: str, raw: dict) -> bool:
 async def api_room_api_config(room_id: str, request: Request):
     """获取房间的 API 外部接口配置。"""
     raw = _load_room_raw_config(room_id)
-    web_ui = raw.get("web_ui", {}) or {}
+    web_ui = _cfg_dict(raw.get("web_ui"))
     api_enabled = bool(web_ui.get("api_enabled", False))
     api_token = str(web_ui.get("api_token", "") or "")
 
@@ -3561,7 +3668,7 @@ async def api_room_api_toggle(room_id: str):
     if not raw:
         return JSONResponse({"error": "room not found"}, status_code=404)
 
-    web_ui = raw.setdefault("web_ui", {})
+    web_ui = _ensure_web_ui(raw)
     was_enabled = bool(web_ui.get("api_enabled", False))
     new_enabled = not was_enabled
     web_ui["api_enabled"] = new_enabled
@@ -3601,7 +3708,7 @@ async def api_room_api_regenerate(room_id: str):
         return JSONResponse({"error": "room not found"}, status_code=404)
 
     new_key = _secrets.token_hex(32)
-    web_ui = raw.setdefault("web_ui", {})
+    web_ui = _ensure_web_ui(raw)
     web_ui["api_token"] = new_key
     web_ui["api_enabled"] = True
 
@@ -3728,7 +3835,7 @@ def _get_account_rooms(uid: str) -> list[dict[str, Any]]:
         if str(account_uid) == str(uid):
             linked.append({
                 "room_id": d.name,
-                "bot_name": cfg.get("web_ui", {}).get("bot_name", ""),
+                "bot_name": _cfg_dict(cfg.get("web_ui")).get("bot_name", ""),
             })
     return linked
 
@@ -4071,6 +4178,39 @@ async def api_verify_account_credential(uid: str):
 #  Per-Room 数据 API
 # ══════════════════════════════════════════════════════════════
 
+#: 房间日志接口最多返回多少行 / 最多读多少字节。
+#: `lines` 是外部输入，以前既不夹取也不限制字节数：
+#:   - `lines=10**9` → 整个文件原样返回
+#:   - `lines=-5` → `all_lines[5:]`，返回除前 5 行以外的**全部**
+#:   - 而且 `read_text()` 在 async 端点里同步读整份文件 → 卡住事件循环
+_MAX_LOG_TAIL_LINES = 5000
+_MAX_LOG_TAIL_BYTES = 4 * 1024 * 1024
+
+
+def _tail_text(path: Path, n_lines: int, max_bytes: int = _MAX_LOG_TAIL_BYTES) -> str:
+    """从文件尾部读最多 `n_lines` 行（同步，调用方必须放 to_thread）。
+
+    按块从尾部读，不会把几百 MB 的 bot.log 整份读进内存。
+    """
+    size = path.stat().st_size
+    if size == 0:
+        return ""
+    budget = min(size, max_bytes)
+    with path.open("rb") as fh:
+        fh.seek(size - budget)
+        raw = fh.read(budget)
+    text = raw.decode("utf-8", errors="replace")
+    if size > budget:
+        # 丢掉被截断的首行（除非整块只有一行且它本来就是尾部）
+        nl = text.find(chr(10))
+        if nl >= 0 and nl + 1 < len(text):
+            text = text[nl + 1:]
+    lines = text.splitlines()
+    if n_lines > 0 and len(lines) > n_lines:
+        lines = lines[-n_lines:]
+    return chr(10).join(lines)
+
+
 def _room_db_path(room_id: str) -> Path:
     """返回房间的 SQLite 数据库路径（以 config.yaml 的 storage.sqlite_path 为准）。
 
@@ -4121,12 +4261,13 @@ async def api_room_log_export(room_id: str):
     log_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "bot.log"
     if not log_path.exists():
         return JSONResponse({"error": "log not found"}, status_code=404)
+    # 流式返回（FileResponse）而不是 read_text()：日志可能几十上百 MB，
+    # 整份读进内存再交给 Response 会翻倍占用，还会卡住事件循环。
     try:
-        text = log_path.read_text(encoding="utf-8", errors="replace")
-        return Response(
-            content=text,
+        return FileResponse(
+            str(log_path),
             media_type="text/plain",
-            headers={"Content-Disposition": f'attachment; filename="bot_{room_id}.log"'},
+            filename=f"bot_{room_id}.log",
         )
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -4152,11 +4293,20 @@ async def api_room_log(room_id: str, request: Request, lines: int = 200):
     log_path = get_room_path(room_id, base_dir=_ROOMS_BASE_DIR) / "bot.log"
     if not log_path.exists():
         return {"lines": []}
+    # 夹取 `lines`：负数和巨大值都会出事，见 _MAX_LOG_TAIL_LINES 的注释
     try:
-        text = log_path.read_text(encoding="utf-8", errors="replace")
-        all_lines = text.splitlines()
-        tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
-        return {"lines": tail, "total": len(all_lines)}
+        want = int(lines)
+    except (TypeError, ValueError):
+        want = 200
+    if want <= 0:
+        want = 200
+    want = min(want, _MAX_LOG_TAIL_LINES)
+    try:
+        # 同步读文件必须放线程：几十 MB 的日志会把事件循环卡住，
+        # 期间守护进程巡检和其它接口全部停摆。
+        text = await asyncio.to_thread(_tail_text, log_path, want)
+        tail = text.splitlines() if text else []
+        return {"lines": tail, "total": len(tail), "truncated_to": want}
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
@@ -5108,7 +5258,7 @@ def _verify_api_token(request: Request) -> bool:
     room_id = request.query_params.get("room_id", "")
     if room_id:
         raw = _load_room_raw_config(room_id)
-        web_ui = raw.get("web_ui", {}) or {}
+        web_ui = _cfg_dict(raw.get("web_ui"))
         if web_ui.get("api_enabled") and web_ui.get("api_token") == token:
             return True
 
@@ -5388,7 +5538,7 @@ async def api_external_generate_key(request: Request):
     try:
         cfg_path = Path(_CONFIG_YAML_PATH)
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-        web_ui = raw.setdefault("web_ui", {})
+        web_ui = _ensure_web_ui(raw)
         web_ui["api_token"] = new_key
         atomic_write_text(
             cfg_path,
@@ -5418,7 +5568,7 @@ async def api_external_clear_key():
     try:
         cfg_path = Path(_CONFIG_YAML_PATH)
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-        web_ui = raw.setdefault("web_ui", {})
+        web_ui = _ensure_web_ui(raw)
         web_ui["api_token"] = ""
         atomic_write_text(
             cfg_path,
@@ -5600,7 +5750,7 @@ async def api_external_save_domain(request: Request):
     try:
         cfg_path = Path(_CONFIG_YAML_PATH)
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-        web_ui = raw.setdefault("web_ui", {})
+        web_ui = _ensure_web_ui(raw)
         web_ui["api_domain"] = domain
         atomic_write_text(
             cfg_path,
@@ -8101,6 +8251,7 @@ createApp({
                 const res = await fetch(`/api/rooms/${roomId}/guards?${params}`, {credentials: 'include'});
                 if (!res.ok) return;
                 const data = await res.json();
+                if (!_roomStillCurrent(roomId)) return;   // 切房间了，这份是上家的
                 guardItems.value = data.items || [];
                 guardTotals.value = data.totals || null;
             } catch(e) { /* ignore */ }
@@ -8744,6 +8895,13 @@ createApp({
         }
 
         // ── Room Detail ──
+        // 房间级请求的「迟到的响应」：切到房间 B 之后，房间 A 的请求才回来，
+        // 回来就把 A 的数据写进了 B 的页面。上舰记录是进房间就自动查的，
+        // 大库查一次可能要一两秒，手快切个房间就会看到「B 房间的上舰名单是 A 的」。
+        // 排行/弹幕/日志长得一模一样，很容易据此得出错误结论。
+        function _roomStillCurrent(roomId) {
+            return String(selectedRoom.value?.room_id || '') === String(roomId || '');
+        }
         function selectRoom(r) {
             selectedRoom.value = r;
             roomSubTab.value = 'ranking';
@@ -8783,6 +8941,9 @@ createApp({
             exporting.value = false;
             showCalendar.value = false;
             roomConfig.value = null;
+            // 日志内容也必须清：不清就会在房间 B 的「日志」标签里继续显示房间 A 的
+            // bot.log（这两行长得一模一样，很容易看错房间排查问题）
+            botLogContent.value = '';
         }
         function startEditRoomName() {
             roomNameEdit.value = selectedRoom.value?.room_name || '';
@@ -8853,6 +9014,12 @@ createApp({
             }
             if (key === 'ranking') {
                 loadGuards();
+            }
+            if (key === 'log') {
+                // 和「弹幕记录」一致：切进来就加载。以前只有「刷新」按钮会调
+                // loadBotLog，进标签看到的是「暂无日志或日志文件不存在」——
+                // 文件明明在，用户会以为日志功能坏了。
+                loadBotLog();
             }
         }
         function toggleCreateRoom() { showCreateRoom.value = !showCreateRoom.value; }
@@ -9132,6 +9299,7 @@ createApp({
                 const res = await fetch(`/api/rooms/${roomId}/ranking?rStart=${rStart.value}&rEnd=${rEnd.value}&rType=${rType.value}`);
                 if (!res.ok) { const txt = await res.text(); throw new Error(txt.slice(0,80)); }
                 const data = await res.json();
+                if (!_roomStillCurrent(roomId)) return;   // 切房间了，这份是上家的
                 ranking.value = (data.ranking || []).map(u => ({
                     uid: u.uid, uname: u.uname, total_val: u.total,
                     total_profit: u.total_profit || 0
@@ -9721,11 +9889,13 @@ createApp({
         const logLevel = ref('INFO');
         const logContainer = ref(null);
         async function loadBotLog() {
-            if (!selectedRoom.value?.room_id) return;
+            const roomId = selectedRoom.value?.room_id;
+            if (!roomId) return;
             try {
-                const res = await fetch(`/api/rooms/${selectedRoom.value.room_id}/log?lines=500`, {credentials: 'include'});
+                const res = await fetch(`/api/rooms/${roomId}/log?lines=500`, {credentials: 'include'});
                 if (!res.ok) return;
                 const data = await res.json();
+                if (!_roomStillCurrent(roomId)) return;   // 切房间了，这份是上家的
                 // 这个 sink 是 v-html：错误分支同样要转义，
                 // 否则「加载失败: <img onerror=...>」照样能执行
                 if (data.error) { botLogContent.value = '加载失败: ' + escapeHtml(data.error); return; }
@@ -9787,6 +9957,7 @@ createApp({
                 if (res.status === 401) { loggedIn.value = false; return; }
                 if (!res.ok) throw new Error((await res.text()).slice(0,80));
                 const data = await res.json();
+                if (!_roomStillCurrent(roomId)) return;   // 切房间了，这份是上家的
                 danmakuRows.value = data.rows || [];
                 danmakuTotal.value = data.total || 0;
             } catch(e) { danmakuErr.value = '加载失败: ' + e.message; }

@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -19,7 +20,8 @@ sys.path.insert(0, str(ROOT))
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 19896
 USER = "preview"
 PASS = "preview123"
-SCRATCH = Path("C:/Users/shinshi/AppData/Local/hermes/cache/scratch/preview_root")
+SCRATCH = Path(os.environ.get("AYABOT_PREVIEW_ROOT")
+                or "C:/Users/shinshi/AppData/Local/hermes/cache/scratch/preview_root")
 ROOM_ID = "1946287911"
 # 额外再放一个房间：截图/回归要验证「换房间」这类场景时的第二间房
 EXTRA_ROOM_IDS = ("2000000002",)
