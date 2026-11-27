@@ -722,6 +722,69 @@ print("seeded", db)
     check('全局配置 / 用户管理 / 帮助 全部能打开且不报错', topFailures.length === 0,
       topFailures.join(' / '));
 
+    // ── 阶段四·补：请求失败时不能报成功 ──
+    // `fetch` 对 4xx/5xx 不抛异常。以前「保存并重启」不看状态码就直接写
+    // 「✅ 已触发重启」，后端 500（配置写错）时用户照样看到成功。
+    // 这里用 CDP 把 restart 接口改成返回 500，界面上必须出现失败提示。
+    console.log('[7.5] 请求失败时界面必须说失败');
+    {
+      // 上一段停在「帮助」标签，先回房间管理；详情页还开着就先退出详情
+      await cdp.eval(CLICK_TEXT('房间管理'));
+      await sleep(300);
+      if (await cdp.eval(`document.body.innerText.includes('返回房间列表')`)) {
+        await cdp.eval(CLICK_TEXT('返回房间列表'));
+        await sleep(200);
+      }
+      await waitFor(cdp, `document.body.innerText.includes('#${ROOM}')`, 8000, '回列表');
+      await openRoom(cdp, ROOM);
+      let failActive = true;
+      cdp.on(async (m) => {
+        if (!failActive) return;
+        if (m.method !== 'Fetch.requestPaused') return;
+        if (!m.params.request.url.includes('/restart')) {
+          try { await cdp.send('Fetch.continueRequest', { requestId: m.params.requestId }); }
+          catch (e) { /* ignore */ }
+          return;
+        }
+        try {
+          await cdp.send('Fetch.fulfillRequest', {
+            requestId: m.params.requestId,
+            responseCode: 500,
+            responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+            body: Buffer.from(JSON.stringify({
+              error: '启动失败：配置文件 rooms/x/config.yaml：anchor_uid 必须是数字',
+            })).toString('base64'),
+          });
+        } catch (e) { /* ignore */ }
+      });
+      await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*/restart*' }] });
+      // 点「机器人配置」里的「🔄 重启此机器人」——它走 restartSingleBot，
+      // 正是以前会误报「✅ 已触发重启」的那条路径
+      await cdp.eval(CLICK_TEXT('机器人配置'));
+      await waitFor(cdp, `document.body.innerText.includes('重启此机器人')`, 10000, '机器人配置页');
+      const clicked = await cdp.eval(CLICK_TEXT('重启此机器人'));
+      check('「重启此机器人」点得动', clicked === 'ok', clicked);
+      // ⚠️ 不能等 /失败/ ——「机器人配置」页上本来就有静态文字「设得过大时超长回复会发送失败」，
+      // 那样的断言会立刻通过，等于什么都没测（这正是本轮修掉的一个假通过）。
+      // 必须等这个动作专属的文案。
+      let failedMsg = false;
+      try {
+        await waitFor(cdp,
+          `document.body.innerText.includes('❌ 重启失败')`, 10000, '重启失败的提示');
+        failedMsg = true;
+      } catch { /* 记失败 */ }
+      const bodyNow = await cdp.eval('document.body.innerText');
+      check('**后端 500 时界面显示失败（不是「✅ 已触发重启」）**', failedMsg,
+        bodyNow.includes('已触发重启') ? '仍然显示成功！' : '已显示失败');
+      const failSeg = bodyNow.includes('❌')
+        ? bodyNow.slice(bodyNow.indexOf('❌'), bodyNow.indexOf('❌') + 120)
+        : '(界面上没有 ❌)';
+      check('失败提示里带有后端给的原因',
+        bodyNow.includes('anchor_uid') || bodyNow.includes('启动失败'), failSeg);
+      failActive = false;
+      await cdp.send('Fetch.disable').catch(() => {});
+    }
+
     // ── 阶段五：退出登录必须真的注销 ──
     // 以前 doLogout 只写 `document.cookie='session=;max-age=0'`，
     // 而 cookie 是 httponly 的 —— 这行代码改不动它，token 一直有效到过期。

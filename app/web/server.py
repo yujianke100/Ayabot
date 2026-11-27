@@ -4221,9 +4221,13 @@ async def api_verify_account_credential(uid: str):
             ac_time_value=cred_data.get("ac_time_value", ""),
         )
         ok = await credential.check_valid()
-        return {"valid": ok}
+        return {"valid": bool(ok)}
     except Exception as exc:
-        return {"valid": False, "error": str(exc)}
+        # **不能报 valid: false**：问不到（网络/DNS/B站 接口抽风）不等于失效。
+        # 以前这里一律 valid=false，界面就把所有账号标成「凭证失效」，
+        # 用户白白重扫一遍二维码 —— 而 cookie 根本没坏。
+        return {"valid": None, "unknown": True,
+                "error": f"无法连接 B站 校验接口：{exc}"}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -8089,8 +8093,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <div v-else class="text-xs text-gray-400 mt-1">未关联房间（可在房间详情设置中绑定）</div>
             </div>
             <div class="flex gap-2 items-center">
-                <button @click="verifyAccount(a.uid)" :disabled="a.verifying" class="bg-gray-100 hover:bg-gray-200 px-2.5 py-1.5 rounded text-xs font-medium" :class="{'text-green-600':a.credential_ok===true,'text-red-500':a.credential_ok===false,'text-gray-600':!a.credential_ok}">
-                    {{ a.verifying ? '验证中...' : (a.credential_ok === true ? '✅ 有效' : (a.credential_ok === false ? '❌ 失效' : '验证')) }}
+                <button @click="verifyAccount(a.uid)" :disabled="a.verifying" :title="a.credential_unknown ? (a.credential_error || '无法连接 B站 校验接口') : ''" class="bg-gray-100 hover:bg-gray-200 px-2.5 py-1.5 rounded text-xs font-medium" :class="{'text-green-600':a.credential_ok===true,'text-red-500':a.credential_ok===false,'text-amber-600':a.credential_unknown,'text-gray-600':!a.credential_ok && !a.credential_unknown}">
+                    {{ a.verifying ? '验证中...' : (a.credential_ok === true ? '✅ 有效' : (a.credential_ok === false ? '❌ 失效' : (a.credential_unknown ? '⚠️ 没检查成' : '验证'))) }}
                 </button>
                 <button @click="deleteAccount(a.uid, a.nickname)" class="bg-red-50 hover:bg-red-100 text-red-500 px-2.5 py-1.5 rounded text-xs font-medium">删除</button>
             </div>
@@ -9112,18 +9116,27 @@ createApp({
             const name = roomNameEdit.value?.trim() || '';
             const rid = selectedRoom.value?.room_id;
             if (!rid) return;
-            editingRoomName.value = false;
             try {
                 const res = await fetch(`/api/rooms/${rid}/config`, {
                     method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include',
                     body: JSON.stringify({room_name: name}),
                 });
-                const data = await res.json();
-                if (data.ok) {
-                    selectedRoom.value.room_name = name;
-                    await loadRooms();
-                }
-            } catch(e) { /* ignore */ }
+                if (res.status === 401) { loggedIn.value = false; return; }
+                let detail = '';
+                let data = {};
+                try { data = await res.json(); } catch (e) { /* 非 JSON */ }
+                if (data && data.error) detail = data.error;
+                if (!res.ok || !data.ok) throw new Error(detail || `HTTP ${res.status}`);
+                // 只有真的存上了才关编辑框：以前是先关框再请求，失败时
+                // 框已经收起、名字没变，用户完全不知道发生了什么。
+                editingRoomName.value = false;
+                selectedRoom.value.room_name = name;
+                await loadRooms();
+            } catch(e) {
+                roomSaveMsg.value = '❌ 改名失败：' + (e.message || e);
+                roomSaveOk.value = false;
+                setTimeout(() => { roomSaveMsg.value = ''; }, 5000);
+            }
         }
         function exportRoomConfig() {
             const rid = selectedRoom.value?.room_id;
@@ -9233,12 +9246,18 @@ createApp({
                     body: JSON.stringify({account_uid: selectedRoomAccount.value || ''}),
                 });
                 const data = await res.json();
-                if (!data.ok) throw new Error('保存失败');
+                if (!data.ok) throw new Error(data.error || '保存失败');
                 // 再重启 bot
                 const restartRes = await fetch(`/api/rooms/${rid}/restart`, {
                     method: 'POST', credentials: 'include',
                 });
-                if (!restartRes.ok) throw new Error('重启失败');
+                if (!restartRes.ok) {
+                    // 后端会把原因放在 {"error": "启动失败：配置..."} 里，
+                    // 只说「重启失败」等于把最有用的信息丢了
+                    let why = '';
+                    try { why = (await restartRes.json()).error || ''; } catch (e) { /* 非 JSON */ }
+                    throw new Error(why || '重启失败');
+                }
                 accountAssignMsg.value = '✅ 已保存并重启';
                 accountAssignOk.value = true;
                 selectedRoom.value.account_uid = selectedRoomAccount.value;
@@ -9412,8 +9431,19 @@ createApp({
                         method: 'POST', credentials: 'include',
                     });
                     const data = await res.json();
-                    acct.credential_ok = data.valid;
-                } catch(e) { acct.credential_ok = false; }
+                    // 三态：true 有效 / false 失效 / null 没检查成（网络或 B站 接口不可用）。
+                    // 以前 null 也会落到这里被当成 false，界面就把好账号标成「❌ 失效」，
+                    // 用户于是去重扫二维码 —— 而 cookie 根本没坏。
+                    acct.credential_ok = data.valid === true ? true
+                        : (data.valid === false ? false : null);
+                    acct.credential_unknown = data.valid === null || data.valid === undefined;
+                    acct.credential_error = data.error || '';
+                } catch(e) {
+                    // 请求本身失败（断网/服务重启）同样是「没检查成」，不是「失效」
+                    acct.credential_ok = null;
+                    acct.credential_unknown = true;
+                    acct.credential_error = e.message || String(e);
+                }
                 finally { acct.verifying = false; }
             }
             verifyingAll.value = false;
@@ -11381,15 +11411,31 @@ createApp({
             } finally { savingTemplate.value = false; }
         }
         async function deleteTemplate(ttype, name) {
+            if (!confirm(`确定删除模板「${name}」？`)) return;
             try {
-                await fetch('/api/templates', {
+                const res = await fetch('/api/templates', {
                     method: 'DELETE',
                     headers: {'Content-Type':'application/json'},
                     credentials: 'include',
                     body: JSON.stringify({type: ttype, name}),
                 });
+                if (res.status === 401) { loggedIn.value = false; return; }
+                let detail = '';
+                try {
+                    const body = await res.json();
+                    if (body && body.error) detail = body.error;
+                } catch (e) { /* 非 JSON 响应 */ }
+                // 以前这里不看返回值：403/500 时列表重载后模板还在，
+                // 用户以为「点了删除没反应」（或更糟：以为已经删了）
+                if (!res.ok) throw new Error(detail || `HTTP ${res.status}`);
+                templateFormMsg.value = `✅ 已删除模板「${name}」`;
+                templateFormOk.value = true;
+                setTimeout(() => { templateFormMsg.value = ''; }, 4000);
                 await loadTemplates();
-            } catch(e) { /* ignore */ }
+            } catch(e) {
+                templateFormMsg.value = '❌ 删除失败：' + (e.message || e);
+                templateFormOk.value = false;
+            }
         }
         async function restartAllBots() {
             restartingAll.value = true;
@@ -11410,12 +11456,27 @@ createApp({
             } finally { restartingAll.value = false; }
         }
         async function restartSingleBot(roomId) {
+            // ⚠️ `fetch` 对 4xx/5xx **不抛异常**。以前这里不看状态码就直接写
+            // 「✅ 已触发重启」—— 后端返回 500（配置写错、进程起不来）时用户
+            // 照样看到成功提示，然后疑惑「点了重启没反应」。
             try {
-                await fetch(`/api/rooms/${roomId}/restart`, {method: 'POST', credentials: 'include'});
+                const res = await fetch(`/api/rooms/${roomId}/restart`,
+                    {method: 'POST', credentials: 'include'});
+                if (res.status === 401) { loggedIn.value = false; return; }
+                let detail = '';
+                try {
+                    const body = await res.json();
+                    if (body && body.error) detail = body.error;
+                } catch (e) { /* 非 JSON 响应 */ }
+                if (!res.ok) throw new Error(detail || `HTTP ${res.status}`);
                 roomSaveMsg.value = '✅ 已触发重启';
                 roomSaveOk.value = true;
+                await loadRooms();
                 setTimeout(() => { roomSaveMsg.value = ''; }, 3000);
-            } catch(e) { /* ignore */ }
+            } catch(e) {
+                roomSaveMsg.value = '❌ 重启失败：' + (e.message || e);
+                roomSaveOk.value = false;
+            }
         }
         // ── 套用模板 ──
         async function applyTemplateToLlm() {

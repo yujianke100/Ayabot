@@ -21,6 +21,8 @@ STATUS_ERROR = "error"
 # 等待扫码登录时的轮询间隔（秒）
 _LOGIN_WAIT_POLL = 5.0
 # 即使文件没变，也至少这么久重新校验一次凭证
+_VALIDATE_ATTEMPTS = 3
+_VALIDATE_RETRY_DELAY = 2.0
 _MAX_VALIDATE_AGE = 120.0
 
 
@@ -108,10 +110,33 @@ class AuthManager:
         并在后台轮询 accounts/<uid>/credential.json，扫码成功后自动恢复。
         """
         credential = self.load_credential_sync()
-        if credential is not None and await self._is_valid(credential):
+
+        # 三态判定：True 直接用；False 才要求重新扫码；None 先重试几次。
+        checked: Optional[bool] = None
+        if credential is not None:
+            for attempt in range(_VALIDATE_ATTEMPTS):
+                checked = await self._is_valid(credential)
+                if checked is not None:
+                    break
+                if attempt + 1 < _VALIDATE_ATTEMPTS:
+                    await asyncio.sleep(_VALIDATE_RETRY_DELAY * (attempt + 1))
+
+        if credential is not None and checked is True:
             self.logger.info("loaded valid credential")
             self.mark_ok()
             self._save_credential(credential)
+            self.mark_validated()
+            return credential
+
+        if credential is not None and checked is None:
+            # 连试几次都问不到 B站 —— 这**不是**凭证失效，是网络/接口不可用。
+            # 硬说「请重新扫码」会逼用户白扫一次（而且扫完还是一样问不到）。
+            # 先按有效用起来：真失效的话发弹幕会被拒、收礼物会缺 uid，
+            # 那两个路径都会 mark_needs_login 并给出准确原因。
+            self.logger.warning(
+                "无法验证凭证（网络或 B站 接口不可用），先按有效凭证启动；"
+                "若之后发送失败会自动提示重新登录")
+            self.mark_ok()
             self.mark_validated()
             return credential
 
@@ -171,8 +196,12 @@ class AuthManager:
             credential = self.load_credential_sync()
             if credential is None:
                 continue
-            if not await self._is_valid(credential):
+            _ok = await self._is_valid(credential)
+            if _ok is False:
                 self.mark_needs_login(last_reason)
+                continue
+            if _ok is None:
+                # 问不到就不下结论，下一轮继续问（保持 needs_login 提示不变）
                 continue
             self.logger.info("扫码登录成功，凭证已恢复，机器人继续运行")
             self.mark_ok()
@@ -226,7 +255,7 @@ class AuthManager:
         credential = self.load_credential_sync()
         if credential is None:
             return None
-        if not await self._is_valid(credential):
+        if await self._is_valid(credential) is not True:
             return None
         self._last_signature = sig
         self._last_validated = time.time()
@@ -318,13 +347,23 @@ class AuthManager:
         # （扫完写进去的还是可能被下一次刷新截断）。
         atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
-    async def _is_valid(self, credential: Credential) -> bool:
+    async def _is_valid(self, credential: Credential) -> Optional[bool]:
+        """凭证是否有效：**三态**。
+
+          - True  : B站 明确说 isLogin=true
+          - False : B站 明确说 isLogin=false（真的过期/被踢）
+          - None  : 根本没问成（网络不通、DNS 污染、B站 接口 5xx、限流）
+
+        以前这里把「没问成」也当成 False，后果很严重：国内网络抖动、
+        DNS 污染、或者 B站 接口临时抽风时，**每一次**启动都会显示
+        「B站 登录凭证已失效（Cookie 过期或被踢下线）」并把用户引去重新扫码 ——
+        而 cookie 其实完好无损。重扫一遍能用，用户就以为「确实是过期了」。
+        """
         try:
             valid = bool(await credential.check_valid())
         except Exception as exc:  # noqa: BLE001
-            # 网络抖动时不要误判为「凭证有效」，交给上层 5s 后重试
-            self.logger.warning("credential validity check failed: %s", exc)
-            return False
+            self.logger.warning("credential validity check failed (网络/接口问题): %s", exc)
+            return None
         self._last_validated = time.time()
         return valid
 
