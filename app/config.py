@@ -787,6 +787,9 @@ def config_to_dict(config: AppConfig) -> dict[str, Any]:
             "host": config.web_ui.host,
             "port": config.web_ui.port,
             "api_domain": config.web_ui.api_domain,
+            # 登录有效期：运行时会真的按它算（server._SESSION_TIMEOUT），但以前
+            # 不在这里输出 —— 用户在界面上看不到、也改不了「老是要重新登录」。
+            "session_timeout": config.web_ui.session_timeout,
         },
         "llm": {
             "enabled": config.llm.enabled,
