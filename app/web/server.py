@@ -5120,7 +5120,13 @@ async def api_delete_import(room_id: str, request: Request):
         # 大文件导入后撤销是秒级的；在事件循环里跑等于让所有机器人一起哑。
         store = StatsStore(str(db_path))
         try:
-            return store.delete_gift_events_by_source(source)
+            # 撤销导入 = 一次删掉整批历史数据，和「删除旧数据」一样不可恢复。
+            # 用户点错一次（列表里两批文件名很像）就没了，所以先备份。
+            backup = store.backup_before_destructive(f"undo_{source}")
+            result = store.delete_gift_events_by_source(source)
+            if backup:
+                result["backup_path"] = str(backup)
+            return result
         finally:
             try:
                 store._conn.close()
@@ -5128,8 +5134,9 @@ async def api_delete_import(room_id: str, request: Request):
                 pass
 
     result = await asyncio.to_thread(_run)
-    logger.info("undo import: room=%s source=%s deleted=%s guards=%s",
-                room_id, source, result["deleted"], result["guard_deleted"])
+    logger.info("undo import: room=%s source=%s deleted=%s guards=%s backup=%s",
+                room_id, source, result["deleted"], result["guard_deleted"],
+                result.get("backup_path") or "-")
     return {"ok": True, **result}
 
 
@@ -5187,6 +5194,9 @@ async def api_stats_repair(room_id: str, request: Request):
     def _run() -> dict:
         store = StatsStore(str(db_path))
         try:
+            # 重算会覆盖所有月份的聚合。虽然它是从明细推出来的（理论上可重算），
+            # 但一旦重算逻辑本身有 bug，旧值就没了 —— 留一份备份很便宜。
+            store.backup_before_destructive("stats_repair")
             return store.repair_stats()
         finally:
             try:

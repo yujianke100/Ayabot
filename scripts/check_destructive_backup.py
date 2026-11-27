@@ -105,7 +105,17 @@ def main() -> int:
             b.close()
             ok("备份里是删除**前**的完整数据", n == 30, n)
 
-        print("[5] 前端把备份路径显示给用户")
+        print("[5] 另外两个不可逆动作也要备份")
+        src_all = (ROOT / "app" / "web" / "server.py").read_text(encoding="utf-8")
+        for fn, tag in (("api_delete_import", "undo_"), ("api_stats_repair", "stats_repair")):
+            seg = src_all[src_all.index(f"async def {fn}"):]
+            cut = seg.find(chr(10) + chr(10) + chr(10))
+            if cut > 0:
+                seg = seg[:cut]
+            ok(f"{fn} 调用 backup_before_destructive", "backup_before_destructive" in seg)
+            ok(f"{fn} 备份标签含 {tag.strip('_')}", tag in seg)
+
+        print("[6] 前端把备份路径显示给用户")
         src = (ROOT / "app" / "web" / "server.py").read_text(encoding="utf-8")
         seg = src[src.index("async function confirmDelete"):]
         seg = seg[: seg.index("async function ", 20)]
