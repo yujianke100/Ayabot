@@ -1131,7 +1131,9 @@ class LiveRobot:
         # 如果照旧记一条，就会给每个连击多记 1 条 0 元礼物，
         # 把「礼物数」抬高、并在排行榜里塞进一条 0 价值的记录（老版本还会写成名字叫
         # "gift" 的假记录）。所以这里直接跳过统计与致谢。
-        if str(event.get("type") or "") == "COMBO_SEND":
+        # 用基础名判断：带后缀的 `COMBO_SEND:xxx` 以前在这里漏掉，
+        # 那段汇总会被当成一件真礼物记成 0 元 1 件（正是我们花过力气去掉的假记录）
+        if _base_event_type(event.get("type")) == "COMBO_SEND":
             self.logger.debug("COMBO_SEND is a combo summary, skipped (already counted per-item)")
             return
 
@@ -1848,12 +1850,19 @@ class LiveRobot:
 
         之所以放在 `_on_all_events` 的最前面：那里后面有一串 `return`
         （PK 分支、噪音过滤、已知事件过滤），放在后面就等于大部分事件都数不到。
+
+        **必须按基础名（`cmd` 冒号前的部分）判断和归类**：
+        B站 会用 `SEND_GIFT:4:0:2:2:2:0` 这种带后缀的 cmd，按原名判断的话
+        带后缀的 SEND_GIFT 不在 KNOWN_GIFT_EVENTS 里 → 被记成「不认识的礼物事件」
+        → 界面上弹一条误导性的红条，说「收到礼物但没能记进统计」，
+        而实际上我们处理得好好的。同时 `SEND_GIFT` 和 `SEND_GIFT:xxx`
+        会被拆成两个计数，`gift_total` 也就数不全。
         """
-        self._event_counts[event_type] = self._event_counts.get(event_type, 0) + 1
-        if (_looks_like_gift_event(event_type)
-                and event_type not in KNOWN_GIFT_EVENTS):
+        base = _base_event_type(event_type)
+        self._event_counts[base] = self._event_counts.get(base, 0) + 1
+        if _looks_like_gift_event(base) and base not in KNOWN_GIFT_EVENTS:
             # 只记名字，不刷日志；汇总时一起打出来
-            self._unknown_gift_like.add(event_type)
+            self._unknown_gift_like.add(base)
 
     def _log_event_summary(self) -> None:
         """每 10 分钟打一条 INFO：收到了哪些事件，有没有不认识的礼物类事件。"""
@@ -1888,6 +1897,36 @@ class LiveRobot:
     async def _on_all_events(self, event: dict[str, Any]) -> None:
         event_type = event.get("type", "?")
         self._bump_event_count(event_type)
+
+        # ── 带后缀的 cmd 兜底 ──
+        # bilibili_api 是拿 `cmd` 原文直接 dispatch 的（只对 DANMU_MSG 做过
+        # 归一化）。B站 一直在用 `DANMU_MSG:4:0:2:2:2:0` 这种带后缀的写法，
+        # 一旦某个礼物事件也带上后缀（`SEND_GIFT:...`），
+        #   `self._danmaku.on("SEND_GIFT")` 的精确监听器**收不到任何东西**，
+        # 而统计就静静地变成 0 —— 这正是用户报「关键词能触发、统计全是 0」
+        # 那种最难查的形态。
+        # ALL 在精确分发之后触发，所以这里只处理「带后缀」的情况，不会重复记账。
+        _base_type = _base_event_type(event_type)
+        if _base_type != event_type:
+            _suffixed = {
+                "SEND_GIFT": self._on_gift,
+                "SEND_GIFT_V2": self._on_gift_v2,
+                "COMBO_SEND": self._on_gift,
+                "UNIVERSAL_EVENT_GIFT": self._on_gift,
+                "UNIVERSAL_EVENT_GIFT_V2": self._on_gift,
+                "SPECIAL_GIFT": self._on_special_gift,
+                "GUARD_BUY": self._on_guard_buy,
+                "USER_TOAST_MSG": self._on_guard_buy,
+                "USER_TOAST_MSG_V2": self._on_guard_buy,
+            }.get(_base_type)
+            if _suffixed is not None:
+                self.logger.info("带后缀的事件按基础名处理: type=%s -> %s",
+                                 event_type, _base_type)
+                try:
+                    await _suffixed(event)
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.error("处理 %s 失败: %s", event_type, exc, exc_info=True)
+                return
         # 必须在这里记：下面有一串 early return（PK / 噪音 / 已知事件），
         # 而心跳包是以 "VIEW" 事件进来的 —— 放到后面就永远数不到。
         self._last_event_ts = time.time()
@@ -2454,6 +2493,15 @@ def _cap_text(text: str, max_len: int) -> str:
         if max_len >= 2 and _utf16_len(out + "…") <= max_len:
             out += "…"
     return out
+
+
+def _base_event_type(name: str) -> str:
+    """`SEND_GIFT:4:0:2:2:2:0` → `SEND_GIFT`。
+
+    bilibili_api 是拿 `cmd` 原文直接 dispatch 的（只对 DANMU_MSG 做过归一化），
+    所以事件名可能带一串版本后缀。凡是按名字比对的地方都要用这个口径。
+    """
+    return str(name or "").split(":", 1)[0]
 
 
 def _looks_like_gift_event(name: str) -> bool:

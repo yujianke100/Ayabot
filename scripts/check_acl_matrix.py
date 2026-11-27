@@ -44,7 +44,12 @@ ALLOWED_WRITE = {
     (f"/api/rooms/{MY_ROOM}/restart", "POST"),
     (f"/api/rooms/{MY_ROOM}/config", "POST"),
     ("/api/user/password", "POST"),
+    # 注销自己的会话：必须对所有登录用户开放，否则普通账号永远退不出去
+    ("/api/logout", "POST"),
 }
+
+#: 会把测试用的会话干掉，所以放到最后一步单独验，不能混在其他断言中间跑
+DESTRUCTIVE_WRITE = {("/api/logout", "POST")}
 
 
 def main() -> int:
@@ -161,19 +166,32 @@ def main() -> int:
             ok(f"GET {p}", code != 403, f"HTTP {code}")
 
         print("[5] 白名单写操作确实放行（不是靠 403 蒙过去）")
-        for path, method in sorted(ALLOWED_WRITE):
+        for path, method in sorted(ALLOWED_WRITE - DESTRUCTIVE_WRITE):
             p = path if "{room_id}" not in path else path.replace("{room_id}", MY_ROOM)
             code = call(method, p, USER_TOKEN)
             ok(f"{method} {p} 放行", code != 403, f"HTTP {code}")
 
         print("[6] 未知角色（streamer）与 user 完全同权")
         diff = []
+        dead = {p for p, _ in DESTRUCTIVE_WRITE}
         for method, path in routes:
+            # 注销接口会把调用者的会话干掉，跑到这里就等于把两个测试 token 都注销了
+            if path in dead or (path, method) in DESTRUCTIVE_WRITE:
+                continue
             p = concrete(path, OTHER_ROOM)
             a, b = call(method, p, USER_TOKEN), call(method, p, STREAMER_TOKEN)
             if (a == 403) != (b == 403):
                 diff.append((method, p, a, b))
         ok("streamer 没有额外权限", not diff, str(diff[:4]))
+
+        print("[7] 注销接口：普通账号能调用，且之后自己立刻失效")
+        code = call("POST", "/api/logout", STREAMER_TOKEN)
+        ok("POST /api/logout 不是 403", code != 403, f"HTTP {code}")
+        code_after = call("GET", f"/api/rooms/{OTHER_ROOM}/config", STREAMER_TOKEN)
+        ok("注销后 streamer 的 token 失效（401）", code_after == 401, f"HTTP {code_after}")
+        # user 的会话没被池鱼之殃
+        code_user = call("GET", f"/api/rooms/{MY_ROOM}/config", USER_TOKEN)
+        ok("另一个账号的会话不受影响", code_user != 401, f"HTTP {code_user}")
 
         server.should_exit = True
     finally:

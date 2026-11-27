@@ -195,7 +195,27 @@ async def start_bot_in_process(room_id: str) -> bool:
     auth = AuthManager(config)
     holder: dict[str, Any] = {"robot": None}
 
+    # ── 房间自己的日志文件 ──
+    # 冻结 exe 里 Bot 是同进程 Task，日志全落到托盘那个共享的 ayabot.log 上，
+    # `rooms/<id>/bot.log` 从来不存在 —— 于是「日志」标签永远空白，用户报
+    # 「机器人莫名其妙关了」时我们手里没有任何现场。子进程模式靠 stdout 重定向
+    # 解决这件事，同进程模式必须自己挂 handler。
+    from app.logutil import ROOM_CTX, drop_tracked, install_tracked
+    room_log_path = rooms_dir / "bot.log"
+    try:
+        truncate_log_file(room_log_path)   # 和子进程模式一样，先防无限增长
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("truncate room log failed: %s", exc)
+    # 同进程模式以前完全不读 config.runtime.log_level（界面上的「日志级别」
+    # 在 exe 里从来没生效过）—— 用户想开 DEBUG 查「统计为什么是 0」时会发现
+    # 什么也没多出来。这里按房间生效，并只下调根 logger 的级别。
+    _want_level = getattr(logging, str(config.runtime.log_level or "INFO").upper(),
+                          logging.INFO)
+    install_tracked(room_id, room_log_path, level=_want_level)
+
     async def _supervised_run() -> None:
+        # 上下文变量让同一个 logger 的日志能分清是哪个房间的
+        ROOM_CTX.set(room_id)
         try:
             credential = await auth.prepare_credential()
             auth.start_refresh_loop(credential)
@@ -214,6 +234,10 @@ async def start_bot_in_process(room_id: str) -> bool:
             # 把「为什么退出」留给守护进程展示。守护进程只看到 status!=running，
             # 会写一句「进程已退出」，用户完全不知道是代码 bug、网络问题还是被系统杀了。
             _write_bot_error(Path(config.storage.sqlite_path).parent, exc)
+        finally:
+            # 任务怎么结束的都要摘：崩溃重启一次就会再挂一组，
+            # 不摘的话日志每行写两遍、三遍，用户会以为「机器人一直在崩」。
+            drop_tracked(room_id)
 
     task = asyncio.create_task(_supervised_run(), name=f"bot-{room_id}")
     _inproc_bots[room_id] = (holder, auth, task)
@@ -241,6 +265,8 @@ async def stop_bot_in_process(room_id: str) -> bool:
         await auth.stop()
     except Exception as exc:
         logger.warning("room %s in-process stop error: %s", room_id, exc)
+    from app.logutil import drop_tracked  # noqa: PLC0415
+    drop_tracked(room_id)   # 日志句柄必须关，否则 Windows 上删不掉房间目录
     logger.info("room %s in-process bot stopped", room_id)
     return True
 
@@ -433,6 +459,10 @@ async def clean_room_async(room_id: str) -> None:
         await stop_bot_in_process(room_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("room %s in-process stop before delete failed: %s", room_id, exc)
+    # stop 里已经摘过了，但 Bot 早已不在 _inproc_bots 里（比如崩溃后被守护清账）
+    # 时 handler 可能还开着 —— 那会让下面删目录报 WinError 32。再摘一次（幂等）。
+    from app.logutil import drop_tracked  # noqa: PLC0415
+    drop_tracked(room_id)
     clean_room(room_id)
 
 

@@ -674,8 +674,11 @@ _USER_ROOM_MUTATIONS: frozenset[str] = frozenset({
     "/config",    # 改自己房间的模板/关键词等配置
 })
 
-#: 普通账号唯一允许的非房间写操作：改自己的登录密码
-_USER_GLOBAL_MUTATIONS: frozenset[str] = frozenset({"/api/user/password"})
+#: 普通账号允许的非房间写操作：改自己的登录密码、注销自己的会话
+_USER_GLOBAL_MUTATIONS: frozenset[str] = frozenset({
+    "/api/user/password",
+    "/api/logout",
+})
 
 
 def _rate_limited(ip: str) -> bool:
@@ -1538,6 +1541,55 @@ async def api_login(request: Request):
         max_age=_SESSION_TIMEOUT,
         httponly=True, samesite="lax",
     )
+    return resp
+
+
+@app.get("/api/me")
+async def api_me(request: Request):
+    """当前登录会话的信息（刷新页面后靠它恢复登录态）。
+
+    为什么需要它：session cookie 是 **httponly** 的，JS 用 `document.cookie`
+    根本看不到它。而前端原来是用 `document.cookie.includes('session=')` 猜
+    「是否已登录」—— 这个猜法永远为 false。于是**每按一次 F5 都要求重新登录**，
+    哪怕服务端的会话还完全有效（实测：刷新后 /api/rooms 仍返回 200，
+    界面却停在登录框）。同样的原因让「退出登录」也从来没生效过。
+
+    返回 401 表示没有有效会话，前端据此显示登录框。
+    """
+    token = request.cookies.get("session", "")
+    username, role, allowed = _user_role(token)
+    if not username:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    must_reset = False
+    try:
+        users = _load_users()
+        info = users.get(username) or {}
+        must_reset = bool(info.get("must_reset_password"))
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "ok": True,
+        "username": username,
+        "role": role,
+        "allowed_rooms": allowed or [],
+        "must_reset_password": must_reset,
+    }
+
+
+@app.post("/api/logout")
+async def api_logout(request: Request):
+    """注销当前会话：**服务端真的把 token 删掉**，不只是前端把界面收起来。
+
+    以前前端 `doLogout` 只做 `document.cookie = 'session=;max-age=0'`，
+    而 cookie 是 httponly 的 —— 这行代码改不动它。结果「退出登录」只是把
+    UI 藏起来，会话在服务端一直有效到过期，同一台机器上再打开页面又是登录状态。
+    """
+    token = request.cookies.get("session", "")
+    if token:
+        _SESSIONS.pop(token, None)
+        _SESSION_COOKIE_AT.pop(token, None)
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("session")
     return resp
 
 
@@ -6101,7 +6153,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <div id="app" v-cloak class="max-w-6xl mx-auto" style="min-height:80vh;"><!-- 初始白屏防止闪烁 -->
 
 <!-- ══════ 登录页 ══════ -->
-<div v-if="!loggedIn" class="flex items-center justify-center min-h-[80vh] px-4">
+<!-- 会话还没确认之前不要闪一下登录框（HttpOnly cookie 没法用 JS 判断） -->
+<div v-if="!loggedIn && !bootChecked" class="flex items-center justify-center min-h-[80vh] px-4">
+    <div class="bg-white p-6 rounded-xl shadow-md w-full max-w-sm text-center text-sm text-gray-500">正在检查登录状态…</div>
+</div>
+<div v-else-if="!loggedIn" class="flex items-center justify-center min-h-[80vh] px-4">
     <div class="bg-white p-6 sm:p-8 rounded-xl shadow-md w-full max-w-sm">
         <h1 class="text-xl font-bold text-center text-blue-600 mb-6 flex items-center justify-center gap-2"><img src="/icon-192.png" alt="" class="w-7 h-7 rounded-lg">Ayabot 管理后台</h1>
         <div class="space-y-4">
@@ -8837,30 +8893,68 @@ createApp({
                     changePwdOk.value = false;
                     return;
                 }
-                await loadLlmConfig();
-                await loadGeneralConfig();
-                await loadRooms();
-                await loadAccounts();
-                await loadUsers();
-                await loadTemplates();
-                // 房间状态/凭证失效需要实时反映（守护进程会自动重启/等待登录）
-                if (!window.__roomStatusTimer) {
-                    window.__roomStatusTimer = setInterval(() => {
-                        if (loggedIn.value) loadRooms();
-                    }, 15000);
-                }
-                // 进去后静默查一次更新：有新版本就在导航栏亮提示，不弹窗打断
-                if (!window.__updateTimer) {
-                    window.__updateTimer = setTimeout(() => { silentCheckUpdate(); }, 4000);
-                }
+                await afterLogin();
             } catch(e) { loginErr.value = '登录失败: ' + e.message; }
         }
-        function doLogout() {
-            document.cookie = 'session=;max-age=0';
+
+        // 登录成功后要做的加载（登录与会话恢复共用）
+        async function afterLogin() {
+            await loadLlmConfig();
+            await loadGeneralConfig();
+            await loadRooms();
+            await loadAccounts();
+            await loadUsers();
+            await loadTemplates();
+            // 房间状态/凭证失效需要实时反映（守护进程会自动重启/等待登录）
+            if (!window.__roomStatusTimer) {
+                window.__roomStatusTimer = setInterval(() => {
+                    if (loggedIn.value) loadRooms();
+                }, 15000);
+            }
+            // 进去后静默查一次更新：有新版本就在导航栏亮提示，不弹窗打断
+            if (!window.__updateTimer) {
+                window.__updateTimer = setTimeout(() => { silentCheckUpdate(); }, 4000);
+            }
+        }
+
+        // 刷新页面后恢复登录态。
+        // 不能用 document.cookie 判断：session cookie 是 **httponly** 的，
+        // JS 读不到它 —— 以前就是这么猜的，于是每按一次 F5 都要重新登录
+        // （服务端会话明明还有效）。这里直接问服务端。
+        const bootChecked = ref(false);
+        async function restoreSession() {
+            try {
+                const res = await fetch('/api/me', {credentials: 'include'});
+                if (!res.ok) return;                    // 没会话 → 留在登录框
+                const data = await res.json();
+                if (!data || !data.ok) return;
+                loggedIn.value = true;
+                userRole.value = data.role || '';
+                if (data.username) loginUser.value = data.username;
+                if (data.must_reset_password) {
+                    mustResetPwd.value = true;
+                    showChangePwd.value = true;
+                    changePwdNewUser.value = data.username || '';
+                    changePwdMsg.value = '⚠️ 首次登录请先修改默认密码';
+                    changePwdOk.value = false;
+                    return;
+                }
+                syncServerTime();
+                await afterLogin();
+            } catch(e) { /* 网络问题就退回登录框 */ }
+            finally { bootChecked.value = true; }
+        }
+        async function doLogout() {
+            // 必须让服务端把 token 删掉：cookie 是 httponly 的，
+            // 前端改 document.cookie 根本改不动它（以前「退出登录」形同虚设）
+            try { await fetch('/api/logout', {method: 'POST', credentials: 'include'}); }
+            catch(e) { /* 就算请求失败也要把界面收起来 */ }
             loggedIn.value = false;
             tab.value = 'rooms';
             userRole.value = '';
             showUserMenu.value = false;
+            loginPass.value = '';
+            bootChecked.value = true;
         }
 
         // ── Helpers ──
@@ -9334,8 +9428,11 @@ createApp({
             const roomId = selectedRoom.value?.room_id;
             if (!roomId) return;
 
-            if (eModeAll.value) {
-                // 加载所有人有数据的日期
+            if (eModeAll.value || !eUid.value) {
+                // 「所有人」模式，或者**还没填 UID**：都把「哪些天有数据」画出来。
+                // 以前没填 UID 时直接 return，日历里所有日期都是灰的、点不动 ——
+                // 而用户并不知道必须先填 UID，看到的就是「导出页坏了 / 统计没了」
+                // （731baa4 修的是同一类现象的另一处：进页面没加载日期 → 全月灰色）。
                 try {
                     const res = await fetch(`/api/rooms/${roomId}/all_dates`);
                     if (!res.ok) return;
@@ -9346,7 +9443,6 @@ createApp({
                 return;
             }
 
-            if (!eUid.value) return;
             try {
                 const res = await fetch(`/api/rooms/${roomId}/user_dates?uid=${eUid.value}`);
                 if (!res.ok) return;
@@ -11300,11 +11396,17 @@ createApp({
             return parts.join(' · ');
         }
 
+        // 启动时恢复会话（刷新页面不该再要求登录一次）。
+        // 必须写在 setup 里 —— 放到外面的 <script> 里根本访问不到 restoreSession。
+        restoreSession();
+
         return {showUpdateModal, updateChecking, updateError, updateData, checkUpdate, viewChangelog, showChangelog, changelogContent, renderMarkdown,
                 updateNotice, openUpdateNotice, ignoreUpdate, silentCheckUpdate,
-                loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout,
+                loggedIn, loginUser, loginPass, loginErr, doLogin, doLogout, bootChecked,
                 tab, userRole,
-                showUserMenu, showChangePwd, changePwdOld, changePwdNew, changePwdNewUser, changePwdMsg, changePwdOk, changingPwd,
+                showUserMenu, showChangePwd, changePwdOld, changePwdNew, changePwdConfirm, changePwdNewUser, changePwdMsg, changePwdOk, changingPwd,
+                // changePwdConfirm 之前漏了：v-model 绑定不到 ref，「再次输入新密码」
+                // 既不会跟着清空，也不参与响应式（校验用的是 DOM 里的值，所以没出错只是脏）
                 mustResetPwd,
                 openChangePwd, doChangePwd,
                 adminUsers, showUserForm, editingUser, userFormUsername, userFormPassword,
@@ -11316,6 +11418,9 @@ createApp({
                 loadExport, gotoExport, loadUserDates, onUidInput, onModeChange,
                 toggleDate, selectAllDatesInRange, clearSelectedDates, applyMultiDateExport,
                 pickDate, captureExport, eModeAll, eSelectedDates, eSelectedSet,
+                // eDateLabel 漏了：模板里 `:value="eDateLabel"`，不返回就是 undefined，
+                // 导出页的日期框永远是空的（选了哪天也看不见）。
+                eDateLabel,
                 eMergeGifts, exporting, startingRooms, fmtDateTime,
                 showCalendar, calYear, calMonth, calDays, exportDatesSet,
                 proxyImg, fmtTime, cardBgClass, guardLabel, guardBadgeClass,
@@ -11328,6 +11433,8 @@ createApp({
                 apiMsg, apiMsgOk, loadRoomApiConfig, toggleRoomApi, regenerateRoomApiKey, copyText,
                 danmakuRows, danmakuErr, danmakuOffset, danmakuLimit, danmakuTotal, danmakuPage,
                 loadDanmakuLog, clearDanmakuLog, fmtDanmakuTime, loadDmDates, dmToggleDate, dmExportSelected, dmCalDays, dmCalYear, dmCalMonth, dmShowCal, dmSelectedDates, dmDates, dmDatesSet, dmAsc,
+                // 同上：模板里靠这两个显示「(起始 ~ 结束)」，不返回就永远不显示
+                dmDateFrom, dmDateTo,
                 llmEnabled, llmProvider, llmApiKey, llmBaseUrl, llmModel, llmPrompt,
                 showMsTip, msPicked, applyModelScope,
                 llmWakeWord, llmTemp, llmTopP, llmMaxTokens,

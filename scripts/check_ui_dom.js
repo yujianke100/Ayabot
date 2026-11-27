@@ -145,7 +145,14 @@ const CLICK_TEXT = (text, tag = 'button') => `(() => {
 })()`;
 
 async function login(cdp) {
-  await waitFor(cdp, `!!document.querySelector('input[placeholder="账号"]')`, 20000, '登录表单');
+  // 会话已恢复（HttpOnly cookie 还有效）时根本没有登录框 —— 直接算已登录。
+  // 以前这里无条件等登录表单，刷新后就会超时。
+  try {
+    await waitFor(cdp, `!!document.querySelector('input[placeholder="账号"]')`, 3000, '登录表单');
+  } catch {
+    await waitFor(cdp, `!!document.querySelector('header')`, 12000, '已登录的主界面');
+    return;
+  }
   for (let i = 0; i < 3; i++) {
     const a = await cdp.eval(FILL('账号', USER));
     const b = await cdp.eval(FILL('密码', PASS));
@@ -241,6 +248,41 @@ async function main() {
     console.log(`  预览站 http://127.0.0.1:${APP_PORT} 就绪`);
     console.log(`  Chrome ${chromePath}`);
 
+    // 1.5) 给预览房间造一点真实数据：导出页的日历只让「有数据的日子」可选，
+    //      空库的话「全选当月」永远是 1 天，这条路径就等于没测。
+    //      用真 StatsStore 写，确保 DB 结构与生产一致（不手写 SQL）。
+    const seedPy = path.join(SCRATCH, `seed_${process.pid}.py`);
+    fs.mkdirSync(SCRATCH, { recursive: true });
+    fs.writeFileSync(seedPy, `
+import sys, time, json
+from pathlib import Path
+sys.path.insert(0, ${JSON.stringify(ROOT)})
+from app.storage import GiftEvent, StatsStore
+db = Path(${JSON.stringify(DATA_DIR)}) / "bot.db"
+db.parent.mkdir(parents=True, exist_ok=True)
+st = StatsStore(str(db))
+now = int(time.time())
+rows = [("辣条", 3, 300), ("小花花", 1, 100), ("情书", 1, 5200)]
+for i, (name, num, coin) in enumerate(rows):
+    ts = now - 86400 * (i + 1)
+    payload = {"giftName": name, "num": num, "total_coin": coin}
+    st.record_gift_event(GiftEvent(
+        ts=ts, month=time.strftime("%Y-%m", time.localtime(ts)), uid=1234 + i,
+        uname="观众" + str(i), event_type="SEND_GIFT", gift_name=name, gift_num=num,
+        is_blind_box=0, blind_box_cost=0, actual_value=coin // 100, profit_value=0,
+        raw_json=json.dumps(payload, ensure_ascii=False)))
+    # 让用户维度也有日期（导出页按 UID 查询时要用）
+if hasattr(st, "close"):
+    st.close()
+print("seeded", db)
+`, 'utf8');
+    const seed = require('child_process').spawnSync(py, [seedPy], { cwd: ROOT, encoding: 'utf8' });
+    if (seed.status !== 0) {
+      check('给预览房间造测试数据', false, String(seed.stderr || seed.stdout).slice(0, 200));
+    } else {
+      check('给预览房间造测试数据', true, String(seed.stdout).trim().slice(0, 60));
+    }
+
     // 2) 真 Chrome（headless），只用本机已装的
     chrome = spawn(chromePath, [
       '--headless=new', '--disable-gpu', '--no-sandbox', '--no-first-run',
@@ -315,6 +357,26 @@ async function main() {
     check('登录成功并列出房间', true);
     check('两个房间都在', await cdp.eval(
       `document.body.innerText.includes('#${ROOM}') && document.body.innerText.includes('#${ROOM2}')`));
+
+    // ── 阶段一·补：刷新页面不能要求重新登录 ──
+    // session cookie 是 httponly 的，`document.cookie` 永远读不到它。
+    // 前端以前就是用 document.cookie 猜登录态 → 每按一次 F5 都弹登录框，
+    // 而服务端会话其实还有效（实测刷新后 /api/rooms 仍 200）。
+    console.log('[1.5] 刷新页面保持登录');
+    await cdp.send('Page.reload', { ignoreCache: true });
+    await waitFor(cdp, `document.readyState === 'complete'`, 20000, '刷新');
+    let keptLogin = false;
+    try {
+      await waitFor(cdp, `!!document.querySelector('header')`, 12000, '刷新后主界面');
+      keptLogin = true;
+    } catch { /* 记失败 */ }
+    const loginFormAfterReload = await cdp.eval(
+      `!!document.querySelector('input[placeholder="账号"]')`);
+    check('**刷新后仍然在主界面**（不用重新登录）', keptLogin && !loginFormAfterReload,
+      `header=${keptLogin} 登录框=${loginFormAfterReload}`);
+    const stillAuthed = await cdp.eval(
+      `fetch('/api/rooms',{credentials:'include'}).then(r=>r.status)`);
+    check('刷新后会话在服务端依然有效', stillAuthed === 200, stillAuthed);
 
     // ── 阶段二：三个用户真实抱怨的界面状态 ──
     // 一次性把三种状态写进去，再刷新页面 —— 用户看到这些提示的场景就是「打开后台」。
@@ -465,6 +527,166 @@ async function main() {
     } catch (e) {
       check('切房间迟到响应（CDP 拦截不可用则跳过）', false, String(e.message || e).slice(0, 80));
     }
+
+    // ── 阶段四：把每一个标签都点一遍 ──
+    // 用户报「点开某个页面就白/就报错」时，我们从来没有一条断言能自动发现：
+    // 房间详情 7 个子标签 + 3 个顶层标签，只有「日志」一条被覆盖过。
+    // 主界面任何一处渲染抛错，Vue 都会把那一块留成空白，用户看到的就是「坏了」。
+    console.log('[7] 每个标签都要能打开');
+    await cdp.send('Page.reload', { ignoreCache: true });
+    await waitFor(cdp, `document.readyState === 'complete'`, 20000, '刷新（走标签前）');
+    await login(cdp);
+    await waitFor(cdp, `document.body.innerText.includes('#${ROOM}')`, 15000, '房间列表');
+    await openRoom(cdp, ROOM);
+
+    const SUBTABS = [
+      { label: '送礼排行', expect: '上舰' },
+      { label: '精美导出', expect: '所有人' },   // 日历要点开才出现，这里只断言面板本体
+      { label: '弹幕记录', expect: '弹幕' },
+      { label: 'AI回复', expect: 'LLM' },
+      { label: '机器人配置', expect: '机器人配置' },
+      { label: '数据管理', expect: '数据管理' },
+      { label: '日志', expect: 'Bot 日志' },
+    ];
+    const TOPTABS = [
+      { label: '全局配置', expect: '全局配置' },
+      { label: '用户管理', expect: '用户管理' },
+      { label: '帮助', expect: '使用指南' },
+    ];
+
+    let excMark = exceptions.length;
+    let conMark = consoleErrors.length;
+    const tabFailures = [];
+
+    for (const t of SUBTABS) {
+      const clicked = await cdp.eval(CLICK_TEXT(t.label));
+      if (clicked !== 'ok') { tabFailures.push(`${t.label}: 找不到标签按钮`); continue; }
+      let shown = false;
+      try {
+        await waitFor(cdp, `document.body.innerText.includes(${JSON.stringify(t.expect)})`,
+          10000, `子标签 ${t.label} 内容`);
+        shown = true;
+      } catch { /* 下面记失败 */ }
+      const newExc = exceptions.slice(excMark);
+      const newCon = consoleErrors.slice(conMark)
+        .filter((s) => !/favicon|Failed to load resource/i.test(s));
+      excMark = exceptions.length;
+      conMark = consoleErrors.length;
+      if (!shown) tabFailures.push(`${t.label}: 面板没有渲染出「${t.expect}」`);
+      if (newExc.length) tabFailures.push(`${t.label}: 渲染抛异常 ${newExc[0].slice(0, 60)}`);
+      if (newCon.length) tabFailures.push(`${t.label}: console error ${newCon[0].slice(0, 60)}`);
+    }
+    check('房间详情 7 个子标签全部能打开且不报错', tabFailures.length === 0,
+      tabFailures.join(' / '));
+
+    // 导出页的日历是「点日期框才展开」的，所以要先把日历打开再断言。
+    // 这一页出过真 bug（731baa4：进页面没加载日期 → 整月全灰、点不动），
+    // 所以这里不只断言「渲染出来了」，还要断言「全选当月 → 确定」这条实际路径能走完。
+    // 上面的循环最后停在「日志」，断言日历前必须先切回「精美导出」
+    await cdp.eval(CLICK_TEXT('精美导出'));
+    await waitFor(cdp, `document.body.innerText.includes('所有人')`, 8000, '回到精美导出');
+    const clickedDate = await cdp.eval(`(() => {
+      const el = [...document.querySelectorAll('input[placeholder="点击选择日期"]')][0];
+      if (!el) return 'NO_INPUT';
+      el.click();
+      return 'ok';
+    })()`);
+    check('导出页有日期输入框', clickedDate === 'ok', clickedDate);
+    // eDateLabel 曾经没出现在 setup 的 return 里 → 这个框永远是空的（选了哪天看不见）
+    const dateShown = await cdp.eval(`(() => {
+      const el = [...document.querySelectorAll('input[placeholder="点击选择日期"]')][0];
+      return el ? el.value : 'NO_INPUT';
+    })()`);
+    check('**日期框显示出了当前日期**（不是空框）', /^\d{4}-\d{2}-\d{2}$/.test(dateShown),
+      JSON.stringify(dateShown));
+    let calOpen = false;
+    try {
+      await waitFor(cdp, `document.body.innerText.includes('全选当月')`, 5000, '日历展开');
+      calOpen = true;
+    } catch { /* 记失败 */ }
+    check('点日期框能展开日历', calOpen);
+    const dayCells = await cdp.eval(`(() => {
+      const grid = [...document.querySelectorAll('div.grid.grid-cols-7.gap-1')];
+      const last = grid[grid.length - 1];
+      return last ? last.querySelectorAll('button').length : -1;
+    })()`);
+    check('日历画出了日期格子（28~31 天）', dayCells >= 28 && dayCells <= 31, dayCells);
+
+    if (calOpen) {
+      const all = await cdp.eval(CLICK_TEXT('全选当月'));
+      check('「全选当月」点得动', all === 'ok', all);
+      let multiShown = false;
+      try {
+        await waitFor(cdp, `/确定（\\d+天）/.test(document.body.innerText)`, 5000, '多选确认按钮');
+        multiShown = true;
+      } catch { /* 记失败 */ }
+      const nDays = await cdp.eval(`(() => {
+        const m = document.body.innerText.match(/确定（(\\d+)天）/);
+        return m ? Number(m[1]) : -1;
+      })()`);
+      // 数据是分布在本月的 3 天 + 默认今天，所以「全选当月」至少要选中 3 天
+      check('「全选当月」选中了有数据的那些天（≥ 3 天）', multiShown && nDays >= 3, nDays);
+
+      const applied = await cdp.eval(CLICK_TEXT('确定（'));
+      check('「确定」点得动', applied === 'ok', applied);
+      const dateVal = await cdp.eval(`(() => {
+        const el = [...document.querySelectorAll('input[placeholder="点击选择日期"]')][0];
+        return el ? el.value : '';
+      })()`);
+      // 多选后输入框会显示成一段区间/多日期，绝不能是空的
+      check('选完之后日期框显示出来了（不是空）', !!dateVal && dateVal.length > 3, JSON.stringify(dateVal));
+    }
+
+    const topFailures = [];
+    excMark = exceptions.length;
+    conMark = consoleErrors.length;
+    for (const t of TOPTABS) {
+      const clicked = await cdp.eval(CLICK_TEXT(t.label));
+      if (clicked !== 'ok') { topFailures.push(`${t.label}: 找不到按钮`); continue; }
+      let shown = false;
+      try {
+        await waitFor(cdp, `document.body.innerText.includes(${JSON.stringify(t.expect)})`,
+          10000, `顶层标签 ${t.label}`);
+        shown = true;
+      } catch { /* 记失败 */ }
+      const newExc = exceptions.slice(excMark);
+      const newCon = consoleErrors.slice(conMark)
+        .filter((s) => !/favicon|Failed to load resource/i.test(s));
+      excMark = exceptions.length;
+      conMark = consoleErrors.length;
+      if (!shown) topFailures.push(`${t.label}: 没渲染`);
+      if (newExc.length) topFailures.push(`${t.label}: 抛异常 ${newExc[0].slice(0, 60)}`);
+      if (newCon.length) topFailures.push(`${t.label}: console error ${newCon[0].slice(0, 60)}`);
+    }
+    check('全局配置 / 用户管理 / 帮助 全部能打开且不报错', topFailures.length === 0,
+      topFailures.join(' / '));
+
+    // ── 阶段五：退出登录必须真的注销 ──
+    // 以前 doLogout 只写 `document.cookie='session=;max-age=0'`，
+    // 而 cookie 是 httponly 的 —— 这行代码改不动它，token 一直有效到过期。
+    console.log('[8] 退出登录');
+    await cdp.eval(`(() => {
+      const b = [...document.querySelectorAll('button')]
+        .find(x => (x.textContent || '').includes('preview') && (x.textContent || '').includes('▾'));
+      if (b) b.click();
+      return 'ok';
+    })()`);
+    await sleep(300);
+    const logoutClicked = await cdp.eval(CLICK_TEXT('退出登录'));
+    check('找到「退出登录」', logoutClicked === 'ok', logoutClicked);
+    await sleep(1500);
+    const backToLogin = await cdp.eval(
+      `!!document.querySelector('input[placeholder="账号"]')`);
+    check('退回登录框', backToLogin);
+    const afterLogout = await cdp.eval(
+      `fetch('/api/rooms',{credentials:'include'}).then(r=>r.status)`);
+    check('**服务端会话真的失效了**（不是只把界面藏起来）', afterLogout === 401, afterLogout);
+    // 刷新一次确认没有「退出后又自己登回去」
+    await cdp.send('Page.reload', { ignoreCache: true });
+    await waitFor(cdp, `document.readyState === 'complete'`, 20000, '注销后刷新');
+    await sleep(1200);
+    check('注销后刷新仍停在登录框',
+      await cdp.eval(`!!document.querySelector('input[placeholder="账号"]')`));
 
     check('全程没有未捕获的页面异常', exceptions.length === 0,
       exceptions.slice(0, 2).join(' | '));
