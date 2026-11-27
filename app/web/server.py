@@ -41,7 +41,7 @@ from bilibili_api import live
 from app import tzutil
 from app.config import ConfigError, DEFAULT_ROOMS_DIR, atomic_write_text
 from app.danmaku_xml import MAX_XML_BYTES as _MAX_XML_BYTES
-from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room, clean_room_async, set_rooms_base_dir, start_room_async, stop_room_async, restart_room_async, start_periodic_log_cleanup, cleanup_all_stale_pidfiles, last_exit_code
+from app.process_manager import start_room, stop_room, restart_room, room_status, clean_room, clean_room_async, set_rooms_base_dir, start_room_async, stop_room_async, restart_room_async, start_periodic_log_cleanup, register_periodic_task, cleanup_all_stale_pidfiles, last_exit_code
 from app.version import get_version, get_version_display
 
 _APP_VERSION = get_version_display()
@@ -71,6 +71,9 @@ _API_DOMAIN: str = ""
 # 图片代理缓存
 _IMAGE_CACHE_DIR: str = "data/cache/images"
 _IMAGE_CACHE_MAX_AGE = 86400 * 7  # 磁盘缓存保留 7 天
+#: 缓存目录的**总大小**上限。只按天数清是不够的：一场热门直播能缓存上千张
+#: 头像/礼物图标，全都在 7 天之内，目录照样涨到几个 GB。
+_IMAGE_CACHE_MAX_BYTES = 200 * 1024 * 1024
 _PROXY_SEMAPHORE = asyncio.Semaphore(3)  # 最多 3 个并发请求
 _PROXY_IN_FLIGHT: dict[str, asyncio.Future] = {}  # 正在进行的请求去重
 
@@ -83,16 +86,47 @@ def _get_image_cache_path(url: str) -> Path:
 
 
 def _clean_expired_cache() -> None:
-    """清理过期缓存文件。"""
+    """清理过期缓存文件，并把目录总量压回上限以内。
+
+    两件事都要做：
+      - 按天数清（7 天没被访问过的图不会再被请求）；
+      - **按总量清**：一场热门直播能缓存上千张头像/礼物图标，全都在 7 天之内，
+        只按天数清目录照样涨到几个 GB。超限时按「最久没被写过」的顺序删到
+        上限的 80%，留出余量免得每个小时都触发一次。
+    """
     try:
         cache_dir = Path(_IMAGE_CACHE_DIR)
         if not cache_dir.exists():
             return
         now = time.time()
+        files: list[tuple[float, int, Path]] = []
         for f in cache_dir.iterdir():
-            if f.is_file() and now - f.stat().st_mtime > _IMAGE_CACHE_MAX_AGE:
+            try:
+                if not f.is_file():
+                    continue
+                st = f.stat()
+            except OSError:
+                continue
+            if now - st.st_mtime > _IMAGE_CACHE_MAX_AGE:
                 f.unlink(missing_ok=True)
-    except Exception:
+                continue
+            files.append((st.st_mtime, st.st_size, f))
+
+        total = sum(size for _m, size, _f in files)
+        if total <= _IMAGE_CACHE_MAX_BYTES:
+            return
+        target = int(_IMAGE_CACHE_MAX_BYTES * 0.8)
+        files.sort(key=lambda x: x[0])       # 最久没写的先删
+        for _mtime, size, f in files:
+            if total <= target:
+                break
+            try:
+                f.unlink(missing_ok=True)
+                total -= size
+            except OSError:
+                pass
+        logger.info("image cache trimmed to %.1f MB", total / 1048576)
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -998,6 +1032,9 @@ async def _startup():
     asyncio.create_task(_warm_update_cache())
     # 启动定期日志清理（后台线程，默认保留 3 天）
     start_periodic_log_cleanup()
+    # 图片缓存也必须定期清：以前只在 init_app 里清一次，exe 用户开几周不重启，
+    # 缓存目录只涨不清（一场热门直播能缓存上千张头像）。
+    register_periodic_task(_clean_expired_cache, "image-cache")
     # 自动启动所有已配置的房间（Docker 部署时自动拉起）
     asyncio.create_task(_auto_start_rooms())
     # 房间守护：崩溃/假死自动恢复
@@ -4234,6 +4271,13 @@ async def api_verify_account_credential(uid: str):
 #  Per-Room 数据 API
 # ══════════════════════════════════════════════════════════════
 
+#: 「精美导出」一次最多渲染多少条明细。
+#: 这一页是给人看/截图用的（多列排版），不是数据导出通道；一个热闹的房间
+#: 一个月就可能有几万条，全量返回会给浏览器几千个 DOM 节点 —— 用户点开
+#: 导出页就卡住，标签页甚至被 Chrome 判为无响应。截断时用响应头告诉前端，
+#: 让界面明确说「只显示前 N 条，请缩小日期范围」，而不是静静地少一半。
+_EXPORT_MAX_ROWS = 3000
+
 #: 房间日志接口最多返回多少行 / 最多读多少字节。
 #: `lines` 是外部输入，以前既不夹取也不限制字节数：
 #:   - `lines=10**9` → 整个文件原样返回
@@ -4607,7 +4651,8 @@ def _export_all_blocking(
     gift_type: str,
     sort: str,
     uid: int,
-) -> list:
+    max_rows: int = _EXPORT_MAX_ROWS,
+) -> tuple[list, int]:
     """导出明细的**同步**实现：全表扫描 + 逐行 json.loads + 合并排序。
 
     必须放到线程里跑：20 万行实测 0.54s（取数 0.28s + 逐行解析 0.26s），
@@ -4616,7 +4661,7 @@ def _export_all_blocking(
     用户的感觉就是「一点导出，机器人就不说话了」。
     """
     if not db_path.exists():
-        return []
+        return [], 0
 
     conn = _connect(db_path)
     try:
@@ -4711,7 +4756,11 @@ def _export_all_blocking(
         else:  # ts
             results.sort(key=lambda x: x["ts"] or 0)
 
-        return results
+        # **排序之后**再截断：否则「按价值排」拿到的是"随便 N 条里最贵的"。
+        total = len(results)
+        if max_rows and total > max_rows:
+            results = results[:max_rows]
+        return results, total
     finally:
         try:
             conn.close()
@@ -4744,8 +4793,13 @@ async def api_room_export_all(
 
     try:
         # 丢到线程里跑：数据库连接必须在线程内创建（sqlite 绑定创建它的线程）
-        return await asyncio.to_thread(
+        rows, total = await asyncio.to_thread(
             _export_all_blocking, db_path, date_from, date_to, gift_type, sort, uid)
+        resp = JSONResponse(rows)
+        # 响应体保持裸数组（旧前端不用改），截断信息走响应头
+        resp.headers["X-Ayabot-Total-Rows"] = str(total)
+        resp.headers["X-Ayabot-Truncated"] = "1" if total > len(rows) else "0"
+        return resp
     except Exception as exc:
         # 不要 return []：那会让"导出失败"和"没有数据"完全无法区分
         logger.exception("room %s export failed", room_id)
@@ -9624,6 +9678,14 @@ createApp({
                     if (dateTo) params.set('date_to', dateTo);
                     const res = await fetch(`/api/rooms/${roomId}/export_all?${params}`);
                     if (!res.ok) { const txt = await res.text(); errExport.value = '请求失败: ' + txt.slice(0,80); loadingExport.value = false; return; }
+                    // 行数被截断时明确说出来：这一页是给人看/截图的，
+                    // 几万条会让浏览器直接卡死，所以后端最多给 _EXPORT_MAX_ROWS 条。
+                    // 以前什么都不说，用户以为「这个月就这么多礼物」。
+                    if (res.headers.get('X-Ayabot-Truncated') === '1') {
+                        const total = res.headers.get('X-Ayabot-Total-Rows') || '?';
+                        errExport.value = `数据较多（共 ${total} 条），这里只显示排序后的前部分。`
+                            + '请缩小日期范围，或直接用「数据管理」里的导出。';
+                    }
                     const data = await res.json();
                     exportList.value = (data || []).map((item, idx) => ({
                         ...item,
@@ -9635,7 +9697,7 @@ createApp({
                         guard_level: item.guard_level || 0,
                         gift_icon: item.gift_icon || '',
                     }));
-                    if (!exportList.value.length) {
+                    if (!exportList.value.length && !errExport.value) {
                         errExport.value = '所选日期范围内无送礼记录';
                     }
                 } catch(e) { errExport.value = '加载失败: ' + e.message; }

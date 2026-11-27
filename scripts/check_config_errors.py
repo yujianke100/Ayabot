@@ -84,6 +84,15 @@ def main() -> int:
             return
         ok(f"{label:34s}", False, "居然加载成功了")
 
+    print("[0] 段落形状写错（缩进掉了 / 写成一行）也要点名到字段")
+    # 这类错误以前抛的是 `AttributeError: 'str' object has no attribute 'get'`：
+    # 既不是 ConfigError（main.py 不接），也完全不说哪个字段。
+    for section in ("features", "cooldown", "rate_limit", "runtime", "storage", "auth",
+                    "llm", "web_ui"):
+        expect_error(f"{section} 写成字符串", mutate(section, "随便写点什么"),
+                     (section, "键值对"))
+        expect_error(f"{section} 写成列表", mutate(section, [1, 2]), (section, "键值对"))
+
     print("[1] 常见手改错误都要点名到字段")
     expect_error("anchor_uid 写成字母", mutate("anchor_uid", "abc"),
                  ("anchor_uid", "主播 UID", "abc"))

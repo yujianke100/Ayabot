@@ -309,6 +309,40 @@ def _validate_config_values(p: Path, raw: dict) -> None:
             raise ConfigError(p, f"`{dotted}`（{label}）应该是字符串，当前是 {type(val).__name__}")
 
 
+#: config.yaml 里必须是「键值对」的顶级段落。
+#: 用户手改时最常见的错误就是把整段缩进弄掉、或者写成一行字符串：
+#: ```
+#: features: 全开            # ← 想写 features: {welcome_enabled: true}
+#: ```
+#: 以前这种形状会在 `features.get(...)` 那里抛
+#: `AttributeError: 'str' object has no attribute 'get'`，
+#: 而那既不是 ConfigError（main.py 不接）、也完全没说是哪个字段 ——
+#: 用户拿到的就是这一句，然后在 200 行配置里瞎找。
+_CONFIG_SECTIONS = (
+    "credential", "features", "cooldown", "rate_limit", "runtime",
+    "storage", "auth", "web_ui", "llm",
+)
+
+
+def _validate_sections(data: dict[str, Any], path: Path) -> None:
+    """检查顶级段落的形状；不对就抛带字段名和实际类型的 ConfigError。"""
+    for name in _CONFIG_SECTIONS:
+        if name not in data:
+            continue
+        value = data[name]
+        if value is None:
+            # `features:` 后面留空是合法的，等价于"这段没配置"
+            data[name] = {}
+            continue
+        if not isinstance(value, dict):
+            raise ConfigError(
+                path,
+                f"`{name}` 必须是「缩进的一组键值对」，当前是一个 "
+                f"{type(value).__name__}（{str(value)[:40]!r}）。"
+                f"常见原因：这一段下面的缩进被改掉了，或者把它写成了单行。",
+            )
+
+
 def _read_yaml(path: Path) -> dict[str, Any]:
     """读 YAML，并把语法错误变成「哪个文件、第几行」。
 
@@ -347,6 +381,7 @@ def _read_yaml(path: Path) -> dict[str, Any]:
                   "如果用记事本另存过，请在「另存为」里把编码选成 UTF-8") from None
     if not isinstance(data, dict):
         raise ConfigError(path, f"配置的根节点必须是键值对，当前是 {type(data).__name__}")
+    _validate_sections(data, path)
     return data
 
 
@@ -363,9 +398,13 @@ def load_config(path: str = "config.yaml") -> AppConfig:
         raise
     except FileNotFoundError:
         raise
-    except (KeyError, ValueError, TypeError) as exc:
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
         # 兜底：`_validate_config_values` 没覆盖到的字段类型错误。
         # KeyError 的 str() 自带引号，去掉更像人话。
+        # **必须包含 AttributeError**：某个子段（features.keyword_reply 等）
+        # 被写成字符串/列表时抛的就是它；漏掉的话用户拿到的是一句
+        # `'str' object has no attribute 'get'` —— 既不知道是哪个字段，
+        # main.py 也不认（它只 catch ConfigError），直接甩一整段 traceback。
         detail = str(exc).strip("'") if isinstance(exc, KeyError) else str(exc)
         raise ConfigError(path, f"配置项类型/取值不对：{detail}") from None
 

@@ -743,8 +743,22 @@ def cleanup_old_logs(max_days: int = _MAX_LOG_DAYS) -> int:
     return cleaned
 
 
+#: 除了清日志，还要定期做的事（图片缓存清理等）。由 server 注册。
+_PERIODIC_TASKS: list[tuple[object, str]] = []
+
+
+def register_periodic_task(fn, name: str = "") -> None:
+    """注册「每小时跑一次」的维护任务。
+
+    为什么需要这个入口：图片代理缓存原来只在 `init_app` 里清一次。
+    exe 用户的正常形态是开几周不重启，于是缓存目录只涨不清 ——
+    一场热门直播能缓存上千张头像，几个月下来是几个 GB。
+    """
+    _PERIODIC_TASKS.append((fn, name or getattr(fn, "__name__", "task")))
+
+
 def start_periodic_log_cleanup() -> None:
-    """启动后台线程，定期清理过期/过大的日志文件。"""
+    """启动后台线程，定期清理过期/过大的日志文件与缓存。"""
     thread = threading.Thread(target=_log_cleanup_loop, daemon=True, name="log-cleanup")
     thread.start()
     logger.info("periodic log cleanup started (interval=%ds, max_days=%d)",
@@ -752,7 +766,7 @@ def start_periodic_log_cleanup() -> None:
 
 
 def _log_cleanup_loop() -> None:
-    """定时清理循环。"""
+    """定时清理循环（日志 + 所有注册进来的维护任务）。"""
     while True:
         try:
             count = cleanup_old_logs()
@@ -760,4 +774,10 @@ def _log_cleanup_loop() -> None:
                 logger.info("log cleanup: removed %d old log files", count)
         except Exception as exc:
             logger.warning("log cleanup error: %s", exc)
+        # 注册进来的任务各自 try：一个坏了不能把日志清理也带下去
+        for fn, name in list(_PERIODIC_TASKS):
+            try:
+                fn()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("periodic task %s failed: %s", name, exc)
         time.sleep(_LOG_CLEANUP_INTERVAL)
