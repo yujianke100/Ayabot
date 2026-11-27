@@ -617,6 +617,56 @@ class StatsStore:
         self._conn.commit()
         return count
 
+    #: 破坏性操作前备份数据库的上限。超过就不复制（避免一次删数据要等好几分钟），
+    #: 但仍然照常执行操作 —— 只是不会给用户"可以反悔"的错觉。
+    BACKUP_MAX_BYTES = 300 * 1024 * 1024
+    #: 保留最近几份备份
+    BACKUP_KEEP = 5
+
+    def backup_before_destructive(self, tag: str = "manual") -> Optional[Path]:
+        """在「删数据」这类不可逆操作前，把库整份复制一份。
+
+        为什么要有：`删除旧数据` / `重算统计` / `撤销导入` 都是不可恢复的。
+        用户选错日期一次，几年的礼物记录就没了 —— 界面上没有任何后悔药。
+
+        用 SQLite 自己的 `Connection.backup()`：它在读事务里做一致性快照，
+        即使机器人正在写也不会拷到半截数据（`copy2` 会有这个风险）。
+
+        返回备份文件路径；跳过（库太大/出错）时返回 None，调用方据此提示用户。
+        """
+        try:
+            db_path = Path(self._db_path)
+            if not db_path.exists():
+                return None
+            if db_path.stat().st_size > self.BACKUP_MAX_BYTES:
+                logger.warning("数据库 %.0f MB 超过备份上限，跳过备份：%s",
+                               db_path.stat().st_size / 1048576, db_path)
+                return None
+            backup_dir = db_path.parent / "backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            safe_tag = "".join(ch for ch in str(tag) if ch.isalnum() or ch in "-_")[:32]
+            dest = backup_dir / f"bot_{stamp}_{safe_tag}.db"
+
+            import sqlite3 as _sqlite3  # noqa: PLC0415
+            target = _sqlite3.connect(str(dest))
+            try:
+                with target:
+                    self._conn.backup(target)
+            finally:
+                target.close()
+
+            # 只留最近 N 份：备份文件很占地方，不清会慢慢把磁盘吃满
+            files = sorted(backup_dir.glob("bot_*.db"), key=lambda f: f.stat().st_mtime)
+            for old in files[: max(0, len(files) - self.BACKUP_KEEP)]:
+                old.unlink(missing_ok=True)
+            logger.info("已在删除前备份数据库：%s（%.1f MB）",
+                        dest, dest.stat().st_size / 1048576)
+            return dest
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("备份数据库失败（操作照常进行）：%s", exc)
+            return None
+
     def cleanup_old_data(self, gift_days: int = 733, danmaku_days: int = 0) -> dict[str, int]:
         """删除超过指定天数的旧数据. 天数=0 表示不清理."""
         now_ts = int(time.time())

@@ -5208,6 +5208,25 @@ def _delete_old_blocking(db_path: Path, date_str: str, data_type: str) -> dict:
     DELETE + 重算月度聚合在大库上是秒级的；同步跑会冻住整个事件循环，
     exe 模式下所有房间的机器人一起哑（用户会以为「删数据把机器人删坏了」）。
     """
+    # ── 先备份 ──
+    # 「删除旧数据」是不可恢复的：用户选错日期一次，几年的礼物记录就没了。
+    # 备份用 SQLite 的 backup()（一致性快照），比 copy2 安全。
+    backup_path = ""
+    try:
+        from app.storage import StatsStore  # noqa: PLC0415
+        _st = StatsStore(str(db_path))
+        try:
+            got = _st.backup_before_destructive(f"delete_old_{data_type}")
+        finally:
+            try:
+                _st._conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if got:
+            backup_path = str(got)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("删除前备份失败（继续执行）：%s", exc)
+
     conn = _connect(db_path)
     cur = conn.cursor()
     result: dict[str, int] = {"deleted_gifts": 0, "deleted_danmaku": 0}
@@ -5250,6 +5269,8 @@ def _delete_old_blocking(db_path: Path, date_str: str, data_type: str) -> dict:
         except Exception as exc:
             logger.warning("rebuild monthly stats failed: %s", exc)
         _clean_orphan_monthly_stats(db_path)
+    if backup_path:
+        result["backup_path"] = backup_path
     return result
 
 
@@ -9892,7 +9913,11 @@ createApp({
                 if (data.deleted_gifts > 0) parts.push(`${data.deleted_gifts} 条送礼`);
                 if (data.deleted_guards > 0) parts.push(`${data.deleted_guards} 条上舰`);
                 if (data.deleted_danmaku > 0) parts.push(`${data.deleted_danmaku} 条弹幕`);
-                delResult.value = parts.length ? `已删除 ${parts.join('、')}` : '没有需要删除的数据';
+                const done = parts.length ? `已删除 ${parts.join('、')}` : '没有需要删除的数据';
+                // 把备份路径显示出来：这是用户唯一的后悔药
+                delResult.value = data.backup_path
+                    ? `${done}。删除前已备份：${data.backup_path}`
+                    : `${done}（未生成备份：数据库过大或备份失败）`;
             } catch(e) { delResult.value = '删除失败: ' + e.message; }
         }
 
