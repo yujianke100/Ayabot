@@ -687,6 +687,15 @@ print("seeded", db)
     await sleep(1200);
     check('注销后刷新仍停在登录框',
       await cdp.eval(`!!document.querySelector('input[placeholder="账号"]')`));
+    // 换个账号登录时不能带着上一个人的用户名/房间列表
+    check('注销后登录框是空的（没残留上一个用户名）',
+      await cdp.eval(`(() => {
+        const el = document.querySelector('input[placeholder="账号"]');
+        return el ? el.value === '' : false;
+      })()`));
+    await login(cdp);
+    await waitFor(cdp, `document.body.innerText.includes('#${ROOM}')`, 15000, '重新登录后房间列表');
+    check('重新登录后能正常进入', true);
 
     check('全程没有未捕获的页面异常', exceptions.length === 0,
       exceptions.slice(0, 2).join(' | '));

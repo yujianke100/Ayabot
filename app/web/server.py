@@ -8955,6 +8955,13 @@ createApp({
             showUserMenu.value = false;
             loginPass.value = '';
             bootChecked.value = true;
+            // 必须清干净：不清的话换个账号登录时，头部还显示上一个用户名
+            // （doLogin 里是 `if (!loginUser.value && data.username) …`，
+            //  旧值留着就不会被覆盖），房间列表也还是上一个人的
+            loginUser.value = '';
+            rooms.value = [];
+            allRooms.value = [];
+            selectedRoom.value = null;
         }
 
         // ── Helpers ──
