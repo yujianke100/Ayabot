@@ -34,6 +34,7 @@ PORT = 19896
 TOKEN = "test-session-token"
 ROOM = "1988000111"
 ROWS = 150_000
+EXT_UID = 1000        # 库里的 uid 是 1000 + i % 500
 
 
 def _get(path: str) -> tuple[int, str]:
@@ -60,6 +61,8 @@ def main() -> int:
     srv._ROOM_DB_PATH_CACHE.clear()
     srv._SESSIONS[TOKEN] = (time.time() + 900, "tester", "admin", [])
     srv._rate_limited = lambda ip: False  # type: ignore[assignment]
+    # 外部统计接口走 api_token 认证（全局 token 就够）
+    srv._API_TOKEN = TOKEN
 
     # 造一份有真实体量的库
     db = room_dir / "data" / "bot.db"
@@ -156,15 +159,75 @@ def main() -> int:
         print(f"  → 对比：{light_export*1000:.0f}ms（线程） vs "
               f"{light_blocked*1000:.0f}ms（同步）")
 
-        # ── 3. 结构断言：这两个端点必须走 to_thread ──
+        # ── 2.5 外部统计接口（overlay / 插件在轮询）──
+        # 实测 20 万行：user_stats 6.7s、external_ranking 1.3s、room_stats 1.2s。
+        # 它们是给外部 overlay 轮询的，同步跑等于每几秒让所有机器人一起哑一次。
+        print("[2.5] 外部统计接口不能卡住事件循环")
+        for path, label in (
+            (f"/api/external/user_stats?room_id={ROOM}&token={TOKEN}&uid={EXT_UID}",
+             "user_stats"),
+            (f"/api/external/ranking?room_id={ROOM}&token={TOKEN}&limit=50",
+             "external_ranking"),
+            (f"/api/external/room_stats?room_id={ROOM}&token={TOKEN}",
+             "room_stats"),
+            (f"/api/rooms/{ROOM}/ranking?rStart=&rEnd=&rType=all", "room_ranking"),
+        ):
+            heavy_s, light_s = measure(path, label)
+            ok(f"{label} 期间 /api/time 仍在 {light_s*1000:.0f}ms 内返回（< 300ms）",
+               light_s < 0.3, f"重 {heavy_s*1000:.0f}ms / 轻 {light_s*1000:.0f}ms")
+
+        # ── 3. 结构断言：这些端点必须走 to_thread ──
         print("[3] 结构断言")
         src = (ROOT / "app" / "web" / "server.py").read_text(encoding="utf-8")
+        app_default_sep = chr(10) * 3
         seg = src[src.index("async def api_room_export_all"):]
         seg = seg[:seg.index("\ndef ", 10)]
         ok("export_all 使用 asyncio.to_thread", "asyncio.to_thread" in seg)
         seg2 = src[src.index("async def api_room_all_dates"):]
         seg2 = seg2[:seg2.index("\ndef ", 10)]
         ok("all_dates 使用 asyncio.to_thread", "asyncio.to_thread" in seg2)
+        # 外部统计 + 排行：端点函数体里必须有 to_thread（同步实现另放一个函数）
+        for fn in ("api_external_user_stats", "api_external_ranking",
+                   "api_external_room_stats", "api_room_ranking",
+                   # 撤销一次 XML 导入要 SELECT 整批 + DELETE + 回退聚合，
+                   # 大文件是秒级的（而且它自己 BEGIN IMMEDIATE 全程持写锁）
+                   "api_delete_import", "api_list_imports"):
+            body = src[src.index(f"async def {fn}("):]
+            body = body[: body.index(app_default_sep)]
+            ok(f"{fn} 使用 asyncio.to_thread", "asyncio.to_thread" in body)
+        # 反向：同步实现里绝不能再有 await
+        for fn in ("_external_user_stats_blocking", "_external_ranking_blocking",
+                   "_external_room_stats_blocking", "_room_ranking_blocking"):
+            body = src[src.index(f"def {fn}("):]
+            body = body[: body.index(app_default_sep)]
+            ok(f"{fn} 是纯同步函数（没有 await）", "await " not in body)
+
+        # ── 4. 按用户查时间区间的索引 ──
+        # 没有 (uid, ts) 索引时 SQLite 只能全表扫：20 万行实测单个
+        # /api/external/user_stats 要 6.7 秒；有索引是毫秒级。
+        # 而且老库不会自动补建（CREATE TABLE IF NOT EXISTS 不会重跑整段），
+        # 所以必须在 _migrate_schema 里也执行一次。
+        print("[4] 按用户查询必须走索引")
+        import sqlite3
+        conn = sqlite3.connect(str(db))
+        try:
+            names = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'")}
+            ok("存在 idx_gift_events_uid_ts", "idx_gift_events_uid_ts" in names, sorted(names))
+            plan = " ".join(
+                str(r[-1]) for r in conn.execute(
+                    "EXPLAIN QUERY PLAN SELECT SUM(gift_num) FROM gift_events "
+                    "WHERE uid = ? AND ts >= ? AND ts <= ?", (EXT_UID, 0, 2 ** 40)))
+            ok("查询计划用上了索引（不是 SCAN）",
+               "USING INDEX" in plan.upper() and "SCAN GIFT_EVENTS" not in plan.upper(), plan)
+            # 真的量一下（1000 个 uid 里挑一个）
+            t0 = time.time()
+            conn.execute("SELECT COUNT(1) FROM gift_events WHERE uid = ? AND ts >= ?",
+                         (EXT_UID, 0)).fetchone()
+            ms = (time.time() - t0) * 1000
+            ok(f"单用户查询 {ms:.1f}ms（< 100ms）", ms < 100, f"{ms:.1f}ms")
+        finally:
+            conn.close()
     finally:
         server.should_exit = True
         th.join(timeout=15)

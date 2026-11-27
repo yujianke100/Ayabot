@@ -150,6 +150,13 @@ class StatsStore:
             CREATE INDEX IF NOT EXISTS idx_gift_events_ts
             ON gift_events(ts);
 
+            -- 按用户查时间区间：外部统计接口（overlay/插件）和 WebUI 的
+            -- 「某人的礼物明细」都是 `WHERE uid = ? AND ts >= ? AND ts <= ?`。
+            -- 只有 (month, uid) 和 (ts) 两个索引时 SQLite 只能扫全表，
+            -- 20 万行实测 single user_stats 要 6.7 秒；有了这个索引是毫秒级。
+            CREATE INDEX IF NOT EXISTS idx_gift_events_uid_ts
+            ON gift_events(uid, ts);
+
             CREATE TABLE IF NOT EXISTS monthly_blindbox_stats (
                 month TEXT NOT NULL,
                 uid INTEGER NOT NULL,
@@ -239,6 +246,11 @@ class StatsStore:
             "ON gift_events(dedupe_key) WHERE dedupe_key <> ''")
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_gift_events_source ON gift_events(source)")
+        # 索引是「老库里没有、新库里有」的典型：只在 _create_tables 里加，
+        # 已经存在的库不会补建（CREATE TABLE IF NOT EXISTS 不会重跑整段）。
+        # 实测 20 万行：没有它时按用户查要 6.7s，有它是毫秒级。
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gift_events_uid_ts ON gift_events(uid, ts)")
         if added:
             self._conn.commit()
 

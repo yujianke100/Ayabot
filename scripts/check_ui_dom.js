@@ -145,13 +145,14 @@ const CLICK_TEXT = (text, tag = 'button') => `(() => {
 })()`;
 
 async function login(cdp) {
-  // 会话已恢复（HttpOnly cookie 还有效）时根本没有登录框 —— 直接算已登录。
-  // 以前这里无条件等登录表单，刷新后就会超时。
-  try {
-    await waitFor(cdp, `!!document.querySelector('input[placeholder="账号"]')`, 3000, '登录表单');
-  } catch {
-    await waitFor(cdp, `!!document.querySelector('header')`, 12000, '已登录的主界面');
-    return;
+  // 先等页面「安定」下来：要么出现登录表单，要么已经进了主界面（会话恢复成功）。
+  // 不能只等登录表单 —— 会话还有效时根本没有表单；也不能只等 header ——
+  // 页面刚开始 boot 时两者都还没渲染（这就是一次假红）。
+  await waitFor(cdp,
+    `!!document.querySelector('input[placeholder="账号"]') || !!document.querySelector('header')`,
+    25000, '页面安定（登录框或主界面）');
+  if (!(await cdp.eval(`!!document.querySelector('input[placeholder="账号"]')`))) {
+    return;   // 会话已恢复，直接算已登录
   }
   for (let i = 0; i < 3; i++) {
     const a = await cdp.eval(FILL('账号', USER));
@@ -418,6 +419,66 @@ print("seeded", db)
         .some(b => (b.textContent || '').includes('去扫码登录'))`));
     check('凭证失效：说明「扫码后自动恢复，无需重启」',
       body.includes('自动恢复') && body.includes('无需重启'));
+
+    // 「去扫码登录」必须真的把人带到二维码 —— 这是用户最需要的那一步。
+    // 真去请求 B站 生成二维码会让测试依赖外网，所以用 CDP 把那个接口拦住并
+    // 回一个假二维码，只验证前端接线（tab 切换 + 图片渲染 + 状态文字）。
+    {
+      const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+      let stubErr = '';
+      // 这个监听器注册后就一直在，后面 [6] 还会用 Fetch 拦别的请求 ——
+      // 不加开关会把别人的请求提前 continue 掉（实测报
+      // Invalid state for continueInterceptedRequest）
+      let biliStubActive = true;
+      cdp.on(async (m) => {
+        if (!biliStubActive) return;
+        if (m.method !== 'Fetch.requestPaused') return;
+        try {
+          if (m.params.request.url.includes('/api/bili_accounts')) {
+            await cdp.send('Fetch.fulfillRequest', {
+              requestId: m.params.requestId,
+              responseCode: 200,
+              responseHeaders: [
+                { name: 'Content-Type', value: 'application/json' },
+                { name: 'Access-Control-Allow-Origin', value: '*' },
+              ],
+              body: Buffer.from(JSON.stringify({
+                ok: true, qr_image: 'data:image/png;base64,' + png, session_id: 'ui-test',
+              })).toString('base64'),
+            });
+          } else {
+            await cdp.send('Fetch.continueRequest', { requestId: m.params.requestId });
+          }
+        } catch (e) { stubErr = String(e.message || e); }
+      });
+      await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/bili_accounts*' }] });
+      const clickRelogin = await cdp.eval(CLICK_TEXT('去扫码登录'));
+      check('「去扫码登录」按钮点得动', clickRelogin === 'ok', clickRelogin);
+      let qrShown = false;
+      try {
+        await waitFor(cdp,
+          `!!document.querySelector('img[src^="data:image"]')`, 10000, '二维码图片');
+        qrShown = true;
+      } catch { /* 记失败 */ }
+      const switchedTab = await cdp.eval(
+        `document.body.innerText.includes('用户管理') && document.body.innerText.includes('B站账号')
+         || !!document.querySelector('img[src^="data:image"]')`);
+      check('点了之后切到「用户管理」并渲染出二维码', qrShown && switchedTab,
+        qrShown ? '二维码已渲染' : ('桩错误=' + stubErr).slice(0, 80));
+      biliStubActive = false;
+      await cdp.send('Fetch.disable').catch(() => {});
+      // 收尾：关掉二维码面板，别让它影响后面的断言
+      await cdp.eval(CLICK_TEXT('取消'));
+      await sleep(200);
+      // 回到房间列表并重新进房间，继续后面的检查。
+      // 注意：goRelogin 不会清 selectedRoom，点回「房间管理」看到的仍是详情页，
+      // 所以要先点「返回房间列表」。
+      await cdp.eval(CLICK_TEXT('房间管理'));
+      await sleep(300);
+      await cdp.eval(CLICK_TEXT('返回房间列表'));
+      await waitFor(cdp, `document.body.innerText.includes('#${ROOM}')`, 8000, '回到房间列表');
+      await openRoom(cdp, ROOM);
+    }
 
     check('崩溃：提示已暂停自动重启', body.includes('暂停自动重启'));
     check('崩溃：写出「下次自动重试」的具体时间（不是只有原因）',

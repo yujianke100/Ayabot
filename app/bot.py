@@ -98,6 +98,7 @@ class LiveRobot:
 
         self.store = StatsStore(config.storage.sqlite_path)
         # 启动时清理过期数据（依据配置的保留天数）
+        self._last_retention_ts = time.time()
         try:
             result = self.store.cleanup_old_data(
                 gift_days=config.features.gift_retention_days,
@@ -353,10 +354,61 @@ class LiveRobot:
                 trimmed = self._trim_tracking_tables()
                 if trimmed:
                     self.logger.debug("tracking tables trimmed: %s", trimmed)
+                await self._retention_tick()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 self.logger.error("background guard error: %s", exc, exc_info=True)
+
+    async def _retention_tick(self) -> None:
+        """保留期清理：**只在启动时做过一次是不够的**。
+
+        `cleanup_old_data()` 原来只在 `__init__` 里跑。机器人的正常形态是
+        「开一次跑几个星期甚至几个月」，于是用户把「礼物保留天数」改成 90 天
+        之后，得等到下次重启才会真的删 —— 期间数据库一直涨。
+        （反过来更糟：默认 733 天，跑两年不重启就一直不清理。）
+
+        这里每天最多跑一次，而且放线程里：大库上的 DELETE + 重算聚合是秒级的，
+        在事件循环里跑会让所有房间一起哑（这也是「点了个统计，机器人不说话了」的来源）。
+        """
+        now = time.time()
+        if now - getattr(self, "_last_retention_ts", 0.0) < 86400:
+            return
+        gift_days = int(self.config.features.gift_retention_days or 0)
+        danmaku_days = int(self.config.features.danmaku_retention_days or 0)
+        if gift_days <= 0 and danmaku_days <= 0:
+            self._last_retention_ts = now
+            return
+        self._last_retention_ts = now
+
+        def _run() -> dict[str, int]:
+            # **连接必须在线程里创建**：sqlite3 连接绑定创建它的线程，
+            # 把 `self.store`（事件循环线程建的）丢进 to_thread 用会抛
+            # `ProgrammingError: SQLite objects created in a thread can only be
+            # used in that same thread`。而这条清理又是「失败了只记一条 warning」
+            # —— 等于保留期静默永不生效，用户以为数据会按天数自动清理。
+            from app.storage import StatsStore  # noqa: PLC0415
+            store = StatsStore(str(self.config.storage.sqlite_path))
+            try:
+                return store.cleanup_old_data(
+                    gift_days=gift_days,
+                    danmaku_days=(danmaku_days
+                                  if self.config.features.danmaku_log_enabled else 0),
+                )
+            finally:
+                try:
+                    store._conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        try:
+            result = await asyncio.to_thread(_run)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("保留期清理失败：%s", exc)
+            return
+        summary = ", ".join(f"{k}={v}" for k, v in (result or {}).items() if v)
+        if summary:
+            self.logger.info("每日保留期清理：%s", summary)
 
     def _trim_tracking_tables(self) -> dict[str, int]:
         """给以 uid 为键的内存表封顶，返回每张表被清掉的条数。

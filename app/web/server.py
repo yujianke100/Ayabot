@@ -4363,62 +4363,70 @@ async def api_room_log(room_id: str, request: Request, lines: int = 200):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
-@app.get("/api/rooms/{room_id}/ranking")
-async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType: str = "all"):
-    """获取指定房间的送礼排行."""
+def _room_ranking_blocking(room_id: str, rStart: str, rEnd: str, rType: str) -> dict:
+    """api_room_ranking 的同步实现（**必须**在线程里跑）。
+
+    20 万行实测 190ms、100 万行约 1s。同步跑会把事件循环冻住 ——
+    exe 模式下所有房间的机器人跟着一起哑。
+    """
     db_path = _room_db_path(room_id)
     if not db_path.exists():
         return {"ranking": []}
+    conn = _connect(db_path)
+    cur = conn.cursor()
 
+    where_clauses = ["1=1"]
+    params: list[Any] = []
+
+    # 日期过滤换算成 ts 区间：按配置时区算，而且能用 ts 索引
+    # （直接写 ayabot_date(ts) 是逐行回调 Python，20 万行 0.6s vs 6ms）
     try:
-        conn = _connect(db_path)
-        cur = conn.cursor()
+        lo, hi = _day_bounds(rStart, rEnd)
+    except ValueError:
+        return JSONResponse({"error": "日期格式不对，应为 YYYY-MM-DD"}, status_code=400)
+    if lo is not None:
+        where_clauses.append("ts >= ?")
+        params.append(lo)
+    if hi is not None:
+        where_clauses.append("ts <= ?")
+        params.append(hi)
 
-        where_clauses = ["1=1"]
-        params: list[Any] = []
+    if rType == "gift":
+        where_clauses.append("is_blind_box = 0")
+    elif rType == "blindbox":
+        where_clauses.append("is_blind_box = 1")
 
-        # 日期过滤换算成 ts 区间：按配置时区算，而且能用 ts 索引
-        # （直接写 ayabot_date(ts) 是逐行回调 Python，20 万行 0.6s vs 6ms）
-        try:
-            lo, hi = _day_bounds(rStart, rEnd)
-        except ValueError:
-            return JSONResponse({"error": "日期格式不对，应为 YYYY-MM-DD"}, status_code=400)
-        if lo is not None:
-            where_clauses.append("ts >= ?")
-            params.append(lo)
-        if hi is not None:
-            where_clauses.append("ts <= ?")
-            params.append(hi)
+    where_sql = " AND ".join(where_clauses)
+    if where_clauses:
+        where_sql += " AND event_type = 'SEND_GIFT'"
+    else:
+        where_sql = "event_type = 'SEND_GIFT'"
 
-        if rType == "gift":
-            where_clauses.append("is_blind_box = 0")
-        elif rType == "blindbox":
-            where_clauses.append("is_blind_box = 1")
+    cur.execute(f"""
+        SELECT uid, uname,
+               COUNT(1) as cnt,
+               ROUND(SUM(CASE WHEN is_blind_box=1 THEN CAST(actual_value AS REAL) / 10.0 ELSE CAST(CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.total_coin') END AS REAL) / 1000.0 END), 2) as total,
+               ROUND(SUM(CAST(profit_value AS REAL) / 10.0), 2) as total_profit
+        FROM gift_events WHERE {where_sql}
+        GROUP BY uid ORDER BY total DESC LIMIT 50
+    """, params)
+    rows = cur.fetchall()
+    conn.close()
 
-        where_sql = " AND ".join(where_clauses)
-        if where_clauses:
-            where_sql += " AND event_type = 'SEND_GIFT'"
-        else:
-            where_sql = "event_type = 'SEND_GIFT'"
+    ranking = [
+        # count 以前是写死的 0，对外调用方（overlay/脚本）拿到的条数永远是 0
+        {"uid": r[0], "uname": r[1], "count": int(r[2] or 0),
+         "total": r[3] or 0, "total_profit": r[4] or 0}
+        for r in rows
+    ]
+    return {"ranking": ranking}
 
-        cur.execute(f"""
-            SELECT uid, uname,
-                   COUNT(1) as cnt,
-                   ROUND(SUM(CASE WHEN is_blind_box=1 THEN CAST(actual_value AS REAL) / 10.0 ELSE CAST(CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.total_coin') END AS REAL) / 1000.0 END), 2) as total,
-                   ROUND(SUM(CAST(profit_value AS REAL) / 10.0), 2) as total_profit
-            FROM gift_events WHERE {where_sql}
-            GROUP BY uid ORDER BY total DESC LIMIT 50
-        """, params)
-        rows = cur.fetchall()
-        conn.close()
 
-        ranking = [
-            # count 以前是写死的 0，对外调用方（overlay/脚本）拿到的条数永远是 0
-            {"uid": r[0], "uname": r[1], "count": int(r[2] or 0),
-             "total": r[3] or 0, "total_profit": r[4] or 0}
-            for r in rows
-        ]
-        return {"ranking": ranking}
+@app.get("/api/rooms/{room_id}/ranking")
+async def api_room_ranking(room_id: str, rStart: str = "", rEnd: str = "", rType: str = "all"):
+    """获取指定房间的送礼排行（DB 查询在线程里跑）。"""
+    try:
+        return await asyncio.to_thread(_room_ranking_blocking, room_id, rStart, rEnd, rType)
     except Exception as exc:
         # 必须返回 5xx：以前这里 return {"error": ...} 是 200，
         # 前端 `data.ranking || []` 拿不到列表就显示「暂无数据」——
@@ -5017,14 +5025,20 @@ async def api_list_imports(room_id: str, request: Request):
     db_path = _room_db_path(room_id)
     if not db_path.exists():
         return {"imports": []}
-    store = StatsStore(str(db_path))
-    try:
-        return {"imports": store.list_import_sources()}
-    finally:
+
+    def _run() -> dict:
+        # 连接必须在线程里建（sqlite3 绑定创建它的线程），详见 api_stats_check
+        store = StatsStore(str(db_path))
         try:
-            store._conn.close()
-        except Exception:
-            pass
+            return {"imports": store.list_import_sources()}
+        finally:
+            try:
+                store._conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    # 导入批次可能有十几万行，GROUP BY 在事件循环里跑会冻住所有房间的机器人
+    return await asyncio.to_thread(_run)
 
 
 @app.delete("/api/rooms/{room_id}/imports")
@@ -5042,17 +5056,23 @@ async def api_delete_import(room_id: str, request: Request):
     db_path = _room_db_path(room_id)
     if not db_path.exists():
         return {"ok": False, "error": "数据库不存在"}
-    store = StatsStore(str(db_path))
-    try:
-        result = store.delete_gift_events_by_source(source)
-        logger.info("undo import: room=%s source=%s deleted=%s guards=%s",
-                    room_id, source, result["deleted"], result["guard_deleted"])
-        return {"ok": True, **result}
-    finally:
+
+    def _run() -> dict:
+        # 撤销一次导入要 SELECT 整批 + DELETE + 回退聚合（BEGIN IMMEDIATE 全程持写锁），
+        # 大文件导入后撤销是秒级的；在事件循环里跑等于让所有机器人一起哑。
+        store = StatsStore(str(db_path))
         try:
-            store._conn.close()
-        except Exception:
-            pass
+            return store.delete_gift_events_by_source(source)
+        finally:
+            try:
+                store._conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    result = await asyncio.to_thread(_run)
+    logger.info("undo import: room=%s source=%s deleted=%s guards=%s",
+                room_id, source, result["deleted"], result["guard_deleted"])
+    return {"ok": True, **result}
 
 
 @app.get("/api/rooms/{room_id}/stats_check")
@@ -5124,6 +5144,57 @@ async def api_stats_repair(room_id: str, request: Request):
     return {"ok": True, **result}
 
 
+def _delete_old_blocking(db_path: Path, date_str: str, data_type: str) -> dict:
+    """api_room_delete_old 的同步实现（**必须**在线程里跑）。
+
+    DELETE + 重算月度聚合在大库上是秒级的；同步跑会冻住整个事件循环，
+    exe 模式下所有房间的机器人一起哑（用户会以为「删数据把机器人删坏了」）。
+    """
+    conn = _connect(db_path)
+    cur = conn.cursor()
+    result: dict[str, int] = {"deleted_gifts": 0, "deleted_danmaku": 0}
+    affected_months: list[str] = []
+    if data_type in ("gift", "all"):
+        # 以前这里用的是 UTC 日期（date(ts,'unixepoch')），而弹幕用的是 localtime，
+        # 在东八区会差 8 小时：删「某日之前」时把当天凌晨到早上 8 点的数据一起删掉。
+        # 统一按配置时区算截止时间戳。
+        cutoff_ts = tzutil.day_range(date_str)[1] + 1
+        # 受影响月份必须在删之前取，删完就查不到了
+        affected_months = [r[0] for r in cur.execute(
+            "SELECT DISTINCT month FROM gift_events WHERE ts < ?", (cutoff_ts,)).fetchall()]
+        cur.execute("DELETE FROM gift_events WHERE ts < ?", (cutoff_ts,))
+        result["deleted_gifts"] = cur.rowcount
+        # 上舰记录属于同一类统计，必须一起删：漏了它会让「删除旧数据」之后
+        # 大航海页面上还留着几年前的记录（而礼物已经没了），看起来像没删干净。
+        # 老库可能还没有这张表，先看 sqlite_master。
+        has_guard_tbl = cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='guard_events'"
+        ).fetchone()
+        if has_guard_tbl:
+            cur.execute("DELETE FROM guard_events WHERE ts < ?", (cutoff_ts,))
+            result["deleted_guards"] = cur.rowcount
+    if data_type in ("danmaku", "all"):
+        cur.execute("DELETE FROM danmaku_log WHERE ts < ?",
+                    (tzutil.day_range(date_str)[1] + 1,))
+        result["deleted_danmaku"] = cur.rowcount
+    conn.commit()
+    conn.close()
+    # 聚合是增量累加的：按日期删掉部分明细后必须重算，否则汇总会一直比明细大。
+    # 先取会受影响的月份（被删掉的那些行的月份），再重算这几个月的聚合。
+    if result["deleted_gifts"]:
+        try:
+            from app.storage import StatsStore
+            store = StatsStore(str(db_path))
+            try:
+                store.rebuild_monthly_stats(affected_months)
+            finally:
+                store._conn.close()
+        except Exception as exc:
+            logger.warning("rebuild monthly stats failed: %s", exc)
+        _clean_orphan_monthly_stats(db_path)
+    return result
+
+
 @app.post("/api/rooms/{room_id}/delete_old")
 async def api_room_delete_old(room_id: str, request: Request):
     """删除指定房间的旧数据. data_type: 'gift' | 'danmaku' | 'all'."""
@@ -5142,48 +5213,8 @@ async def api_room_delete_old(room_id: str, request: Request):
         return {"deleted_gifts": 0, "deleted_danmaku": 0}
 
     try:
-        conn = _connect(db_path)
-        cur = conn.cursor()
-        result = {"deleted_gifts": 0, "deleted_danmaku": 0}
-        if data_type in ("gift", "all"):
-            # 以前这里用的是 UTC 日期（date(ts,'unixepoch')），而弹幕用的是 localtime，
-            # 在东八区会差 8 小时：删「某日之前」时把当天凌晨到早上 8 点的数据一起删掉。
-            # 统一按配置时区算截止时间戳。
-            cutoff_ts = tzutil.day_range(date_str)[1] + 1
-            # 受影响月份必须在删之前取，删完就查不到了
-            affected_months = [r[0] for r in cur.execute(
-                "SELECT DISTINCT month FROM gift_events WHERE ts < ?", (cutoff_ts,)).fetchall()]
-            cur.execute("DELETE FROM gift_events WHERE ts < ?", (cutoff_ts,))
-            result["deleted_gifts"] = cur.rowcount
-            # 上舰记录属于同一类统计，必须一起删：漏了它会让「删除旧数据」之后
-            # 大航海页面上还留着几年前的记录（而礼物已经没了），看起来像没删干净。
-            # 老库可能还没有这张表，先看 sqlite_master。
-            has_guard_tbl = cur.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='guard_events'"
-            ).fetchone()
-            if has_guard_tbl:
-                cur.execute("DELETE FROM guard_events WHERE ts < ?", (cutoff_ts,))
-                result["deleted_guards"] = cur.rowcount
-        if data_type in ("danmaku", "all"):
-            cur.execute("DELETE FROM danmaku_log WHERE ts < ?",
-                        (tzutil.day_range(date_str)[1] + 1,))
-            result["deleted_danmaku"] = cur.rowcount
-        conn.commit()
-        conn.close()
-        # 聚合是增量累加的：按日期删掉部分明细后必须重算，否则汇总会一直比明细大。
-        # 先取会受影响的月份（被删掉的那些行的月份），再重算这几个月的聚合。
-        if result["deleted_gifts"]:
-            try:
-                from app.storage import StatsStore
-                store = StatsStore(str(db_path))
-                try:
-                    store.rebuild_monthly_stats(affected_months)
-                finally:
-                    store._conn.close()
-            except Exception as exc:
-                logger.warning("rebuild monthly stats failed: %s", exc)
-            _clean_orphan_monthly_stats(db_path)
-        return result
+        # 删除 + 重算聚合放线程（见函数注释）
+        return await asyncio.to_thread(_delete_old_blocking, db_path, date_str, data_type)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
@@ -5317,6 +5348,206 @@ def _verify_api_token(request: Request) -> bool:
     return False
 
 
+def _external_user_stats_blocking(db_path: Path, uid, period) -> dict:
+    """api_external_user_stats 的同步实现（**必须**在线程里跑）。
+
+    20 万行实测 6.7s / 1.3s，同步跑会把整个事件循环冻住 ——
+    exe 模式下所有房间的机器人会跟着一起哑掉。
+    """
+    # 用配置时区算「今天/本周/本月」，否则和 month 列（配置时区写入）口径不一致
+    start_ts, end_ts = tzutil.period_range(period)
+
+    conn = _connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    # 通用礼物统计（含盲盒）- 普通礼物的价值从 raw_json.total_coin 提取
+    gift_rows = conn.execute(
+        """
+        SELECT
+            COUNT(1) as total_events,
+            COALESCE(SUM(gift_num), 0) as total_gift_count,
+            COALESCE(SUM(CASE WHEN is_blind_box=0 THEN CAST(CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.total_coin') END AS INTEGER) / 100 ELSE actual_value END), 0) as total_value
+        FROM gift_events
+        WHERE uid = ? AND ts >= ? AND ts <= ?
+        """,
+        (uid, start_ts, end_ts),
+    ).fetchone()
+
+    # 盲盒统计
+    blind_rows = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(gift_num), 0) as blind_count,
+            COALESCE(SUM(blind_box_cost), 0) as blind_cost,
+            COALESCE(SUM(actual_value), 0) as blind_actual,
+            COALESCE(SUM(profit_value), 0) as blind_profit
+        FROM gift_events
+        WHERE uid = ? AND ts >= ? AND ts <= ? AND is_blind_box = 1
+        """,
+        (uid, start_ts, end_ts),
+    ).fetchone()
+
+    # 按礼物名称分组统计（普通礼物从 raw_json 提取 total_coin 作为价值，gift_info.img_basic 作为图标）
+    gift_detail_rows = conn.execute(
+        """
+        SELECT g.gift_name,
+               COALESCE(SUM(g.gift_num), 0) as total_num,
+               COALESCE(SUM(CAST(CASE WHEN json_valid(g.raw_json) THEN json_extract(g.raw_json, '$.total_coin') END AS INTEGER)), 0) / 100 as total_value,
+               COALESCE(
+                   (SELECT CASE WHEN json_valid(sub.raw_json) THEN json_extract(sub.raw_json, '$.gift_info.img_basic') END
+                    FROM gift_events sub
+                    WHERE sub.uid = g.uid AND sub.gift_name = g.gift_name
+                      AND sub.is_blind_box = 0 AND sub.ts >= ? AND sub.ts <= ?
+                      AND CASE WHEN json_valid(sub.raw_json) THEN json_extract(sub.raw_json, '$.gift_info.img_basic') END IS NOT NULL
+                      AND CASE WHEN json_valid(sub.raw_json) THEN json_extract(sub.raw_json, '$.gift_info.img_basic') END != ''
+                    ORDER BY sub.ts DESC LIMIT 1),
+               ''
+               ) as gift_icon
+        FROM gift_events g
+        WHERE g.uid = ? AND g.ts >= ? AND g.ts <= ? AND g.is_blind_box = 0
+        GROUP BY g.gift_name
+        ORDER BY total_num DESC
+        """,
+        (start_ts, end_ts, uid, start_ts, end_ts),
+    ).fetchall()
+
+    # 盲盒明细（从 raw_json 提取盲盒名称）
+    blind_detail_rows = conn.execute(
+        """
+        SELECT
+            CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.blind_gift.original_gift_name') END as box_name,
+            CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.blind_gift.gift_name') END as box_gift_name,
+            gift_name as item_name,
+            COALESCE(SUM(gift_num), 0) as total_num,
+            COALESCE(SUM(blind_box_cost), 0) as total_cost,
+            COALESCE(SUM(profit_value), 0) as total_profit,
+            COALESCE(
+                (SELECT CASE WHEN json_valid(sub2.raw_json) THEN json_extract(sub2.raw_json, '$.gift_info.img_basic') END
+                 FROM gift_events sub2
+                 WHERE sub2.uid = g.uid AND sub2.gift_name = g.gift_name
+                   AND sub2.is_blind_box = 1 AND sub2.ts >= ? AND sub2.ts <= ?
+                   AND CASE WHEN json_valid(sub2.raw_json) THEN json_extract(sub2.raw_json, '$.gift_info.img_basic') END IS NOT NULL
+                   AND CASE WHEN json_valid(sub2.raw_json) THEN json_extract(sub2.raw_json, '$.gift_info.img_basic') END != ''
+                 ORDER BY sub2.ts DESC LIMIT 1),
+                ''
+            ) as item_icon
+        FROM gift_events g
+        WHERE g.uid = ? AND g.ts >= ? AND g.ts <= ? AND g.is_blind_box = 1
+        GROUP BY box_name, item_name
+        ORDER BY box_name, total_num DESC
+        """,
+        (start_ts, end_ts, uid, start_ts, end_ts),
+    ).fetchall()
+
+    # 弹幕数统计
+    danmaku_count = 0
+    try:
+        dm_row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM danmaku_log WHERE uid = ? AND ts >= ? AND ts <= ?",
+            (uid, start_ts, end_ts),
+        ).fetchone()
+        if dm_row:
+            danmaku_count = int(dm_row["cnt"])
+    except Exception:
+        pass  # danmaku_log 表可能不存在
+
+    # 获取用户信息（uname + avatar + guard_level）
+    user_row = conn.execute(
+        """
+        SELECT uname,
+               COALESCE(
+                   CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.base.face') END,
+                   CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.face') END,
+                   ''
+               ) as avatar,
+               COALESCE(
+                   CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.guard.level') END,
+                   CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.medal.guard_level') END,
+                   0
+               ) as guard_level
+        FROM gift_events WHERE uid = ? AND raw_json IS NOT NULL AND raw_json != ''
+        ORDER BY
+            CASE
+                WHEN CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.guard.level') END IS NOT NULL AND CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.guard.level') END > 0 THEN 0
+                WHEN CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.medal.guard_level') END IS NOT NULL AND CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.medal.guard_level') END > 0 THEN 1
+                ELSE 2
+            END,
+            ts DESC
+        LIMIT 1
+        """,
+        (uid,),
+    ).fetchone()
+
+    conn.close()
+
+    uname = user_row["uname"] if user_row else f"UID:{uid}"
+    avatar = user_row["avatar"] if user_row and user_row["avatar"] else ""
+    guard_level = int(user_row["guard_level"]) if user_row and user_row["guard_level"] else 0
+
+    # DB 存储单位是 电池（金瓜子÷100），直接使用
+    def _to_battery(v: int) -> int:
+        return int(v)
+
+    # 构建礼物名称明细
+    gift_details = []
+    for r in gift_detail_rows:
+        gift_details.append({
+            "name": r["gift_name"],
+            "count": int(r["total_num"]),
+            "value": _to_battery(r["total_value"]),
+            "icon": r["gift_icon"] or "",
+        })
+
+    blind_details = []
+    box_groups: dict[str, dict] = {}
+    for r in blind_detail_rows:
+        box_name = r["box_name"] or "未知盲盒"
+        if box_name not in box_groups:
+            box_groups[box_name] = {"items": [], "total_count": 0, "total_cost": 0, "total_profit": 0}
+        g = box_groups[box_name]
+        g["items"].append({
+            "name": r["item_name"],
+            "count": int(r["total_num"]),
+            "cost": _to_battery(r["total_cost"]),
+            "profit": _to_battery(r["total_profit"]),
+            "icon": r["item_icon"] or "",
+        })
+        g["total_count"] += int(r["total_num"])
+        g["total_cost"] += int(r["total_cost"])
+        g["total_profit"] += int(r["total_profit"])
+    for box_name, g in box_groups.items():
+        blind_details.append({
+            "box_name": box_name,
+            "count": g["total_count"],
+            "cost": g["total_cost"],
+            "profit": g["total_profit"],
+            "items": g["items"],
+        })
+
+    return {
+        "ok": True,
+        "uid": uid,
+        "uname": uname,
+        "avatar": avatar,
+        "guard_level": guard_level,
+        "period": period,
+        "danmaku_count": danmaku_count,
+        "gift": {
+            "total_events": int(gift_rows["total_events"]),
+            "total_gift_count": int(gift_rows["total_gift_count"]),
+            "total_value": _to_battery(gift_rows["total_value"]),
+            "details": gift_details,
+        },
+        "blindbox": {
+            "count": int(blind_rows["blind_count"]),
+            "cost": _to_battery(blind_rows["blind_cost"]),
+            "actual": _to_battery(blind_rows["blind_actual"]),
+            "profit": _to_battery(blind_rows["blind_profit"]),
+            "details": blind_details,
+        },
+    }
+
+
 @app.get("/api/external/user_stats")
 async def api_external_user_stats(
     request: Request,
@@ -5348,200 +5579,9 @@ async def api_external_user_stats(
 
     if not db_path.exists():
         return JSONResponse({"error": "room data not found"}, status_code=404)
-
     try:
-        # 用配置时区算「今天/本周/本月」，否则和 month 列（配置时区写入）口径不一致
-        start_ts, end_ts = tzutil.period_range(period)
-
-        conn = _connect(db_path)
-        conn.row_factory = sqlite3.Row
-
-        # 通用礼物统计（含盲盒）- 普通礼物的价值从 raw_json.total_coin 提取
-        gift_rows = conn.execute(
-            """
-            SELECT
-                COUNT(1) as total_events,
-                COALESCE(SUM(gift_num), 0) as total_gift_count,
-                COALESCE(SUM(CASE WHEN is_blind_box=0 THEN CAST(CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.total_coin') END AS INTEGER) / 100 ELSE actual_value END), 0) as total_value
-            FROM gift_events
-            WHERE uid = ? AND ts >= ? AND ts <= ?
-            """,
-            (uid, start_ts, end_ts),
-        ).fetchone()
-
-        # 盲盒统计
-        blind_rows = conn.execute(
-            """
-            SELECT
-                COALESCE(SUM(gift_num), 0) as blind_count,
-                COALESCE(SUM(blind_box_cost), 0) as blind_cost,
-                COALESCE(SUM(actual_value), 0) as blind_actual,
-                COALESCE(SUM(profit_value), 0) as blind_profit
-            FROM gift_events
-            WHERE uid = ? AND ts >= ? AND ts <= ? AND is_blind_box = 1
-            """,
-            (uid, start_ts, end_ts),
-        ).fetchone()
-
-        # 按礼物名称分组统计（普通礼物从 raw_json 提取 total_coin 作为价值，gift_info.img_basic 作为图标）
-        gift_detail_rows = conn.execute(
-            """
-            SELECT g.gift_name,
-                   COALESCE(SUM(g.gift_num), 0) as total_num,
-                   COALESCE(SUM(CAST(CASE WHEN json_valid(g.raw_json) THEN json_extract(g.raw_json, '$.total_coin') END AS INTEGER)), 0) / 100 as total_value,
-                   COALESCE(
-                       (SELECT CASE WHEN json_valid(sub.raw_json) THEN json_extract(sub.raw_json, '$.gift_info.img_basic') END
-                        FROM gift_events sub
-                        WHERE sub.uid = g.uid AND sub.gift_name = g.gift_name
-                          AND sub.is_blind_box = 0 AND sub.ts >= ? AND sub.ts <= ?
-                          AND CASE WHEN json_valid(sub.raw_json) THEN json_extract(sub.raw_json, '$.gift_info.img_basic') END IS NOT NULL
-                          AND CASE WHEN json_valid(sub.raw_json) THEN json_extract(sub.raw_json, '$.gift_info.img_basic') END != ''
-                        ORDER BY sub.ts DESC LIMIT 1),
-                   ''
-                   ) as gift_icon
-            FROM gift_events g
-            WHERE g.uid = ? AND g.ts >= ? AND g.ts <= ? AND g.is_blind_box = 0
-            GROUP BY g.gift_name
-            ORDER BY total_num DESC
-            """,
-            (start_ts, end_ts, uid, start_ts, end_ts),
-        ).fetchall()
-
-        # 盲盒明细（从 raw_json 提取盲盒名称）
-        blind_detail_rows = conn.execute(
-            """
-            SELECT
-                CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.blind_gift.original_gift_name') END as box_name,
-                CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.blind_gift.gift_name') END as box_gift_name,
-                gift_name as item_name,
-                COALESCE(SUM(gift_num), 0) as total_num,
-                COALESCE(SUM(blind_box_cost), 0) as total_cost,
-                COALESCE(SUM(profit_value), 0) as total_profit,
-                COALESCE(
-                    (SELECT CASE WHEN json_valid(sub2.raw_json) THEN json_extract(sub2.raw_json, '$.gift_info.img_basic') END
-                     FROM gift_events sub2
-                     WHERE sub2.uid = g.uid AND sub2.gift_name = g.gift_name
-                       AND sub2.is_blind_box = 1 AND sub2.ts >= ? AND sub2.ts <= ?
-                       AND CASE WHEN json_valid(sub2.raw_json) THEN json_extract(sub2.raw_json, '$.gift_info.img_basic') END IS NOT NULL
-                       AND CASE WHEN json_valid(sub2.raw_json) THEN json_extract(sub2.raw_json, '$.gift_info.img_basic') END != ''
-                     ORDER BY sub2.ts DESC LIMIT 1),
-                    ''
-                ) as item_icon
-            FROM gift_events g
-            WHERE g.uid = ? AND g.ts >= ? AND g.ts <= ? AND g.is_blind_box = 1
-            GROUP BY box_name, item_name
-            ORDER BY box_name, total_num DESC
-            """,
-            (start_ts, end_ts, uid, start_ts, end_ts),
-        ).fetchall()
-
-        # 弹幕数统计
-        danmaku_count = 0
-        try:
-            dm_row = conn.execute(
-                "SELECT COUNT(*) as cnt FROM danmaku_log WHERE uid = ? AND ts >= ? AND ts <= ?",
-                (uid, start_ts, end_ts),
-            ).fetchone()
-            if dm_row:
-                danmaku_count = int(dm_row["cnt"])
-        except Exception:
-            pass  # danmaku_log 表可能不存在
-
-        # 获取用户信息（uname + avatar + guard_level）
-        user_row = conn.execute(
-            """
-            SELECT uname,
-                   COALESCE(
-                       CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.base.face') END,
-                       CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.face') END,
-                       ''
-                   ) as avatar,
-                   COALESCE(
-                       CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.guard.level') END,
-                       CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.medal.guard_level') END,
-                       0
-                   ) as guard_level
-            FROM gift_events WHERE uid = ? AND raw_json IS NOT NULL AND raw_json != ''
-            ORDER BY
-                CASE
-                    WHEN CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.guard.level') END IS NOT NULL AND CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.guard.level') END > 0 THEN 0
-                    WHEN CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.medal.guard_level') END IS NOT NULL AND CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.sender_uinfo.medal.guard_level') END > 0 THEN 1
-                    ELSE 2
-                END,
-                ts DESC
-            LIMIT 1
-            """,
-            (uid,),
-        ).fetchone()
-
-        conn.close()
-
-        uname = user_row["uname"] if user_row else f"UID:{uid}"
-        avatar = user_row["avatar"] if user_row and user_row["avatar"] else ""
-        guard_level = int(user_row["guard_level"]) if user_row and user_row["guard_level"] else 0
-
-        # DB 存储单位是 电池（金瓜子÷100），直接使用
-        def _to_battery(v: int) -> int:
-            return int(v)
-
-        # 构建礼物名称明细
-        gift_details = []
-        for r in gift_detail_rows:
-            gift_details.append({
-                "name": r["gift_name"],
-                "count": int(r["total_num"]),
-                "value": _to_battery(r["total_value"]),
-                "icon": r["gift_icon"] or "",
-            })
-
-        blind_details = []
-        box_groups: dict[str, dict] = {}
-        for r in blind_detail_rows:
-            box_name = r["box_name"] or "未知盲盒"
-            if box_name not in box_groups:
-                box_groups[box_name] = {"items": [], "total_count": 0, "total_cost": 0, "total_profit": 0}
-            g = box_groups[box_name]
-            g["items"].append({
-                "name": r["item_name"],
-                "count": int(r["total_num"]),
-                "cost": _to_battery(r["total_cost"]),
-                "profit": _to_battery(r["total_profit"]),
-                "icon": r["item_icon"] or "",
-            })
-            g["total_count"] += int(r["total_num"])
-            g["total_cost"] += int(r["total_cost"])
-            g["total_profit"] += int(r["total_profit"])
-        for box_name, g in box_groups.items():
-            blind_details.append({
-                "box_name": box_name,
-                "count": g["total_count"],
-                "cost": g["total_cost"],
-                "profit": g["total_profit"],
-                "items": g["items"],
-            })
-
-        return {
-            "ok": True,
-            "uid": uid,
-            "uname": uname,
-            "avatar": avatar,
-            "guard_level": guard_level,
-            "period": period,
-            "danmaku_count": danmaku_count,
-            "gift": {
-                "total_events": int(gift_rows["total_events"]),
-                "total_gift_count": int(gift_rows["total_gift_count"]),
-                "total_value": _to_battery(gift_rows["total_value"]),
-                "details": gift_details,
-            },
-            "blindbox": {
-                "count": int(blind_rows["blind_count"]),
-                "cost": _to_battery(blind_rows["blind_cost"]),
-                "actual": _to_battery(blind_rows["blind_actual"]),
-                "profit": _to_battery(blind_rows["blind_profit"]),
-                "details": blind_details,
-            },
-        }
+        # 查询 + 拼结果整段放线程：同步跑会冻住事件循环（见函数注释）
+        return await asyncio.to_thread(_external_user_stats_blocking, db_path, uid, period)
     except Exception as exc:
         logger.exception("external user_stats failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -5635,6 +5675,65 @@ async def api_external_clear_key():
     return {"ok": True, "message": "API Key 已清空，外部查询已禁用"}
 
 
+def _external_ranking_blocking(db_path: Path, period, gift_type, limit) -> dict:
+    """api_external_ranking 的同步实现（**必须**在线程里跑）。
+
+    20 万行实测 6.7s / 1.3s，同步跑会把整个事件循环冻住 ——
+    exe 模式下所有房间的机器人会跟着一起哑掉。
+    """
+    # 用配置时区算「今天/本周/本月」，与 month 列（配置时区写入）保持同一口径
+    start_ts, end_ts = tzutil.period_range(period)
+
+    limit = min(max(limit, 1), 100)
+
+    conn = _connect(db_path)
+    cur = conn.cursor()
+
+    where = "ts >= ? AND ts <= ?"
+    params: list = [start_ts, end_ts]
+    if gift_type == "gift":
+        where += " AND is_blind_box = 0"
+    elif gift_type == "blindbox":
+        where += " AND is_blind_box = 1"
+
+    cur.execute(f"""
+        SELECT uid, uname,
+               COALESCE(SUM(gift_num), 0) as total_count,
+               COALESCE(SUM(
+                   CASE WHEN is_blind_box = 0
+                        THEN CAST(CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.total_coin') END AS INTEGER) / 100
+                        ELSE actual_value
+                   END), 0) as total_value,
+               COALESCE(SUM(profit_value), 0) as total_profit
+        FROM gift_events
+        WHERE {where}
+        GROUP BY uid
+        ORDER BY total_value DESC
+        LIMIT ?
+    """, params + [limit])
+    rows = cur.fetchall()
+    conn.close()
+
+    ranking = []
+    for r in rows:
+        battery = int(r[3])
+        profit_battery = int(r[4])
+        ranking.append({
+            "uid": int(r[0]),
+            "uname": str(r[1]),
+            "count": int(r[2]),
+            # 单位与 /api/external/user_stats 保持一致：**电池**
+            # （金瓜子 ÷100 = 电池；盲盒 actual_value 本身就是电池）。
+            # 曾误改成「元」，导致两个外部接口差 10 倍 —— 这是对外契约，不能再动。
+            "value": battery,
+            "profit": profit_battery,
+            # 顺手把元也算好，省得调用方自己除（新增字段，不改变上面两个的含义）
+            "value_yuan": round(battery / 10.0, 2),
+            "profit_yuan": round(profit_battery / 10.0, 2),
+        })
+    return {"ok": True, "ranking": ranking, "total": len(ranking)}
+
+
 @app.get("/api/external/ranking")
 async def api_external_ranking(
     request: Request,
@@ -5662,62 +5761,57 @@ async def api_external_ranking(
     db_path = _room_db_path(room_id)
     if not db_path.exists():
         return JSONResponse({"error": "room data not found"}, status_code=404)
-
     try:
-        # 用配置时区算「今天/本周/本月」，与 month 列（配置时区写入）保持同一口径
-        start_ts, end_ts = tzutil.period_range(period)
-
-        limit = min(max(limit, 1), 100)
-
-        conn = _connect(db_path)
-        cur = conn.cursor()
-
-        where = "ts >= ? AND ts <= ?"
-        params: list = [start_ts, end_ts]
-        if gift_type == "gift":
-            where += " AND is_blind_box = 0"
-        elif gift_type == "blindbox":
-            where += " AND is_blind_box = 1"
-
-        cur.execute(f"""
-            SELECT uid, uname,
-                   COALESCE(SUM(gift_num), 0) as total_count,
-                   COALESCE(SUM(
-                       CASE WHEN is_blind_box = 0
-                            THEN CAST(CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.total_coin') END AS INTEGER) / 100
-                            ELSE actual_value
-                       END), 0) as total_value,
-                   COALESCE(SUM(profit_value), 0) as total_profit
-            FROM gift_events
-            WHERE {where}
-            GROUP BY uid
-            ORDER BY total_value DESC
-            LIMIT ?
-        """, params + [limit])
-        rows = cur.fetchall()
-        conn.close()
-
-        ranking = []
-        for r in rows:
-            battery = int(r[3])
-            profit_battery = int(r[4])
-            ranking.append({
-                "uid": int(r[0]),
-                "uname": str(r[1]),
-                "count": int(r[2]),
-                # 单位与 /api/external/user_stats 保持一致：**电池**
-                # （金瓜子 ÷100 = 电池；盲盒 actual_value 本身就是电池）。
-                # 曾误改成「元」，导致两个外部接口差 10 倍 —— 这是对外契约，不能再动。
-                "value": battery,
-                "profit": profit_battery,
-                # 顺手把元也算好，省得调用方自己除（新增字段，不改变上面两个的含义）
-                "value_yuan": round(battery / 10.0, 2),
-                "profit_yuan": round(profit_battery / 10.0, 2),
-            })
-        return {"ok": True, "ranking": ranking, "total": len(ranking)}
+        # 查询 + 拼结果整段放线程：同步跑会冻住事件循环（见函数注释）
+        return await asyncio.to_thread(_external_ranking_blocking, db_path, period, gift_type, limit)
     except Exception as exc:
         logger.exception("external ranking failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+def _external_room_stats_blocking(db_path: Path, period) -> dict:
+    """api_external_room_stats 的同步实现（**必须**在线程里跑）。
+
+    20 万行实测 6.7s / 1.3s，同步跑会把整个事件循环冻住 ——
+    exe 模式下所有房间的机器人会跟着一起哑掉。
+    """
+    # 用配置时区算「今天/本周/本月」，与 month 列（配置时区写入）保持同一口径
+    start_ts, end_ts = tzutil.period_range(period)
+
+    conn = _connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    # 总览
+    overview = conn.execute("""
+        SELECT
+            COUNT(DISTINCT uid) as total_users,
+            COUNT(1) as total_events,
+            COALESCE(SUM(gift_num), 0) as total_gifts,
+            COALESCE(SUM(CASE WHEN is_blind_box=0 THEN CAST(CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.total_coin') END AS INTEGER) / 100 ELSE actual_value END), 0) as total_value,
+            COALESCE(SUM(CASE WHEN is_blind_box=1 THEN 1 ELSE 0 END), 0) as blind_users,
+            COALESCE(SUM(CASE WHEN is_blind_box=1 THEN gift_num ELSE 0 END), 0) as blind_count,
+            COALESCE(SUM(CASE WHEN is_blind_box=1 THEN blind_box_cost ELSE 0 END), 0) as blind_cost,
+            COALESCE(SUM(CASE WHEN is_blind_box=1 THEN profit_value ELSE 0 END), 0) as blind_profit
+        FROM gift_events
+        WHERE ts >= ? AND ts <= ?
+    """, (start_ts, end_ts)).fetchone()
+
+    conn.close()
+
+    return {
+        "ok": True,
+        "period": period,
+        "overview": {
+            "total_users": int(overview["total_users"]),
+            "total_events": int(overview["total_events"]),
+            "total_gifts": int(overview["total_gifts"]),
+            "total_value": int(overview["total_value"]),
+            "blind_users": int(overview["blind_users"]),
+            "blind_count": int(overview["blind_count"]),
+            "blind_cost": int(overview["blind_cost"]),
+            "blind_profit": int(overview["blind_profit"]),
+        },
+    }
 
 
 @app.get("/api/external/room_stats")
@@ -5743,45 +5837,9 @@ async def api_external_room_stats(
     db_path = _room_db_path(room_id)
     if not db_path.exists():
         return JSONResponse({"error": "room data not found"}, status_code=404)
-
     try:
-        # 用配置时区算「今天/本周/本月」，与 month 列（配置时区写入）保持同一口径
-        start_ts, end_ts = tzutil.period_range(period)
-
-        conn = _connect(db_path)
-        conn.row_factory = sqlite3.Row
-
-        # 总览
-        overview = conn.execute("""
-            SELECT
-                COUNT(DISTINCT uid) as total_users,
-                COUNT(1) as total_events,
-                COALESCE(SUM(gift_num), 0) as total_gifts,
-                COALESCE(SUM(CASE WHEN is_blind_box=0 THEN CAST(CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.total_coin') END AS INTEGER) / 100 ELSE actual_value END), 0) as total_value,
-                COALESCE(SUM(CASE WHEN is_blind_box=1 THEN 1 ELSE 0 END), 0) as blind_users,
-                COALESCE(SUM(CASE WHEN is_blind_box=1 THEN gift_num ELSE 0 END), 0) as blind_count,
-                COALESCE(SUM(CASE WHEN is_blind_box=1 THEN blind_box_cost ELSE 0 END), 0) as blind_cost,
-                COALESCE(SUM(CASE WHEN is_blind_box=1 THEN profit_value ELSE 0 END), 0) as blind_profit
-            FROM gift_events
-            WHERE ts >= ? AND ts <= ?
-        """, (start_ts, end_ts)).fetchone()
-
-        conn.close()
-
-        return {
-            "ok": True,
-            "period": period,
-            "overview": {
-                "total_users": int(overview["total_users"]),
-                "total_events": int(overview["total_events"]),
-                "total_gifts": int(overview["total_gifts"]),
-                "total_value": int(overview["total_value"]),
-                "blind_users": int(overview["blind_users"]),
-                "blind_count": int(overview["blind_count"]),
-                "blind_cost": int(overview["blind_cost"]),
-                "blind_profit": int(overview["blind_profit"]),
-            },
-        }
+        # 查询 + 拼结果整段放线程：同步跑会冻住事件循环（见函数注释）
+        return await asyncio.to_thread(_external_room_stats_blocking, db_path, period)
     except Exception as exc:
         logger.exception("external room_stats failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
