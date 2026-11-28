@@ -1026,6 +1026,13 @@ def _safe_int(val: Any) -> int:
 
 @app.on_event("startup")
 async def _startup():
+    # 事件循环的异常处理器装在**这里**：同进程模式（exe）下所有房间机器人
+    # 和 WebUI 共用 uvicorn 这一个循环，而循环只在 startup 之后才存在
+    # （`init_app()` 是在没有循环的线程里调的，那里拿不到 loop）。
+    # 默认处理器把「Task exception was never retrieved」写 stderr ——
+    # 窗口模式下 stderr 是 devnull，fire-and-forget 任务炸掉就完全无声。
+    from app.crashlog import install_loop_exception_handler  # noqa: PLC0415
+    install_loop_exception_handler()
     # 后台加载礼物缓存，不阻塞启动
     asyncio.create_task(_build_gift_cache())
     # 后台预热「检查更新」结果（用户打开页面时秒回）
@@ -1655,7 +1662,15 @@ async def api_ranking(start: str, end: str, gift_type: str = "all"):
         rows = conn.execute(
             f"""
             SELECT uid, uname,
-                   CAST(SUM(actual_value) AS REAL) AS total_val,
+                   -- 普通礼物的价值不在 actual_value 里（那一列只对盲盒有意义，
+                   -- 普通礼物恒为 0）；它在 raw_json.total_coin（金瓜子）。
+                   -- 以前这里直接 SUM(actual_value)，于是除盲盒外的礼物价值全是 0，
+                   -- 用户看到「排行里金额都是 0」。单位：电池（金瓜子 ÷100）。
+                   CAST(SUM(CASE WHEN is_blind_box = 1 THEN actual_value
+                                 ELSE CAST(CASE WHEN json_valid(raw_json)
+                                                THEN json_extract(raw_json, '$.total_coin')
+                                                ELSE 0 END AS INTEGER) / 100
+                            END) AS REAL) AS total_val,
                    CAST(SUM(profit_value)  AS REAL) AS total_profit,
                    CAST(SUM(CASE WHEN is_blind_box=1 THEN gift_num ELSE 0 END) AS INTEGER) AS blindbox_count,
                    CAST(SUM(CASE WHEN is_blind_box=0 THEN gift_num ELSE 0 END) AS INTEGER) AS gift_count
@@ -3299,12 +3314,23 @@ async def api_list_rooms(request: Request):
         if r.get("account_uid"):
             r["account_nick"] = accounts_map.get(str(r["account_uid"]), "")
         rid = r["room_id"]
+        # 心跳（进程活着但掉线时前端能显示细节）。先读，因为「凭证到底恢复了没有」
+        # 要以心跳里的 waiting_login 为准，不能只看文件时间。
+        hb = _read_room_json(rid, "bot_status.json")
+        r["heartbeat"] = hb
+        if hb.get("ts"):
+            r["heartbeat_age"] = now - int(hb["ts"])
         # B站凭证状态（needs_login → 前端引导重新扫码）
         auth_st = _read_room_json(rid, "auth_status.json")
         r["auth_status"] = auth_st.get("status", "ok")
         r["auth_reason"] = auth_st.get("reason", "")
-        # 用户已经重新扫码（凭证文件比状态文件新）时不必再提示，等机器人自己恢复
-        if r["auth_status"] == "needs_login" and r.get("account_uid"):
+        # 用户已经重新扫码（凭证文件比状态文件新）时不必再提示，等机器人自己恢复。
+        #
+        # **但心跳说还在等登录时不能这么判。** credential.json 会被任何一个
+        # 用同一账号的房间「验证成功」时重写（`_save_credential`），mtime 就新了；
+        # 如果这个房间的凭证其实仍然失效，界面会把红条收起来 —— 用户看到的是
+        # 「打开一切正常」，实际机器人一直在等扫码，礼物一条也统计不上。
+        if r["auth_status"] == "needs_login" and r.get("account_uid") and not hb.get("waiting_login"):
             try:
                 cred_file = _get_account_dir(str(r["account_uid"])) / "credential.json"
                 status_file = _room_data_file(rid, "auth_status.json")
@@ -3316,11 +3342,6 @@ async def api_list_rooms(request: Request):
                         r["auth_reason"] = ""
             except Exception:  # noqa: BLE001
                 pass
-        # 心跳（进程活着但掉线时前端能显示细节）
-        hb = _read_room_json(rid, "bot_status.json")
-        r["heartbeat"] = hb
-        if hb.get("ts"):
-            r["heartbeat_age"] = now - int(hb["ts"])
         # 后台任务彻底停摆（必现故障被限流放弃）：进程和心跳都正常，
         # 但某项功能已经不再工作 —— 最典型的是「机器人开着但一句话都不说」。
         dead = hb.get("bg_dead") or []
@@ -3350,7 +3371,12 @@ async def api_list_rooms(request: Request):
                 "no_uid": no_uid, "no_uname": no_uname, "dup": dup,
                 "unknown_events": [str(x) for x in unknown_gift],
             }
-        if decode_fail or (seen > 0 and recorded == 0 and really_dropped):
+        # **只要出现「缺用户信息」就必须提示。** 这类礼物在 `_handle_gift_payload`
+        # 里是**先 return**（uid<=0 无法归属），`gift_seen` 根本没加一 ——
+        # 所以以前 `seen > 0 and recorded == 0` 这个条件永远不成立，
+        # 界面里「缺用户信息通常是登录态失效」那一支是死代码：用户看到所有统计是 0，
+        # 页面上却一条提示都没有。这是「关键词能触发但统计全是 0」最难查的形态。
+        if decode_fail or no_uid or (seen > 0 and recorded == 0 and really_dropped):
             r["gift_issue"] = {
                 "seen": seen,
                 "recorded": recorded,
@@ -4688,6 +4714,9 @@ def _export_all_blocking(
         if uid:
             conditions.append("uid = ?")
             params.append(uid)
+        # 连击汇总（老库里的 COMBO_SEND 行）是前面若干条 SEND_GIFT 的合计副本，
+        # 算进来会重复计数，而且它们的 total_coin 是 0 → 「导出了一堆 0 元记录」。
+        conditions.append("event_type = 'SEND_GIFT'")
 
         where = " AND ".join(conditions)
 
@@ -5241,11 +5270,21 @@ def _delete_old_blocking(db_path: Path, date_str: str, data_type: str) -> dict:
     cur = conn.cursor()
     result: dict[str, int] = {"deleted_gifts": 0, "deleted_danmaku": 0}
     affected_months: list[str] = []
+    # 截止点：所选日期当天 00:00（严格早于这一天）。
+    # 礼物、上舰、弹幕三处必须用**同一个**截止点，以前弹幕那行还单独写了一遍
+    # `day_range(...)[1] + 1`，改一处漏一处就会让「礼物删到 X 之前、弹幕删到 X 当天」。
+    cutoff_ts = tzutil.day_range(date_str)[0]
     if data_type in ("gift", "all"):
         # 以前这里用的是 UTC 日期（date(ts,'unixepoch')），而弹幕用的是 localtime，
         # 在东八区会差 8 小时：删「某日之前」时把当天凌晨到早上 8 点的数据一起删掉。
         # 统一按配置时区算截止时间戳。
-        cutoff_ts = tzutil.day_range(date_str)[1] + 1
+        #
+        # 截止点必须是**所选日期当天 00:00**，不能是 23:59:59（更不能用 +1 的次日 00:00）：
+        # 界面写的是「确定删除 X 之前的所有记录」，用户以为 X 当天保留。
+        # 以前用 `day_range(date_str)[1] + 1`，等于把 X 当天整天也删了 ——
+        # 用户想清理 5 月的数据、选了 6 月 1 日，结果 6 月 1 日的礼物/上舰也一起没了。
+        # （旧 `/api/delete_old` 和 `StatsStore.delete_events_before` 都是严格早于，
+        #  只有这里多删一天，口径本来就不一致。）
         # 受影响月份必须在删之前取，删完就查不到了
         affected_months = [r[0] for r in cur.execute(
             "SELECT DISTINCT month FROM gift_events WHERE ts < ?", (cutoff_ts,)).fetchall()]
@@ -5261,8 +5300,7 @@ def _delete_old_blocking(db_path: Path, date_str: str, data_type: str) -> dict:
             cur.execute("DELETE FROM guard_events WHERE ts < ?", (cutoff_ts,))
             result["deleted_guards"] = cur.rowcount
     if data_type in ("danmaku", "all"):
-        cur.execute("DELETE FROM danmaku_log WHERE ts < ?",
-                    (tzutil.day_range(date_str)[1] + 1,))
+        cur.execute("DELETE FROM danmaku_log WHERE ts < ?", (cutoff_ts,))
         result["deleted_danmaku"] = cur.rowcount
     conn.commit()
     conn.close()
@@ -5457,7 +5495,7 @@ def _external_user_stats_blocking(db_path: Path, uid, period) -> dict:
             COALESCE(SUM(gift_num), 0) as total_gift_count,
             COALESCE(SUM(CASE WHEN is_blind_box=0 THEN CAST(CASE WHEN json_valid(raw_json) THEN json_extract(raw_json, '$.total_coin') END AS INTEGER) / 100 ELSE actual_value END), 0) as total_value
         FROM gift_events
-        WHERE uid = ? AND ts >= ? AND ts <= ?
+        WHERE uid = ? AND ts >= ? AND ts <= ? AND event_type = 'SEND_GIFT'
         """,
         (uid, start_ts, end_ts),
     ).fetchone()
@@ -5472,6 +5510,7 @@ def _external_user_stats_blocking(db_path: Path, uid, period) -> dict:
             COALESCE(SUM(profit_value), 0) as blind_profit
         FROM gift_events
         WHERE uid = ? AND ts >= ? AND ts <= ? AND is_blind_box = 1
+          AND event_type = 'SEND_GIFT'
         """,
         (uid, start_ts, end_ts),
     ).fetchone()
@@ -5494,6 +5533,7 @@ def _external_user_stats_blocking(db_path: Path, uid, period) -> dict:
                ) as gift_icon
         FROM gift_events g
         WHERE g.uid = ? AND g.ts >= ? AND g.ts <= ? AND g.is_blind_box = 0
+          AND g.event_type = 'SEND_GIFT'
         GROUP BY g.gift_name
         ORDER BY total_num DESC
         """,
@@ -5522,6 +5562,7 @@ def _external_user_stats_blocking(db_path: Path, uid, period) -> dict:
             ) as item_icon
         FROM gift_events g
         WHERE g.uid = ? AND g.ts >= ? AND g.ts <= ? AND g.is_blind_box = 1
+          AND g.event_type = 'SEND_GIFT'
         GROUP BY box_name, item_name
         ORDER BY box_name, total_num DESC
         """,
@@ -5778,7 +5819,7 @@ def _external_ranking_blocking(db_path: Path, period, gift_type, limit) -> dict:
     conn = _connect(db_path)
     cur = conn.cursor()
 
-    where = "ts >= ? AND ts <= ?"
+    where = "ts >= ? AND ts <= ? AND event_type = 'SEND_GIFT'"
     params: list = [start_ts, end_ts]
     if gift_type == "gift":
         where += " AND is_blind_box = 0"
@@ -5882,7 +5923,7 @@ def _external_room_stats_blocking(db_path: Path, period) -> dict:
             COALESCE(SUM(CASE WHEN is_blind_box=1 THEN blind_box_cost ELSE 0 END), 0) as blind_cost,
             COALESCE(SUM(CASE WHEN is_blind_box=1 THEN profit_value ELSE 0 END), 0) as blind_profit
         FROM gift_events
-        WHERE ts >= ? AND ts <= ?
+        WHERE ts >= ? AND ts <= ? AND event_type = 'SEND_GIFT'
     """, (start_ts, end_ts)).fetchone()
 
     conn.close()

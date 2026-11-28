@@ -360,30 +360,45 @@ class StatsStore:
             self._conn.commit()
         return True
 
+    # 「本月盲盒」这几个读接口**一律按明细现算**，不读 monthly_blindbox_stats。
+    #
+    # 聚合表是增量累加的：只要历史上任何一次「写了明细没写聚合」（旧版本、
+    # 修数据的脚本、中断、手工改库），聚合就永久偏小，而用户在弹幕里问
+    # 「#盲盒统计」看到的就是那个偏小的数。实测真实库确实这样：
+    #   rooms/1946287911 uid 27950910 → 明细 33 盒/成本 4530/开出 4020/盈亏 -510，
+    #   聚合表却写着 2880 / -1650（差 1140 电池）。
+    # 明细是唯一事实来源，而且 (month, uid) / (month, is_blind_box) 两个索引都在，
+    # 单月单人就是一次索引扫描，没必要为了这点性能把准确性赌在聚合上。
+    # 聚合表继续照常维护（自检和「重算统计」还用它），只是不再供这些接口读取。
+
     def get_user_monthly_blindbox(self, month: str, uid: int) -> Optional[tuple[int, int, int, int]]:
         row = self._conn.execute(
             """
-            SELECT blind_box_count, cost_total, actual_total, profit_total
-            FROM monthly_blindbox_stats
-            WHERE month = ? AND uid = ?
+            SELECT COALESCE(SUM(gift_num), 0), COALESCE(SUM(blind_box_cost), 0),
+                   COALESCE(SUM(actual_value), 0), COALESCE(SUM(profit_value), 0)
+            FROM gift_events
+            WHERE month = ? AND uid = ? AND is_blind_box = 1 AND event_type = 'SEND_GIFT'
             """,
             (month, uid),
         ).fetchone()
-        if row is None:
+        if row is None or int(row[0]) <= 0:
             return None
         return int(row[0]), int(row[1]), int(row[2]), int(row[3])
 
     def get_user_monthly_blindbox_by_uname(self, month: str, uname: str) -> Optional[tuple[int, int, int, int, int]]:
         row = self._conn.execute(
             """
-            SELECT uid, blind_box_count, cost_total, actual_total, profit_total
-            FROM monthly_blindbox_stats
-            WHERE month = ? AND uname = ?
+            SELECT uid, COALESCE(SUM(gift_num), 0), COALESCE(SUM(blind_box_cost), 0),
+                   COALESCE(SUM(actual_value), 0), COALESCE(SUM(profit_value), 0)
+            FROM gift_events
+            WHERE month = ? AND uname = ? AND is_blind_box = 1 AND event_type = 'SEND_GIFT'
+            GROUP BY uid
+            ORDER BY SUM(blind_box_cost) DESC
             LIMIT 1
             """,
             (month, uname),
         ).fetchone()
-        if row is None:
+        if row is None or int(row[1]) <= 0:
             return None
         return int(row[0]), int(row[1]), int(row[2]), int(row[3]), int(row[4])
 
@@ -403,10 +418,12 @@ class StatsStore:
     def get_monthly_blindbox_rank(self, month: str, limit: int = 10) -> list[tuple[str, int, int, int, int]]:
         rows = self._conn.execute(
             """
-            SELECT uname, blind_box_count, cost_total, actual_total, profit_total
-            FROM monthly_blindbox_stats
-            WHERE month = ?
-            ORDER BY profit_total DESC
+            SELECT uname, COALESCE(SUM(gift_num), 0), COALESCE(SUM(blind_box_cost), 0),
+                   COALESCE(SUM(actual_value), 0), COALESCE(SUM(profit_value), 0)
+            FROM gift_events
+            WHERE month = ? AND is_blind_box = 1 AND event_type = 'SEND_GIFT'
+            GROUP BY uid
+            ORDER BY SUM(profit_value) DESC
             LIMIT ?
             """,
             (month, limit),
@@ -416,13 +433,14 @@ class StatsStore:
     def get_monthly_total_blindbox(self, month: str) -> tuple[int, int, int, int]:
         row = self._conn.execute(
             """
-            SELECT SUM(blind_box_count), SUM(cost_total), SUM(actual_total), SUM(profit_total)
-            FROM monthly_blindbox_stats
-            WHERE month = ?
+            SELECT COALESCE(SUM(gift_num), 0), COALESCE(SUM(blind_box_cost), 0),
+                   COALESCE(SUM(actual_value), 0), COALESCE(SUM(profit_value), 0)
+            FROM gift_events
+            WHERE month = ? AND is_blind_box = 1 AND event_type = 'SEND_GIFT'
             """,
             (month,),
         ).fetchone()
-        if not row or row[0] is None:
+        if not row:
             return 0, 0, 0, 0
         return int(row[0]), int(row[1]), int(row[2]), int(row[3])
 

@@ -1356,6 +1356,15 @@ class LiveRobot:
         # record_gift_event 返回 False = 去重命中（没新增行），别算进「已记上」
         if recorded and stat_result.get("ok", True):
             self._gift_recorded += 1
+            # 统计恢复时把「因缺少 uid 丢弃」的计数清零。
+            # 那个计数是**当前故障**的指示器，不是历史统计：一直留在界面上的话，
+            # 用户重新登录之后还会看到「已累计 N 条无法统计」，以为问题没修好。
+            if getattr(self, "_dropped_no_uid", 0):
+                self.logger.info(
+                    "礼物统计已恢复（此前 %s 条因缺少用户信息未能统计）",
+                    self._dropped_no_uid)
+                self._dropped_no_uid = 0
+                self._no_uid_ts = []
 
         if not self.config.features.thanks_enabled:
             return

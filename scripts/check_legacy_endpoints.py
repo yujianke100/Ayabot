@@ -101,6 +101,13 @@ def main() -> int:
         ok("ranking 不再 500", code != 500, f"HTTP {code}")
         ok("ranking 从房间库读到了数据", code == 200 and '"uid": 42' in body.replace('"uid":42', '"uid": 42'),
            body[:100])
+        # 普通礼物的价值来自 raw_json.total_coin（金瓜子 ÷100 = 电池），
+        # 不是 actual_value —— 那一列只对盲盒有意义，普通礼物恒为 0。
+        # 以前这里 SUM(actual_value)，于是「排行里金额全是 0」。
+        import re as _re
+        m = _re.search(r'"total_val":\s*([0-9.]+)', body.replace('"total_val":', '"total_val": '))
+        tv = float(m.group(1)) if m else None
+        ok("普通礼物金额按 total_coin 折算（300 金瓜子 = 3 电池）", tv == 3.0, tv)
         ok("**没有凭空创建全局库**", not global_db.exists(),
            f"{global_db} ({global_db.stat().st_size} B)" if global_db.exists() else "未创建")
 

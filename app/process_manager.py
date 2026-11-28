@@ -737,7 +737,17 @@ def cleanup_old_logs(max_days: int = _MAX_LOG_DAYS) -> int:
                 continue
         except OSError:
             pass
-        # 按行数截断
+        # 按行数截断 —— **正在被机器人写的日志不能截**。
+        # 子进程模式下 bot.log 是子进程 stdout 的**打开着的句柄**：我们在外面
+        # 把文件改短，它的写偏移还停在旧位置，下一次写会在中间拉出一大片
+        # NUL 空洞（文件反而更大），Windows 上还可能直接 PermissionError。
+        # 运行中的日志等它自己轮转：房间启动前会调用一次 truncate_log_file，
+        # 那时没人持有句柄，是安全的。
+        try:
+            if _is_running(d.name):
+                continue
+        except Exception:  # noqa: BLE001
+            pass
         truncate_log_file(log_file)
 
     return cleaned

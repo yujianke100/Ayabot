@@ -12,11 +12,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import faulthandler
 import logging
 import shutil
 import sys
-import threading
 from pathlib import Path
 
 from .config import (
@@ -34,7 +32,7 @@ def _setup_logging(level: str) -> None:
     )
 
 
-#: faulthandler 的文件句柄：不持有引用会被 GC 关掉，硬崩溃时就写不出东西了
+#: faulthandler 的文件句柄（兼容旧名字，实际在 app/crashlog.py 里持有）
 _CRASH_FP: list = []
 
 
@@ -48,45 +46,12 @@ def _install_exception_hooks(data_dir: Path | None = None) -> None:
         于是线程悄悄死掉、进程还活着，表现就是「图标还在但功能没了」；
       - **硬崩溃（C 扩展访问违例、栈溢出）连异常钩子都走不到**，进程直接消失，
         bot.log 里一个字都不会多。faulthandler 至少能留下最后一帧。
+
+    实现搬到 `app/crashlog.py` 了：`Ayabot.exe`（托盘入口）根本不走这个模块，
+    钩子必须两边都能装，否则最常报崩溃的那批用户永远没有现场。
     """
-    logger = logging.getLogger("bili-live-robot")
-
-    def _excepthook(exc_type, exc, tb):  # noqa: ANN001
-        if issubclass(exc_type, KeyboardInterrupt):
-            sys.__excepthook__(exc_type, exc, tb)
-            return
-        logger.critical("unhandled exception", exc_info=(exc_type, exc, tb))
-
-    sys.excepthook = _excepthook
-
-    def _thread_hook(args):  # noqa: ANN001
-        if args.exc_type is SystemExit:
-            return
-        logger.critical(
-            "thread %s crashed", getattr(args.thread, "name", "?"),
-            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
-        )
-
-    threading.excepthook = _thread_hook
-
-    if data_dir is None:
-        return
-    try:
-        data_dir = Path(data_dir)
-        data_dir.mkdir(parents=True, exist_ok=True)
-        crash_log = data_dir / "crash.log"
-        # 别让一份写了几百次的崩溃转储无限长大
-        try:
-            if crash_log.exists() and crash_log.stat().st_size > 1_000_000:
-                crash_log.write_text("", encoding="utf-8")
-        except OSError:
-            pass
-        fp = open(crash_log, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
-        faulthandler.enable(file=fp, all_threads=True)
-        _CRASH_FP.append(fp)
-    except Exception:
-        # 拿不到崩溃转储不能影响机器人本身
-        logging.getLogger("bili-live-robot").warning("faulthandler 启用失败", exc_info=True)
+    from .crashlog import install_crash_hooks  # noqa: PLC0415
+    install_crash_hooks(data_dir)
 
 
 async def _run(config_path: str) -> None:
@@ -105,11 +70,8 @@ async def _run(config_path: str) -> None:
         logging.getLogger("bili-live-robot").error("%s", exc)
         return
     _setup_logging(config.runtime.log_level)
-    asyncio.get_running_loop().set_exception_handler(
-        lambda loop, ctx: logging.getLogger("bili-live-robot").error(
-            "asyncio loop error: %s", ctx.get("message"), exc_info=ctx.get("exception")
-        )
-    )
+    from .crashlog import install_loop_exception_handler  # noqa: PLC0415
+    install_loop_exception_handler()
 
     from app.web.server import init_app  # noqa: PLC0415
     init_app(config, config_path=config_path)

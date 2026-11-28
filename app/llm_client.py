@@ -173,9 +173,17 @@ class LLMClient:
             logger.info("injection blocked: user=%s text=%s", uname, user_text[:100])
             return _injection_response(self.bot_name)
 
-        url = self.base_url
-        if not url.endswith("/chat/completions") and self.provider != "anthropic":
-            url = url.rstrip("/") + "/chat/completions"
+        # 端点补全：**两种格式的路径不一样**。
+        # 以前只给 OpenAI 格式补 `/chat/completions`，anthropic 原样用 base_url ——
+        # 用户在界面上把 provider 改成 Anthropic、base_url 还留着默认的
+        # `https://api.openai.com/v1`（或填 `https://api.anthropic.com/v1`），
+        # 请求就打到根路径上，无论 key 对不对都是 404/401，而日志只有一行 401。
+        url = self.base_url.rstrip("/")
+        if self.provider == "anthropic":
+            if not url.endswith("/messages"):
+                url += "/messages"
+        elif not url.endswith("/chat/completions"):
+            url += "/chat/completions"
 
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
@@ -187,23 +195,36 @@ class LLMClient:
                     if resp.status != 200:
                         body = await resp.text()
                         logger.warning(
-                            "llm api error: status=%s body=%s", resp.status, body[:200],
+                            "llm api error: status=%s url=%s body=%s",
+                            resp.status, url, body[:200],
                         )
                         return None
                     data = await resp.json()
         except Exception as exc:
-            logger.warning("llm api request failed: %s", exc)
+            logger.warning("llm api request failed: %s (url=%s)", exc, url)
             return None
 
-        if self.provider == "anthropic":
-            content = data.get("content", [])
-            if isinstance(content, list):
-                for block in content:
-                    if block.get("type") == "text":
-                        return block.get("text", "").strip()
-            return ""
-        else:
-            choices = data.get("choices", [])
-            if not choices:
+        # 解析要单独兜一层：`data` 不一定是 dict（网关 200 + HTML/数组很常见），
+        # 而这里抛 AttributeError 会一路冒到弹幕处理链路里 —— 一条奇怪的
+        # LLM 响应就能让房间的弹幕处理任务安静地死掉。
+        try:
+            if not isinstance(data, dict):
+                logger.warning("llm api returned non-object json: %s", type(data).__name__)
                 return None
-            return choices[0].get("message", {}).get("content", "").strip()
+            if self.provider == "anthropic":
+                content = data.get("content", [])
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            return str(block.get("text", "")).strip()
+                return ""
+            choices = data.get("choices", [])
+            if not isinstance(choices, list) or not choices:
+                return None
+            first = choices[0] if isinstance(choices[0], dict) else {}
+            message = first.get("message") or {}
+            content = message.get("content", "") if isinstance(message, dict) else ""
+            return str(content or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("llm response parse failed: %s", exc)
+            return None

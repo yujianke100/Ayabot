@@ -608,18 +608,23 @@ def main() -> int:
         days = [x[0] for x in q("SELECT DISTINCT ayabot_date(ts) FROM gift_events"
                                " WHERE source LIKE 'xml:two_days.xml#%' ORDER BY 1")]
         ok("落在两天（配置时区）", days == ["2024-12-01", "2024-12-02"], days)
-        # 删掉 2024-12-01（含当天）→ 只剩 12-02 那条
-        should_del = q("SELECT COUNT(1) FROM gift_events WHERE ayabot_date(ts) <= '2024-12-01'")[0][0]
-        keep_cnt = q("SELECT COUNT(1) FROM gift_events WHERE ayabot_date(ts) > '2024-12-01'")[0][0]
+        # 「删除 X 之前」= **严格**早于 X 当天 00:00：选 12-02 → 12-01 删掉、12-02 保留。
+        # 以前截止点写的是「所选日期次日 00:00」，等于把选中那天整天也删了
+        # （用户想清 5 月、选了 6 月 1 日，结果 6 月 1 日的记录一起没了）。
+        should_del = q("SELECT COUNT(1) FROM gift_events WHERE ayabot_date(ts) < '2024-12-02'")[0][0]
+        keep_cnt = q("SELECT COUNT(1) FROM gift_events WHERE ayabot_date(ts) >= '2024-12-02'")[0][0]
         code, r = _req("POST", f"/api/rooms/{ROOM}/delete_old",
-                       json.dumps({"date": "2024-12-01", "type": "gift"}).encode(),
+                       json.dumps({"date": "2024-12-02", "type": "gift"}).encode(),
                        {"Content-Type": "application/json"})
         ok("删除接口成功", code == 200, r)
-        ok("删除条数与当天及更早的行数一致", r.get("deleted_gifts") == should_del,
+        ok("删除条数与「选中日期之前」的行数一致", r.get("deleted_gifts") == should_del,
            {"deleted": r.get("deleted_gifts"), "expected": should_del})
-        ok("次日及以后的数据没被误删",
+        ok("选中日期当天及以后的数据没被误删",
            q("SELECT COUNT(1) FROM gift_events")[0][0] == keep_cnt,
            {"left": q("SELECT COUNT(1) FROM gift_events")[0][0], "expected": keep_cnt})
+        ok("**选中日期当天**的那条确实还在",
+           q("SELECT COUNT(1) FROM gift_events WHERE ayabot_date(ts) = '2024-12-02'")[0][0] == 1,
+           q("SELECT ayabot_date(ts), gift_num FROM gift_events"))
         left = q("SELECT gift_num FROM gift_events WHERE source LIKE 'xml:two_days.xml#%'")
         ok("剩下的正是次日那条", [x[0] for x in left] == [3], left)
         agg = q("SELECT COALESCE(SUM(gift_count),0), COALESCE(SUM(gift_num_total),0),"

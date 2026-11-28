@@ -167,6 +167,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger("tray")
 
+# ── 进程级崩溃钩子 ──
+# 必须在**这里**装，不能只靠 app/main.py：exe 形态的入口是本文件，
+# 它是 `import app.web.server` 直接起 uvicorn，**从不经过 app/main.py**。
+# 只在 app/main.py 装的下场就是：最常报「机器人莫名其妙就没了」的那批
+# Windows 用户，托盘线程/心跳/守护循环抛异常、甚至 C 扩展硬崩溃，
+# 都一个现场都不留（窗口模式下 stdout/stderr 已经被接到 devnull）。
+try:
+    from app.crashlog import install_crash_hooks  # noqa: PLC0415
+    install_crash_hooks(DATA_DIR)
+except Exception as _exc:  # noqa: BLE001
+    logger.warning("安装崩溃钩子失败（继续启动）：%s", _exc)
+
 # ── 单实例锁（防止双击导致无限进程）─
 _LOCK_FILE = DATA_DIR / "tray.lock"
 _MUTEX_NAME = "AyabotTrayApp"

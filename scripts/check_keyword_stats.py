@@ -9,8 +9,8 @@
 然后断言回复里的数字**不是 0**，并且和写进库的值一致。
 
 同时校验三个口径互相对得上（这正是「某个页面上是 0」的判别方法）：
-- monthly_blindbox_stats（关键词回复读它）
-- gift_events 明细（WebUI 排行/导出读它）
+- gift_events 明细（**关键词回复、WebUI 排行/导出都读它** —— 唯一事实来源）
+- monthly_blindbox_stats（增量聚合，供统计自检/重算；漂移也不该影响回复，见 [9]）
 - /api/rooms/{id}/ranking（第三个口径）
 
     ./.venv/Scripts/python.exe scripts/check_keyword_stats.py
@@ -266,6 +266,27 @@ def main() -> int:
         if report is not None:
             bad = [r for r in (report.get("checks") or []) if not r.get("ok")]
             ok("consistency_report 全部 ok", not bad, bad[:2])
+
+        print("[9] 聚合表漂移不能影响关键词回复（统计以明细为准）")
+        # 真实库里就有这种漂移（明细 33 盒/开出 4020，聚合却写着 2880/-1650）：
+        # 旧版本漏写聚合、修数据的脚本只改明细、中断……都可能留下永久偏差。
+        # 以前「#盲盒统计」读 monthly_blindbox_stats，用户看到的就是那个偏小的数，
+        # 而 WebUI 排行读明细 → 两个页面数字不一样，用户只会说「统计坏了」。
+        store._conn.execute(
+            "UPDATE monthly_blindbox_stats SET blind_box_count=0, cost_total=0,"
+            " actual_total=0, profit_total=0 WHERE uid=?", (UID,))
+        store._conn.commit()
+        drift_reply = asyncio.run(ask("#盲盒统计"))
+        dv = nums(drift_reply)
+        ok("聚合被清零后，回复仍按明细给出花费 300", 300 in dv, drift_reply)
+        ok("回复里数量仍是 2", 2 in dv, drift_reply)
+        ok("回复里收益仍是 -240", -240 in dv, drift_reply)
+        # 只有明细里真的没有盲盒时，才允许说「没有」
+        store._conn.execute("UPDATE gift_events SET is_blind_box=0 WHERE uid=?", (UID,))
+        store._conn.commit()
+        none_reply = asyncio.run(ask("#盲盒统计"))
+        ok("明细里没有盲盒时才回「无盲盒记录」", "盲盒" in none_reply and 300 not in nums(none_reply),
+           none_reply)
 
         store.close() if hasattr(store, "close") else None
     finally:
