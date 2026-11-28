@@ -52,6 +52,15 @@ logger = logging.getLogger("webui")
 AUTH_USER = "ayabot"
 AUTH_PASS = "123456"
 _SESSION_TIMEOUT = 3600
+#: 「弹幕连接假死」的判定阈值（秒）：多久没收到任何事件就认为连接已经半开。
+#: **必须与 `app/bot.py` 的 `_DANMAKU_SILENCE_TIMEOUT` 一致** —— 那边负责真的重连，
+#: 这边只负责把同一件事显示给用户；两个数字不一样就会出现「守护说在重连、
+#: 界面说一切正常」。`check_danmaku_liveness.py` 会对账这两个值。
+_DANMAKU_SILENCE_HINT = 180
+#: 「进程说在运行、但心跳已经停了」的判定阈值（秒）。心跳每 15 秒写一次，
+#: 60 秒没有任何更新基本就说明机器人不工作了（被系统挂起、内嵌 Task 死了、
+#: 或者 PID 文件指向了一个被复用的进程号）。
+_HEARTBEAT_STALE = 60
 _HTTP_HOST = "0.0.0.0"
 _HTTP_PORT = int(os.environ.get("AYABOT_PORT", "19810"))
 _DB_PATH = "data/bot.db"
@@ -1303,37 +1312,42 @@ async def _supervise_once() -> None:
                 first_seen = _no_heartbeat_since.setdefault(room_id, now)
                 if now - first_seen <= _NO_HEARTBEAT_GRACE:
                     continue
-                if now - _zombie_restarts.get(room_id, 0.0) < _CRASH_COOLDOWN:
-                    continue
-                _zombie_restarts[room_id] = now
-                _write_crash_info(room_id, f"运行中但 {int(now - first_seen)}s 没有心跳（疑似僵尸任务）", None)
-                logger.warning(
-                    "supervisor: room %s 状态 running 但无心跳 %.0fs — 重启",
-                    room_id, now - first_seen,
-                )
-                try:
-                    await restart_room_async(room_id)
-                except Exception as exc:  # noqa: BLE001
-                    logger.error("supervisor: room %s 僵尸重启失败: %s", room_id, exc)
+                await _zombie_restart_async(
+                    room_id, f"运行中但 {int(now - first_seen)}s 没有心跳（疑似僵尸任务）", now)
                 continue
             _no_heartbeat_since.pop(room_id, None)
             stale = now - ts
             if stale <= _HEARTBEAT_STALE_SECONDS:
                 continue
             # 进程还在但心跳停了：卡死 / 事件循环阻塞 / 连接僵死
-            if now - _zombie_restarts.get(room_id, 0.0) < _CRASH_COOLDOWN:
-                continue
-            _zombie_restarts[room_id] = now
-            _write_crash_info(room_id, f"心跳超时 {int(stale)}s（疑似卡死）", None)
-            logger.warning(
-                "supervisor: room %s heartbeat stale %.0fs — 重启", room_id, stale
-            )
-            try:
-                await restart_room_async(room_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.error("supervisor: zombie restart failed for %s: %s", room_id, exc)
+            await _zombie_restart_async(
+                room_id, f"心跳超时 {int(stale)}s（疑似卡死）", now)
         except Exception as exc:  # noqa: BLE001
             logger.error("supervisor: room %s check error: %s", room_id, exc, exc_info=True)
+
+
+async def _zombie_restart_async(room_id: str, reason: str, now: float) -> None:
+    """「进程活着但不动了」的重启 —— **必须和崩溃走同一本账**。
+
+    以前这两条分支（心跳超时 / 从没写过心跳）自己写一行 crash_info 就直接
+    `restart_room_async()`：既不记入 `_restart_attempts`，也永远不写
+    `paused=True`。于是：
+
+      - 一个修不好的房间（每次启动都在同一处卡死）被**每 10 分钟重启一次，
+        永远停不下来**，界面每次都说「守护进程已自动重启」；
+      - `crash_info.attempts` 一直是 0，用户连「第几次」都看不到。
+
+    用户看到的就是「机器人莫名其妙关了又自己起来，一直这样」。
+    现在统一走 `_recover_room`，超过 `_CRASH_MAX_ATTEMPTS` 会和其他崩溃一样
+    被暂停并明确告知。
+    """
+    # 同一次卡死只处理一次：重启后旧心跳文件还在（ts 仍是老的），
+    # 下一轮巡检会立刻又判定「心跳超时」→ 不设冷却就会 20 秒一次无限重启。
+    if now - _zombie_restarts.get(room_id, 0.0) < _CRASH_COOLDOWN:
+        return
+    _zombie_restarts[room_id] = now
+    logger.warning("supervisor: room %s %s — 尝试重启", room_id, reason)
+    await _recover_room(room_id, reason, now)
 
 
 async def _supervise_loop() -> None:
@@ -1652,6 +1666,10 @@ async def api_ranking(start: str, end: str, gift_type: str = "all"):
 
         where_clause = "ts >= ? AND ts < ?"
         params: list[Any] = [s_start, e_end]
+
+        # 连击汇总（老库里的 COMBO_SEND）是前面若干条 SEND_GIFT 的合计副本：
+        # 算进来会把条数/价值/盈亏全部翻倍（它的 gift_num 可能是 0 也可能是合计）。
+        where_clause += " AND event_type = 'SEND_GIFT'"
 
         if gift_type == "blindbox":
             where_clause += " AND is_blind_box = 1"
@@ -3318,8 +3336,8 @@ async def api_list_rooms(request: Request):
         # 要以心跳里的 waiting_login 为准，不能只看文件时间。
         hb = _read_room_json(rid, "bot_status.json")
         r["heartbeat"] = hb
-        if hb.get("ts"):
-            r["heartbeat_age"] = now - int(hb["ts"])
+        hb_age = now - int(hb["ts"]) if hb.get("ts") else None
+        r["heartbeat_age"] = hb_age
         # B站凭证状态（needs_login → 前端引导重新扫码）
         auth_st = _read_room_json(rid, "auth_status.json")
         r["auth_status"] = auth_st.get("status", "ok")
@@ -3371,12 +3389,23 @@ async def api_list_rooms(request: Request):
                 "no_uid": no_uid, "no_uname": no_uname, "dup": dup,
                 "unknown_events": [str(x) for x in unknown_gift],
             }
-        # **只要出现「缺用户信息」就必须提示。** 这类礼物在 `_handle_gift_payload`
+        # **只要「最近还在丢」就必须提示。** 这类礼物在 `_handle_gift_payload`
         # 里是**先 return**（uid<=0 无法归属），`gift_seen` 根本没加一 ——
         # 所以以前 `seen > 0 and recorded == 0` 这个条件永远不成立，
         # 界面里「缺用户信息通常是登录态失效」那一支是死代码：用户看到所有统计是 0，
         # 页面上却一条提示都没有。这是「关键词能触发但统计全是 0」最难查的形态。
-        if decode_fail or no_uid or (seen > 0 and recorded == 0 and really_dropped):
+        #
+        # 判定用 `no_uid_age_seconds`（多久没再丢）而不是累计值的非零性：
+        #   - 累计值永不清零 → 用户重新登录后红条一直挂着，以为没修好；
+        #   - 反过来把累计值清零 → 「已累计 N 条」不真实，也不该篡改诊断数据。
+        # 15 分钟内还丢过就提示；更早丢的不再打扰（累计值仍在提示文案里）。
+        no_uid_age = hb.get("no_uid_age_seconds")
+        try:
+            no_uid_age = int(no_uid_age)
+        except (TypeError, ValueError):
+            no_uid_age = -1
+        no_uid_recent = no_uid > 0 and 0 <= no_uid_age < 900
+        if decode_fail or no_uid_recent or (seen > 0 and recorded == 0 and really_dropped):
             r["gift_issue"] = {
                 "seen": seen,
                 "recorded": recorded,
@@ -3386,6 +3415,42 @@ async def api_list_rooms(request: Request):
                 "dup": dup,
                 "unknown_events": [],
             }
+        # 写统计失败（数据库被锁 / 磁盘满 / 目录只读）：礼物和上舰会**真的丢掉**，
+        # 而心跳里一直有这个 `dropped_stats` 计数 —— 只是以前 WebUI 从来不读它。
+        # 于是用户看到的现象是「统计比实际少」，页面上一切正常、日志里一句 error。
+        # 和 no_uid 一样按「最近还在失败吗」判定，累计值只用于显示。
+        dropped_stat = int(hb.get("dropped_stats") or 0)
+        try:
+            stat_age = int(hb.get("stats_fail_age_seconds"))
+        except (TypeError, ValueError):
+            stat_age = -1
+        if dropped_stat > 0 and 0 <= stat_age < 900:
+            r["stats_issue"] = {"dropped": dropped_stat, "age": stat_age}
+        # 弹幕连接不正常：进程活着、心跳也在写，但**连接断了或半开**。
+        # 这三个字段（danmaku_connected / danmaku_task_alive / event_silent_seconds）
+        # 一直在心跳里，但 WebUI 从来没读过 —— 于是「机器人开着但一句话不说、
+        # 礼物一件不统计」时界面上完全正常，用户只能说「莫名其妙关了」。
+        # 阈值和守护进程一致（180 秒没有任何事件 = 半开连接）。
+        try:
+            silent = int(hb.get("event_silent_seconds"))
+        except (TypeError, ValueError):
+            silent = -1
+        task_alive = hb.get("danmaku_task_alive")
+        connected = hb.get("danmaku_connected")
+        # hb_age 上面已经算过（None = 从没有过心跳文件）
+        if r.get("status") == "running" and hb_age is not None and hb_age < 120:
+            if task_alive is False:
+                r["conn_issue"] = {"kind": "task_dead", "silent": silent}
+            elif silent >= _DANMAKU_SILENCE_HINT:
+                r["conn_issue"] = {"kind": "silent", "silent": silent,
+                                   "connected": bool(connected)}
+        # 后台任务被自动重建过：说明有东西反复崩，「偶尔不说话/不回复」的来源
+        try:
+            restarts = int(hb.get("bg_restarts") or 0)
+        except (TypeError, ValueError):
+            restarts = 0
+        if restarts > 0:
+            r["bg_restarts"] = restarts
         # 上次崩溃记录
         crash = _read_crash_info(rid)
         if crash:
@@ -3395,8 +3460,18 @@ async def api_list_rooms(request: Request):
             r["recent_crash"] = bool(crash.get("paused")) or (now - int(crash.get("ts") or 0)) < 900
         else:
             r["recent_crash"] = False
+        # 「进程说是 running，但心跳已经停了」—— 用户最容易误解的状态：
+        # 页面🟢运行中，实际机器人已经卡死/被系统挂起/内嵌 Task 死在事件循环外。
+        # 心跳每 15 秒写一次，超过 `_HEARTBEAT_STALE` 没有任何更新就基本可以确定它不动了。
+        if (r.get("status") == "running" and hb_age is not None
+                and hb_age > _HEARTBEAT_STALE):
+            r["stale_heartbeat"] = hb_age
         if r.get("status") == "running" and r["auth_status"] == "needs_login":
             r["status_note"] = "运行中（等待重新登录）"
+        elif r.get("status") == "running" and r.get("stale_heartbeat"):
+            r["status_note"] = f"运行中但已 {r['stale_heartbeat']} 秒没有心跳（可能已经卡死）"
+        elif r.get("status") == "running" and r.get("conn_issue"):
+            r["status_note"] = "运行中（弹幕连接不正常）"
         elif r.get("status") == "running" and r.get("bg_dead"):
             r["status_note"] = "运行中（部分功能已停摆）"
     # 根据用户角色过滤
@@ -6512,6 +6587,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     </div>
                     <div class="text-xs text-gray-500 mt-1 flex gap-3 flex-wrap items-center">
                         <span>状态: {{ r.status === 'running' ? '🟢 运行中' : '⏹️ 已停止' }}</span>
+                        <!-- status_note 以前算出来但从来没渲染过：
+                             「等待重新登录 / 心跳停了 / 连接不正常 / 部分功能停摆」
+                             四种情况用户在卡片上完全看不出来 -->
+                        <span v-if="r.status_note" class="px-2 py-0.5 rounded bg-orange-100 text-orange-700">
+                            {{ r.status_note }}
+                        </span>
                         <span v-if="r.account_nick">账号: {{ r.account_nick }}</span>
                         <span v-if="r.auth_status === 'needs_login'"
                               class="px-2 py-0.5 rounded bg-red-100 text-red-600 font-medium">
@@ -6599,6 +6680,55 @@ INDEX_HTML = r"""<!DOCTYPE html>
             </div>
         </div>
 
+        <!-- 写统计失败（礼物/上舰真的丢了，不是「没记上」而是写库报错） -->
+        <div v-if="selectedRoom && selectedRoom.stats_issue"
+             class="bg-red-50 border border-red-200 rounded-xl p-3 mb-4 text-xs text-red-800">
+            <div class="font-bold">⚠️ 有礼物/上舰没能写进统计（写库失败）</div>
+            <div class="mt-1">
+                已经失败 <strong>{{ selectedRoom.stats_issue.dropped }}</strong> 次
+                <span v-if="selectedRoom.stats_issue.age >= 0">
+                    ，最近一次在 {{ selectedRoom.stats_issue.age }} 秒前
+                </span>
+                —— 这些礼物/上舰<strong>不会补记</strong>，明细和排行里都会少。
+            </div>
+            <div class="mt-1">
+                常见原因：磁盘满了、数据目录被设成只读、或同一时间在导入大量历史数据把数据库锁住了。
+                到「日志」里搜「写入失败」能看到具体报错。
+            </div>
+        </div>
+
+        <!-- 心跳停了：页面说「运行中」，实际机器人已经不动了 -->
+        <div v-if="selectedRoom && selectedRoom.stale_heartbeat"
+             class="bg-red-50 border border-red-200 rounded-xl p-3 mb-4 text-xs text-red-800">
+            <div class="font-bold">⚠️ 机器人已经 {{ selectedRoom.stale_heartbeat }} 秒没有写心跳了</div>
+            <div class="mt-1">
+                界面显示「运行中」是按进程号判断的，但它已经不再干活 ——
+                这时<strong>礼物不会统计、弹幕不会回复</strong>。
+            </div>
+            <div class="mt-1">
+                常见原因：被系统挂起、进程号被别的程序复用、或机器人内部卡死。
+                点下面的「重启」即可恢复；反复出现请把房间日志发给我。
+            </div>
+        </div>
+
+        <!-- 弹幕连接不正常（进程活着、心跳在写，但连接断了/半开） -->
+        <div v-if="selectedRoom && selectedRoom.conn_issue"
+             class="bg-orange-50 border border-orange-200 rounded-xl p-3 mb-4 text-xs text-orange-800">
+            <div class="font-bold">⚠️ 弹幕连接不正常</div>
+            <div class="mt-1" v-if="selectedRoom.conn_issue.kind === 'task_dead'">
+                收弹幕的后台任务已经停了 —— 现在<strong>不会收到任何弹幕和礼物</strong>，
+                统计不会再增加，关键词也不会回复。
+            </div>
+            <div class="mt-1" v-else>
+                已经 <strong>{{ selectedRoom.conn_issue.silent }}</strong> 秒没有收到任何事件
+                （B站 的直播间连接会每 30 秒左右推一次心跳包）。
+                这种「连接还在但数据不来了」叫半开连接，通常几分钟内会自动重连成功。
+            </div>
+            <div class="mt-1">
+                超过十分钟一直这样，点一下「重启」；反复出现请把房间日志发给我。
+            </div>
+        </div>
+
         <!-- 后台功能停摆提示（进程/心跳都正常，但某项功能已经不工作） -->
         <div v-if="selectedRoom && selectedRoom.bg_dead && selectedRoom.bg_dead.length"
              class="bg-orange-50 border border-orange-200 rounded-xl p-3 mb-4 text-xs text-orange-800">
@@ -6612,6 +6742,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
             </div>
             <div class="mt-1">
                 请重启房间；反复出现时到「日志」里搜「后台任务」，那里有具体异常。
+            </div>
+        </div>
+        <div v-else-if="selectedRoom && selectedRoom.bg_restarts > 0"
+             class="bg-yellow-50 border border-yellow-200 rounded-xl p-3 mb-4 text-xs text-yellow-800">
+            <div>ℹ️ 后台任务崩溃后已被自动重建 <strong>{{ selectedRoom.bg_restarts }}</strong> 次。</div>
+            <div class="mt-1">
+                机器人自己能恢复，但「偶尔不回话/漏几条弹幕」往往就是这个来源。
+                反复出现请到「日志」里搜「后台任务」看具体异常。
             </div>
         </div>
 
@@ -7847,8 +7985,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <h2 class="text-lg font-bold mb-1">🧮 统计自检</h2>
                 <p class="text-sm text-gray-500 mb-4">
                     检查「送礼明细」和「月度汇总」是否一致。汇总表是逐条累加出来的，
-                    历史上只要有一次没累加（旧版本、异常退出、手工改库），之后排行榜和月度统计就会一直偏少。
+                    历史上只要有一次没累加（旧版本、异常退出、手工改库），汇总就会一直偏少。
                     点「自检」只看不改；确实对不上再点「重算」。
+                    <br>
+                    排行榜、导出、弹幕里的「#盲盒统计」现在**一律按明细现算**，所以即使这里显示有偏差，
+                    那些地方的数字也是准的 —— 重算只是为了让汇总表也跟上。
                 </p>
                 <div class="flex items-center gap-2 flex-wrap">
                     <button @click="statsCheck()" :disabled="statsBusy"
@@ -10608,9 +10749,14 @@ createApp({
                 rooms.value = data.rooms || [];
                 allRooms.value = data.rooms || [];
                 // 同步当前打开的详情页（凭证状态/心跳/崩溃信息需要实时反映）
+                //
+                // **必须整个替换，不能 Object.assign**。assign 只覆盖出现的键，
+                // 服务端不再返回的字段会**留在旧对象上**：一旦出现过
+                // `gift_issue` / `stats_issue` / `conn_issue` / `stale_heartbeat`，
+                // 问题修好之后红条也永远摘不掉（用户以为「修了半天没修好」）。
                 if (selectedRoom.value) {
                     const fresh = (data.rooms || []).find(x => x.room_id === selectedRoom.value.room_id);
-                    if (fresh) Object.assign(selectedRoom.value, fresh);
+                    if (fresh) selectedRoom.value = { ...fresh };
                 }
             } catch(e) { /* ignore */ }
         }

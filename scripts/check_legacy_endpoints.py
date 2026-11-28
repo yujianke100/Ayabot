@@ -62,6 +62,13 @@ def main() -> int:
             event_type="SEND_GIFT", gift_name="辣条", gift_num=3, is_blind_box=False,
             blind_box_cost=0, actual_value=300, profit_value=0,
             raw_json=json.dumps({"total_coin": 300, "giftName": "辣条", "num": 3})))
+        # 老库里的连击汇总副本：没有 event_type 过滤时会被算进 gift_count/金额
+        # （给一个非零 gift_num，否则这条夹具根本测不出东西）
+        st.record_gift_event(GiftEvent(
+            ts=now, month=StatsStore.month_of_ts(now), uid=42, uname="甲",
+            event_type="COMBO_SEND", gift_name="辣条", gift_num=7, is_blind_box=False,
+            blind_box_cost=0, actual_value=0, profit_value=0,
+            raw_json=json.dumps({"combo_total_coin": 2000, "combo_num": 7})))
         st.close()
 
         srv._ROOMS_BASE_DIR = str(tmp)
@@ -108,6 +115,9 @@ def main() -> int:
         m = _re.search(r'"total_val":\s*([0-9.]+)', body.replace('"total_val":', '"total_val": '))
         tv = float(m.group(1)) if m else None
         ok("普通礼物金额按 total_coin 折算（300 金瓜子 = 3 电池）", tv == 3.0, tv)
+        gc = _re.search(r'"gift_count":\s*([0-9]+)', body.replace('"gift_count":', '"gift_count": '))
+        gcv = int(gc.group(1)) if gc else None
+        ok("gift_count = 3（连击汇总的 7 件不算进来）", gcv == 3, gcv)
         ok("**没有凭空创建全局库**", not global_db.exists(),
            f"{global_db} ({global_db.stat().st_size} B)" if global_db.exists() else "未创建")
 
@@ -122,7 +132,8 @@ def main() -> int:
         st2 = SS(str(room / "data" / "bot.db"))
         left = st2._conn.execute("SELECT COUNT(1) FROM gift_events").fetchone()[0]
         st2._conn.close()
-        ok("房间数据一条都没被删", left == 1, f"剩 {left} 条")
+        # 夹具里现在是 1 条 SEND_GIFT + 1 条 COMBO_SEND
+        ok("房间数据一条都没被删", left == 2, f"剩 {left} 条")
 
         print("[3] 老扫码保存：必须写进 accounts/<uid>/credential.json")
         src = (ROOT / "app/web/server.py").read_text(encoding="utf-8")

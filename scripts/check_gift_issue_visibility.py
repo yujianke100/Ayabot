@@ -105,6 +105,8 @@ def main() -> int:
             "gift_seen": 0,
             "gift_recorded": 0,
             "dropped_no_uid": 7,
+            # 30 秒前还在丢 → 这是「现在就有问题」
+            "no_uid_age_seconds": 30,
             "danmaku_connected": True,
             "danmaku_task_alive": True,
         })
@@ -114,8 +116,9 @@ def main() -> int:
         ok("no_uid 传到了前端", issue.get("no_uid") == 7, issue.get("no_uid"))
         ok("seen 如实是 0（不编造）", issue.get("seen") == 0, issue.get("seen"))
 
-        print("[2] 统计恢复正常后，提示要消失（计数不能永久累积）")
-        # 机器人侧：成功记上一件礼物时把 _dropped_no_uid 清零（见 bot._handle_gift_payload）
+        print("[2] 累计值不清零、但「最近没再丢」就不再提示")
+        # 机器人侧：成功记上一件礼物**不能**清空 _dropped_no_uid
+        # （清了「已累计 N 条」就不真实，半好半坏时红条还会一闪一闪）
         from app.bot import LiveRobot
         from app.config import load_config
         cfg_file = room / "config.yaml"
@@ -132,25 +135,40 @@ def main() -> int:
                 pass
 
         robot = LiveRobot(config=loaded, credential=object(), auth=_FakeAuth())
-        robot._dropped_no_uid = 4
-        robot._no_uid_ts = [time.time()]
         robot._enqueue_reply = lambda *a, **k: None  # type: ignore[assignment]
+        # 走真实路径（不要直接戳属性，否则测的是「我赋值成功没」）：
+        # 4 件缺少 uid 的礼物
+        for _ in range(4):
+            robot._warn_gift_without_uid("", "辣条")
 
         import asyncio
         asyncio.run(robot._handle_gift_payload({
             "uid": 999, "uname": "甲", "giftName": "辣条", "num": 1,
             "tid": "giftissue-1", "timestamp": int(time.time()), "total_coin": 100,
         }, "SEND_GIFT"))
-        ok("记上一条之后 dropped_no_uid 归零", robot._dropped_no_uid == 0,
+        ok("记上一条之后累计值**保留**（诊断数据不篡改）", robot._dropped_no_uid == 4,
            robot._dropped_no_uid)
-        ok("15 分钟窗口也清空", not robot._no_uid_ts, robot._no_uid_ts)
+        ok("最后一次丢弃时刻仍记着", getattr(robot, "_last_no_uid_ts", 0) > 0,
+           getattr(robot, "_last_no_uid_ts", 0))
 
+        # 心跳：「1 小时前丢过」——累计值还在，但不算当前故障
         write_json(room / "data" / "bot_status.json", {
             "ts": int(time.time()), "gift_seen": 1, "gift_recorded": 1,
-            "dropped_no_uid": 0, "danmaku_connected": True, "danmaku_task_alive": True,
+            "dropped_no_uid": 4, "no_uid_age_seconds": 3600,
+            "danmaku_connected": True, "danmaku_task_alive": True,
         })
         r2 = rooms()
-        ok("提示消失", not r2.get("gift_issue"), r2.get("gift_issue"))
+        ok("一小时没再丢 → 提示消失（红条不会永久挂着）", not r2.get("gift_issue"),
+           r2.get("gift_issue"))
+
+        # 边界：刚恢复（5 分钟内还在丢）就必须还在
+        write_json(room / "data" / "bot_status.json", {
+            "ts": int(time.time()), "gift_seen": 1, "gift_recorded": 1,
+            "dropped_no_uid": 4, "no_uid_age_seconds": 200,
+            "danmaku_connected": True, "danmaku_task_alive": True,
+        })
+        r2b = rooms()
+        ok("200 秒前刚丢过 → 仍然提示", bool(r2b.get("gift_issue")), r2b.get("gift_issue"))
 
         print("[3] 凭证失效时红条必须一直在（不能被 credential mtime 骗掉）")
         write_json(room / "data" / "auth_status.json", {
@@ -181,6 +199,38 @@ def main() -> int:
         })
         r4 = rooms()
         ok("此时才认为已恢复", r4.get("auth_status") == "ok", r4.get("auth_status"))
+
+        print("[5] 写库失败（礼物真的丢了）必须在界面上说出来")
+        # `_record_stat` 失败时只加 `_dropped_stats` 并写一行日志；
+        # 以前 WebUI 从不读这个字段 —— 用户看到的是「统计比实际少」，页面一切正常。
+        write_json(room / "data" / "bot_status.json", {
+            "ts": int(time.time()), "gift_seen": 5, "gift_recorded": 2,
+            "dropped_no_uid": 0, "no_uid_age_seconds": -1,
+            "dropped_stats": 3, "stats_fail_age_seconds": 12,
+            "danmaku_connected": True, "danmaku_task_alive": True,
+        })
+        r5 = rooms()
+        si = r5.get("stats_issue") or {}
+        ok("有 stats_issue", bool(si), r5.get("stats_issue"))
+        ok("报出失败次数", si.get("dropped") == 3, si.get("dropped"))
+        ok("报出最近一次多久之前", si.get("age") == 12, si.get("age"))
+        ok("同时不再显示 gift_issue（没有缺 uid 的礼物）", not r5.get("gift_issue"),
+           r5.get("gift_issue"))
+
+        write_json(room / "data" / "bot_status.json", {
+            "ts": int(time.time()), "gift_seen": 5, "gift_recorded": 5,
+            "dropped_no_uid": 0, "no_uid_age_seconds": -1,
+            "dropped_stats": 3, "stats_fail_age_seconds": 7200,
+            "danmaku_connected": True, "danmaku_task_alive": True,
+        })
+        r6 = rooms()
+        ok("两小时没再失败 → 不再提示（累计值不清零）", not r6.get("stats_issue"),
+           r6.get("stats_issue"))
+
+        # UI 得有对应的横幅，否则前端什么都不显示
+        srv_src = (ROOT / "app" / "web" / "server.py").read_text(encoding="utf-8")
+        ok("UI 有 stats_issue 横幅", "selectedRoom.stats_issue" in srv_src)
+        ok("横幅说明「不会补记」", "不会补记" in srv_src)
 
         store.close()
     finally:

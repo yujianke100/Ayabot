@@ -488,6 +488,26 @@ print("seeded", db)
     check('礼物：收到但一条没记上要明确报出来', body.includes('收到礼物但没能记进统计'));
     check('礼物：说出「排行/统计会是 0」这个后果', body.includes('排行/统计会是 0'));
 
+    // 问题修好之后红条必须**自己**消失：`loadRooms` 每 15 秒拉一次 /api/rooms。
+    // 以前写的是 `Object.assign(selectedRoom.value, fresh)` —— assign 只覆盖出现的键，
+    // 服务端不再返回的 `gift_issue` 会留在旧对象上，红条永远摘不掉；
+    // 用户看着「已经修好」的机器人和一条红字，只会说「修了半天没修好」。
+    console.log('[3.5] 问题消失后红条要自己摘掉（不用刷新页面）');
+    writeJson('bot_status.json', {
+      ts: Math.floor(Date.now() / 1000), status: 'running',
+      gift_seen: 9, gift_recorded: 9, gift_dropped_dup: 0, gift_dropped_decode: 0,
+      dropped_no_uid: 0, no_uid_age_seconds: -1, gift_dropped_no_uname: 0,
+      danmaku_task_alive: true, danmaku_connected: true, event_silent_seconds: 12,
+    });
+    let bannerCleared = false;
+    try {
+      await waitFor(cdp,
+        `!document.body.innerText.includes('收到礼物但没能记进统计')`,
+        25000, '礼物流失红条自动消失');
+      bannerCleared = true;
+    } catch { /* 记为失败 */ }
+    check('**红条会自己消失**（轮询到新状态，不用 F5）', bannerCleared);
+
     console.log('[4] 日志面板不许执行注入');
     await cdp.eval(CLICK_TEXT('日志'));
     await waitFor(cdp, `(() => {

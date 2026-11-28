@@ -135,6 +135,8 @@ class LiveRobot:
         self._danmaku_restart_lock: Optional[asyncio.Lock] = None
         # 统计写入失败计数器（写库被锁/磁盘忙时兜底重试仍失败），进心跳供 WebUI 显示
         self._dropped_stats = 0
+        #: 最后一次「写统计/处理事件失败」的时刻。界面靠它判断现在是否还在出错
+        self._last_stat_fail_ts = 0.0
         # 因缺少 uid 而被丢弃的礼物数 + 最近发生时间（凭证失效/匿名连接的信号）
         self._dropped_no_uid = 0
         self._no_uid_ts: list[float] = []
@@ -273,8 +275,21 @@ class LiveRobot:
             "queue_depth": self._msg_queue.qsize(),
             # 统计写入失败条数：非 0 说明有礼物/上舰因为写库失败没能记上（日志里有详细信息）
             "dropped_stats": getattr(self, "_dropped_stats", 0),
+            # 距离最后一次失败多少秒（-1 = 从没失败过）。和 no_uid 一样：
+            # 界面要判断「现在还在丢吗」，不能只看累计值。
+            "stats_fail_age_seconds": (
+                int(time.time() - self._last_stat_fail_ts)
+                if getattr(self, "_last_stat_fail_ts", 0) else -1
+            ),
             # 因缺少 uid（匿名连接/凭证失效）被丢弃的礼物数：非 0 就是「统计全是 0」的原因
             "dropped_no_uid": getattr(self, "_dropped_no_uid", 0),
+            # 距离**最后一次**因缺 uid 丢弃礼物多少秒（-1 = 从没丢过）。
+            # 报警要看「最近还在丢吗」，不能看累计值：用户重新登录后累计值还是非 0，
+            # 红条会一直挂着；反过来如果把累计值清零，「已累计 N 条」又不真实了。
+            "no_uid_age_seconds": (
+                int(time.time() - self._last_no_uid_ts)
+                if getattr(self, "_last_no_uid_ts", 0) else -1
+            ),
             # 「收到礼物但没记上」的分项计数：seen 非 0 而 recorded 为 0 时，
             # WebUI 会直接说清楚是哪一类丢的（解码失败 / 缺昵称 / 去重），
             # 而不是让用户看到一排 0 然后猜「统计功能坏了」。
@@ -727,6 +742,7 @@ class LiveRobot:
                 raise
             except Exception as exc:  # noqa: BLE001
                 self._dropped_stats += 1
+                self._last_stat_fail_ts = time.time()
                 cmd = event.get("type") if isinstance(event, dict) else None
                 try:
                     keys = list((event.get("data") or {}).keys())[:12] if isinstance(event, dict) else []
@@ -1297,9 +1313,22 @@ class LiveRobot:
         )
         now_mono = time.time()
         seen = self._recent_gifts.get(dedupe_key)
-        if is_v2 and seen is not None and now_mono - seen < 120:
+        # 跨协议去重必须**双向**：
+        # 灰度期同一件礼物会同时以 SEND_GIFT(JSON) 和 SEND_GIFT_V2(pb) 推两次，
+        # 谁先到不确定。以前只对 `is_v2` 的做判断，于是
+        #   - V2 先到、旧协议后到 → 旧那条被当成新礼物**又记一遍**（条数和金额都翻倍）
+        #   - 旧协议先到、V2 后到 → 正常跳过
+        # 这种「一半概率多算一件」最难查：日志里两条都写着正常记录。
+        #
+        # 但不能无脑对所有事件去重：没有 tid/rnd 时用的兜底键是
+        # `name:num:timestamp:-1:0`，同一秒内连送两件同名同数量的礼物会撞键 →
+        # 真礼物被当成重复丢掉。所以：
+        #   - 有真 tid/rnd：任何协议都参与去重（键是稳定的）
+        #   - 没有 tid/rnd：只让 V2 参与（它的兜底键带 `_v2_index`，不会误杀）
+        if seen is not None and now_mono - seen < 120 and (is_v2 or bool(tid_or_rnd)):
             self._dropped_gift_dup += 1
-            self.logger.debug("duplicate gift skipped: %s %s", uname, gift_name)
+            self.logger.debug("duplicate gift skipped: %s %s (proto=%s)",
+                              uname, gift_name, payload.get("src_protocol", "json"))
             return
         self._recent_gifts[dedupe_key] = now_mono
         if len(self._recent_gifts) > 2000:
@@ -1356,15 +1385,12 @@ class LiveRobot:
         # record_gift_event 返回 False = 去重命中（没新增行），别算进「已记上」
         if recorded and stat_result.get("ok", True):
             self._gift_recorded += 1
-            # 统计恢复时把「因缺少 uid 丢弃」的计数清零。
-            # 那个计数是**当前故障**的指示器，不是历史统计：一直留在界面上的话，
-            # 用户重新登录之后还会看到「已累计 N 条无法统计」，以为问题没修好。
-            if getattr(self, "_dropped_no_uid", 0):
-                self.logger.info(
-                    "礼物统计已恢复（此前 %s 条因缺少用户信息未能统计）",
-                    self._dropped_no_uid)
-                self._dropped_no_uid = 0
-                self._no_uid_ts = []
+            # 注意：**不要在这里把 `_dropped_no_uid` 清零**。
+            # 它是「这台机器人一共丢了多少件」的累计诊断值，清了以后：
+            #   - 界面上「已累计 N 条」永远是个小数（用户以为问题很小）
+            #   - 半好半坏（部分事件带 uid）时红条会一闪一闪
+            # 「现在还该不该报警」由心跳里的 `no_uid_age_seconds`（多久没再丢）
+            # 决定，那是另外一件事，见 write_heartbeat。
 
         if not self.config.features.thanks_enabled:
             return
@@ -1413,12 +1439,14 @@ class LiveRobot:
                 # 宁可少等也不能把弹幕循环卡住。
                 if attempt == 2:
                     self._dropped_stats += 1
+                    self._last_stat_fail_ts = time.time()
                     self.logger.error(
                         "%s 写入失败（数据库忙，已重试 3 次）：%s | %s", kind, exc, label)
                     return False
                 time.sleep(0.1 * (attempt + 1))
             except Exception as exc:  # noqa: BLE001
                 self._dropped_stats += 1
+                self._last_stat_fail_ts = time.time()
                 self.logger.error("%s 写入失败：%s | %s", kind, exc, label, exc_info=True)
                 return False
         return False
@@ -1435,6 +1463,9 @@ class LiveRobot:
         """
         self._dropped_no_uid = getattr(self, "_dropped_no_uid", 0) + 1
         now = time.time()
+        # 记录「最后一次丢弃的时刻」：界面靠它判断「现在还该不该报警」。
+        # 累计值只用于显示「一共丢了多少」，不用于决定要不要提示。
+        self._last_no_uid_ts = now
         # 15 分钟内累计 3 条就认定凭证有问题（单条可能是异常事件，不急着误报）
         self._no_uid_ts = [t for t in getattr(self, "_no_uid_ts", []) if now - t < 900]
         self._no_uid_ts.append(now)
@@ -2122,7 +2153,29 @@ class LiveRobot:
                     return f"{n / 10000:.1f}万"
                 return str(n)
 
-            # 拆成三条弹幕发送
+            # ── 先按用户模板渲染 ──
+            # `pk_report_template` 是配置里**能改**的字段（默认值就在
+            # config.example.yaml 里），但这里以前写死三行 —— 用户改了完全没效果，
+            # 和 `rate_limit.reply_delay_seconds` 同一类「配置里有、代码不读」。
+            rendered = str(self.config.features.pk_report_template or "")
+            for ph, val in (("{opponent}", opp_name), ("{fans}", _fmt(fans)),
+                            ("{guards}", str(guard_count)),
+                            ("{audience}", str(online)),
+                            ("{score}", str(total_score))):
+                rendered = rendered.replace(ph, val)
+            rendered = rendered.strip()
+            # 放得进一条弹幕就用用户的那一条（B站 上限 20 字，按 UTF-16 算）
+            max_len = int(getattr(self.config.rate_limit, "max_text_len", 20) or 20)
+            if rendered and _utf16_len(rendered) <= max_len:
+                await self._enqueue_message(text=rendered, reply_uid=None)
+                return
+            if rendered:
+                self.logger.debug(
+                    "PK 模板渲染后 %d 字超出弹幕上限 %d，改发三行",
+                    _utf16_len(rendered), max_len)
+
+            # 模板太长（默认模板就是这种情况，还有 5 个占位符）：拆成三条，
+            # 否则一条发出去必然被 B站 拒收（code 1003212），用户什么都看不到。
             line1 = f"PK开始！对手{opp_name}"
             line2 = f"对手 {_fmt(fans)}粉，{guard_count}舰"
             line3 = f"{online}观众，贡献{total_score}"
@@ -2641,8 +2694,14 @@ def _extract_guard_buy_payload(event: dict[str, Any]) -> Optional[dict[str, Any]
         if not uname:
             uname = str(user_info.get("uname") or user_info.get("name") or "")
 
-    if uid <= 0 or not uname:
+    if uid <= 0:
+        # 没有 uid 无法归属到任何人，只能丢（会和礼物一样触发「请重新登录」提示）
         return None
+    if not uname:
+        # 以前这里是 `if uid <= 0 or not uname: return None` —— 少一个昵称字段
+        # 就把整条上舰事件丢了：既没有记录（大航海页面永远是空的），也没有致谢。
+        # 和礼物那边同一个教训（见 _extract_gift_payload 的注释），这里补上占位。
+        uname = f"用户{uid}"
 
     guard_name = GUARD_NAMES.get(guard_level, str(payload.get("role_name") or payload.get("gift_name") or "大航海"))
     if not guard_name or guard_name == "None":
